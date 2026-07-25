@@ -427,8 +427,7 @@ pub fn fetch_kimiwork_quota(timeout: Duration) -> Result<Vec<QuotaSample>> {
     let body = response
         .into_string()
         .context("读取 Kimi Work 配额响应失败")?;
-    let json: Value =
-        serde_json::from_str(&body).context("Kimi Work 配额响应不是预期的 JSON")?;
+    let json: Value = serde_json::from_str(&body).context("Kimi Work 配额响应不是预期的 JSON")?;
     let samples = parse_kimiwork_quota(&json, chrono::Utc::now().timestamp_millis());
     if samples.is_empty() {
         bail!("Kimi Work 配额响应缺少可用窗口");
@@ -1121,7 +1120,10 @@ fn kimi_window_key(entry: &Value) -> &'static str {
 /// 钱包（boosterWallets）键语义不同，先不展示。形状据真机核验（2026-07）。
 fn parse_kimiwork_quota(value: &Value, now: i64) -> Vec<QuotaSample> {
     let mut samples = Vec::new();
-    for (field, key) in [("ratelimitCode5h", "five_hour"), ("ratelimitCode7d", "seven_day")] {
+    for (field, key) in [
+        ("ratelimitCode5h", "five_hour"),
+        ("ratelimitCode7d", "seven_day"),
+    ] {
         let Some(window) = value.get(field) else {
             continue;
         };
@@ -1132,7 +1134,12 @@ fn parse_kimiwork_quota(value: &Value, now: i64) -> Vec<QuotaSample> {
         let Some(ratio) = window.get("ratio").and_then(Value::as_f64) else {
             continue;
         };
-        samples.push(kimiwork_sample(key, ratio, first_time(window, &["resetTime"]), now));
+        samples.push(kimiwork_sample(
+            key,
+            ratio,
+            first_time(window, &["resetTime"]),
+            now,
+        ));
     }
     if let Some(balance) = value.get("subscriptionBalance") {
         if balance.get("feature").and_then(Value::as_str) == Some("FEATURE_OMNI")
