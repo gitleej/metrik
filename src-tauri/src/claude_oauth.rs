@@ -1,4 +1,4 @@
-use crate::domain::QuotaSample;
+use crate::domain::{sane_resets_at_ms, QuotaSample};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -353,9 +353,13 @@ fn samples_from_usage(usage: UsageResponse, now: i64) -> Vec<QuotaSample> {
             let used = window.utilization?;
             Some(QuotaSample {
                 adapter_id: "claude",
-                window_key: key,
+                window_key: key.clone(),
                 remaining_percent: (100.0 - used).clamp(0.0, 100.0),
-                resets_at_ms: window.resets_at.as_deref().and_then(parse_iso8601_ms),
+                resets_at_ms: window
+                    .resets_at
+                    .as_deref()
+                    .and_then(parse_iso8601_ms)
+                    .and_then(|value| sane_resets_at_ms(&key, value, now)),
                 collected_at_ms: now,
                 source_label: SOURCE_LABEL.to_owned(),
                 quality: "official_snapshot",
@@ -456,7 +460,9 @@ mod tests {
             }"#,
         )
         .unwrap();
-        let samples = samples_from_usage(usage, 1);
+        // 采集时刻用真实量级（2026-07-14T00:00Z）：重置时间的合理性校验
+        // 依赖它与重置时刻的相对关系。
+        let samples = samples_from_usage(usage, 1_783_987_200_000);
         assert_eq!(
             samples
                 .iter()
@@ -494,7 +500,7 @@ mod tests {
             }"#,
         )
         .unwrap();
-        let samples = samples_from_usage(usage, 1);
+        let samples = samples_from_usage(usage, 1_783_987_200_000);
         let keys = samples
             .iter()
             .map(|sample| sample.window_key.as_str())
@@ -514,5 +520,20 @@ mod tests {
         assert_eq!(opus.remaining_percent, 70.0);
         assert_eq!(opus.resets_at_ms, parse_iso8601_ms("2026-07-18T21:00:00Z"));
         assert_eq!(samples[3].remaining_percent, 92.5);
+    }
+
+    #[test]
+    fn absurd_resets_at_is_dropped() {
+        // 与 statusLine 钩子同源的哨兵：重置时间未知时后端可能下发远未来
+        // 时间（实测 2030 年），超出窗口语义的一律丢弃，不显示"1331 天后重置"。
+        let usage: UsageResponse = serde_json::from_str(
+            r#"{"five_hour": {"utilization": 42.3, "resets_at": "2030-03-17T07:23:20Z"}}"#,
+        )
+        .unwrap();
+        let samples = samples_from_usage(usage, 1_783_987_200_000);
+        assert_eq!(samples.len(), 1);
+        assert_eq!(samples[0].resets_at_ms, None);
+        // 百分比不受影响，照常展示。
+        assert!((samples[0].remaining_percent - 57.7).abs() < f64::EPSILON);
     }
 }

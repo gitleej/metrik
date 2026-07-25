@@ -7,12 +7,15 @@ use std::path::PathBuf;
 /// 所有已启用 adapter 的 ID，前端 series 与汇总按此顺序输出。
 /// qoder 是配额-only：本地不落可解析的 token 用量（QoderWork agents.db
 /// 字段恒 0），只有官网 Credits 配额来源，没有对应的日志 adapter。
-pub const AGENT_IDS: [&str; 8] = [
+/// kimiwork 同样是配额-only：Kimi Work 桌面端的本地 token 用量在它的
+/// daimon 运行时里（wire.jsonl 与 Kimi 同格式），接入本地解析是后续项。
+pub const AGENT_IDS: [&str; 9] = [
     "codex",
     "claude",
     "zcode",
     "opencode",
     "kimi",
+    "kimiwork",
     "antigravity",
     "workbuddy",
     "qoder",
@@ -120,6 +123,26 @@ pub struct QuotaSample {
     pub collected_at_ms: i64,
     pub source_label: String,
     pub quality: &'static str,
+}
+
+/// 重置时间的合理性校验：实测 Claude Code 在重置时间未知时会下发哨兵值
+/// （1900000000 秒 ≈ 2030 年），直接展示就是"1331 天后重置"。重置时间必然
+/// 落在窗口语义内（5h 窗 ~6h、7d 窗 ~8d、月级窗口 ~35 天），越界一律丢弃
+/// ——宁可不显示倒计时，也不显示错的。
+pub fn sane_resets_at_ms(window_key: &str, resets_at_ms: i64, collected_at_ms: i64) -> Option<i64> {
+    const HOUR_MS: i64 = 3_600_000;
+    const DAY_MS: i64 = 86_400_000;
+    let max_span_ms = if window_key == "five_hour" {
+        6 * HOUR_MS
+    } else if window_key.starts_with("seven_day") {
+        8 * DAY_MS
+    } else {
+        35 * DAY_MS
+    };
+    // 下界放宽 10 分钟：采集时刻与负载内时间戳之间有合理的时钟/排程差。
+    let plausible = resets_at_ms >= collected_at_ms - 10 * 60_000
+        && resets_at_ms <= collected_at_ms + max_span_ms;
+    plausible.then_some(resets_at_ms)
 }
 
 /// Codex 的 primary/secondary 只是槽位，不是窗口语义：套餐不同，同一个槽位

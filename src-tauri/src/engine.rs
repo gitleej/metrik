@@ -167,6 +167,7 @@ pub fn build_snapshot(
             coding_quota::fetch_zcode_quota as fn(StdDuration) -> Result<Vec<QuotaSample>>,
         ),
         ("kimi", coding_quota::fetch_kimi_quota),
+        ("kimiwork", coding_quota::fetch_kimiwork_quota),
         ("qoder", coding_quota::fetch_qoder_quota),
         ("workbuddy", coding_quota::fetch_workbuddy_quota),
     ] {
@@ -1041,6 +1042,8 @@ fn quota_window_label(adapter_id: &str, key: &str) -> String {
         }
         // Claude 套餐外按量付费的已用比例（月度预算）。
         "extra_usage" => "超额用量".into(),
+        // Kimi Work 订阅周期的 OMNI 额度池。
+        "monthly_cycle" => "月度周期".into(),
         other => {
             let model = other.strip_prefix("seven_day_").unwrap_or(other);
             let mut chars = model.chars();

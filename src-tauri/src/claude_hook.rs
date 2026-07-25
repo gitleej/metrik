@@ -1,4 +1,4 @@
-use crate::domain::QuotaSample;
+use crate::domain::{sane_resets_at_ms, QuotaSample};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -380,7 +380,10 @@ impl ClaudeHook {
                 adapter_id: "claude",
                 window_key: key.clone(),
                 remaining_percent: (100.0 - window.used_percentage).clamp(0.0, 100.0),
-                resets_at_ms: window.resets_at.map(|value| (value * 1000.0) as i64),
+                resets_at_ms: window
+                    .resets_at
+                    .map(|value| (value * 1000.0) as i64)
+                    .and_then(|value| sane_resets_at_ms(key, value, file.received_at_ms)),
                 collected_at_ms: file.received_at_ms,
                 source_label: "statusLine 钩子".into(),
                 quality: "official_snapshot",
@@ -553,5 +556,39 @@ mod tests {
         // 缺失文件 → 空，不猜测。
         let empty = ClaudeHook::with_dir(test.path().join("missing"));
         assert!(empty.quota_samples().is_empty());
+    }
+
+    #[test]
+    fn sentinel_resets_at_is_dropped_but_plausible_kept() {
+        let test = TestDirectory::new("sentinel");
+        // Claude Code 在重置时间未知时下发哨兵值（1900000000 秒 ≈ 2030 年），
+        // 展示出来是"1331 天后重置"（用户实测）。超出窗口语义的重置时间丢弃。
+        fs::write(
+            test.path().join(QUOTA_FILE),
+            r#"{"receivedAtMs": 1784938548385,
+                "windows": {
+                    "five_hour": {"usedPercentage": 42.3, "resetsAt": 1900000000},
+                    "seven_day": {"usedPercentage": 18.7, "resetsAt": 1900000000}
+                }}"#,
+        )
+        .unwrap();
+        let hook = ClaudeHook::with_dir(test.path().to_path_buf());
+        let samples = hook.quota_samples();
+        assert_eq!(samples.len(), 2);
+        assert!(samples.iter().all(|sample| sample.resets_at_ms.is_none()));
+
+        // 窗口语义内的重置时间保留：5h 窗 +2 小时、7d 窗 +3 天。
+        fs::write(
+            test.path().join(QUOTA_FILE),
+            r#"{"receivedAtMs": 1784938548385,
+                "windows": {
+                    "five_hour": {"usedPercentage": 42.3, "resetsAt": 1784945748.0},
+                    "seven_day": {"usedPercentage": 18.7, "resetsAt": 1785197748.0}
+                }}"#,
+        )
+        .unwrap();
+        let samples = hook.quota_samples();
+        assert_eq!(samples[0].resets_at_ms, Some(1_784_945_748_000));
+        assert_eq!(samples[1].resets_at_ms, Some(1_785_197_748_000));
     }
 }

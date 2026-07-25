@@ -59,8 +59,10 @@ import {
   closeWindow,
   getAutostart,
   installUpdate,
+  isCompactUserResizing,
   isDesktop,
   isMacPlatform,
+  isStripUserResizing,
   minimizeWindow,
   onScaleFactorChanged,
   onTrayShowExpanded,
@@ -76,6 +78,7 @@ import {
   setNativeTheme,
   setStripScale,
   startCompactResizeScale,
+  startStripResizeScale,
   updateMacStatusItems,
   setWindowGlass,
   setWindowPinned,
@@ -138,6 +141,15 @@ const AGENT_META = {
     label: "Kimi",
     // 品红：与 codex 蓝彻底拉开（原来 #3f74f2 和 ChatGPT 的蓝在图里分不清）。
     accent: "#c6538c",
+    iconSrc: kimiAppIcon,
+    iconClass: "agent-icon--kimi",
+  },
+  kimiwork: {
+    // 配额-only：Kimi Work 桌面端（kimi-desktop）。本地 token 用量在它的
+    // daimon 运行时里（wire.jsonl 与 Kimi 同格式），接入本地解析是后续项。
+    label: "Kimi Work",
+    // 紫罗兰：与 kimi 的品红同族，但偏向紫，与 zcode 的蓝紫也拉开。
+    accent: "#a055d6",
     iconSrc: kimiAppIcon,
     iconClass: "agent-icon--kimi",
   },
@@ -338,6 +350,7 @@ function shortWindowLabel(key) {
   if (key === "seven_day" || key === "secondary") return "7d";
   if (key === "extra_usage") return "超额";
   if (key === "credits") return "额度";
+  if (key === "monthly_cycle") return "月度";
   return key.replace(/^seven_day_/, "").slice(0, 4);
 }
 
@@ -985,6 +998,7 @@ function StripBar({
   onExpand,
   availableUpdate,
   onOpenUpdate,
+  onStripScaleDragged,
 }) {
   // 用户自选的 agent 一律占格；没有官方配额数据的显示 "--"，不伪造数字。
   const cells = agents.map((agentId) => ({
@@ -1005,6 +1019,9 @@ function StripBar({
     let timer = null;
     const fit = () => {
       timer = null;
+      // 用户拖主轴＝等比缩放的手势期间不弹回（startStripResizeScale 会收敛
+      // 到等比尺寸）；副轴-only 拖拽不标记，量出偏差立即弹回设计常量。
+      if (isStripUserResizing()) return;
       const isVertical = shell.classList.contains("strip-shell--vertical");
       if (isVertical) {
         const targetHeight = measureStripVerticalContent(shell);
@@ -1030,16 +1047,42 @@ function StripBar({
       timer = window.setTimeout(fit, 60);
     };
     schedule();
+    // webfont 换字可能发生在 60ms 首次 fit 之后（没有触发器补测就会留下
+    // 测量空窗，竖条底部按钮被裁）：字体就绪补测一次，再兜底一个 450ms
+    // 的二次测量。
+    let disposed = false;
+    document.fonts?.ready?.then(() => {
+      if (!disposed) schedule();
+    });
+    const lateTimer = window.setTimeout(schedule, 450);
     if (typeof ResizeObserver === "undefined") {
-      return () => window.clearTimeout(timer);
+      return () => {
+        disposed = true;
+        window.clearTimeout(timer);
+        window.clearTimeout(lateTimer);
+      };
     }
     const observer = new ResizeObserver(schedule);
     observer.observe(shell);
     return () => {
+      disposed = true;
       window.clearTimeout(timer);
+      window.clearTimeout(lateTimer);
       observer.disconnect();
     };
   });
+  // 拖窗口边缘 → 缩放系数（windowClient 负责去抖、归一化与窗口回弹）；
+  // 系数回写根状态，设置页的滑杆随之同步（持久化在拖拽路径内部已完成）。
+  useEffect(() => {
+    if (!isDesktop()) return undefined;
+    let cancel = null;
+    startStripResizeScale(onStripScaleDragged).then((fn) => {
+      cancel = fn;
+    });
+    return () => {
+      cancel?.();
+    };
+  }, [onStripScaleDragged]);
   return (
     <main
       ref={shellRef}
@@ -1198,15 +1241,17 @@ function CompactWidget({
   const comparisonIsLower = snapshot.comparisonPercent < -0.5;
   const ComparisonArrow = comparisonIsLower ? ArrowDown : ArrowUp;
   const shellRef = useRef(null);
-  // 宽度失配自愈的重试计数：跨屏/DPI 变化时清零重试（双屏场景下上限 3 次
-  // 在旧屏耗尽后，新屏就没机会自愈了）。重应用本身由根组件的
-  // reassertCompactSize 订阅负责，这里只负责让自愈资格恢复。
-  const desyncAttemptsRef = useRef(0);
+  // 宽度失配自愈的节流时间戳：失配不消失时观察器会一直触发，没有节流会
+  // 每 120ms 整窗重应用一次；距上次不足 2s 不再重复愈（失配消失即止），
+  // 替代旧的 3 次终身上限——上限烧完后失配就永远留着了。跨屏/DPI 变化时
+  // 清零，让新显示器上的自愈立即恢复资格（双屏场景下旧屏烧完上限、新屏
+  // 没机会自愈的坑）。重应用本身由根组件的 reassertCompactSize 订阅负责。
+  const lastDesyncHealRef = useRef(0);
   useEffect(() => {
     if (!isDesktop()) return undefined;
     let cancel = null;
     onScaleFactorChanged(() => {
-      desyncAttemptsRef.current = 0;
+      lastDesyncHealRef.current = 0;
     }).then((fn) => {
       cancel = fn;
     });
@@ -1227,10 +1272,13 @@ function CompactWidget({
     };
   }, [onUiScaleDragged]);
   // 一个观察器承担两条自愈：
-  // 1) 宽度失配（zoom×物理尺寸失配，视口 < 320，右侧被裁）→ 整窗重应用（≤3 次）；
+  // 1) 宽度失配（zoom×物理尺寸失配，视口 < 320，右侧被裁）→ 整窗重应用
+  //    （节流到 2s 一次，失配消失即止）；
   // 2) Agent 行数变化 → 窗口高度跟随内容（1-2 行回 320，更多行加高，
   //    工作区装不下的部分由列表内部滚动承担）。行数变化不改外壳尺寸，
   //    ResizeObserver 感知不到，所以每次渲染后再主动复核一次。
+  // 用户拖拽＝等比缩放的手势期间（isCompactUserResizing）两条都不介入：
+  // 这里 120ms 的自愈比拖拽缩放的 260ms 去抖跑得快，不回避会把拖拽回弹。
   useEffect(() => {
     if (!isDesktop()) return undefined;
     const shell = shellRef.current;
@@ -1238,18 +1286,19 @@ function CompactWidget({
     let timer = null;
     const check = () => {
       timer = null;
+      if (isCompactUserResizing()) return;
       const rect = shell.getBoundingClientRect();
       // 宽度失配（zoom×物理尺寸失配，视口 < 320，右侧被裁）是 Windows 单窗口
       // 变形独有的问题；macOS 面板没有 zoom，不会失配。
       const widthDesynced =
         shell.scrollWidth > shell.clientWidth + 1 || rect.width > window.innerWidth + 1;
       if (!IS_MAC && widthDesynced) {
-        if (desyncAttemptsRef.current >= 3) return;
-        desyncAttemptsRef.current += 1;
+        const now = Date.now();
+        if (now - lastDesyncHealRef.current < 2000) return;
+        lastDesyncHealRef.current = now;
         runWindowAction(() => applyWindowMode("compact"));
         return;
       }
-      desyncAttemptsRef.current = 0;
       const list = shell.querySelector(".widget-agent-list");
       if (!list) return;
       // 内容自然高 = 实际行高之和（getBoundingClientRect，与窗口大小无关）。
@@ -2083,7 +2132,7 @@ function AppearanceCard({ theme, onThemeChange, glassAlpha, onGlassAlpha, uiScal
       {!IS_MAC && (
         <SliderRow
           label="胶囊条缩放"
-          hint="等比缩放胶囊条，与小组件互不影响；下次进入时生效。"
+          hint="等比缩放胶囊条，也可直接拖胶囊条边缘调整；与小组件互不影响，滑杆改动下次进入时生效。"
           min={UI_SCALE_RANGE.min * 100}
           max={UI_SCALE_RANGE.max * 100}
           step={5}
@@ -3768,6 +3817,7 @@ export function App() {
         onExpand={() => handleWindowMode("expanded")}
         availableUpdate={availableUpdate}
         onOpenUpdate={handleOpenUpdate}
+        onStripScaleDragged={setStripScaleState}
       />
     );
   }
