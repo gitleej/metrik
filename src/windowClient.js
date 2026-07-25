@@ -691,28 +691,56 @@ async function resizeMacosPanel({ width, height }) {
   await invoke("resize_macos_panel", { width, height }).catch(() => {});
 }
 
-/// 卡片任意边/角拖拽 → 等比缩放系数：原生无边框窗口无法禁用单边拖拽，所以
-/// 让任意边拖拽都产生"对角拖"的等比结果——新尺寸偏离期望值（宽 = 320×系数、
-/// 高 = 内容×系数）超过 2 物理像素时，把偏离轴映射回 uiScale（宽度优先，
-/// 其次高度），内容 zoom 跟随、窗口回弹到等比尺寸，卡片永远不会被拉变形。
-/// 与设置页滑杆共用同一持久化与归一化路径。
+/// 角拖的锚点是"对角"：被拖的角动、对角不动。原生 resize 期间 Windows 自己
+/// 保持对角固定，但程序性 setSize 只保左上角——从左/上侧拖过的窗口会跟着
+/// "走路"。按手势起点矩形与拖后矩形推断固定的边，把窗口贴回锚点。
+async function restoreDragAnchor(api, appWindow, gesture, dragged, applied) {
+  if (!gesture?.pos) return;
+  const pos = await appWindow.outerPosition().catch(() => null);
+  if (!pos) return;
+  const preRight = gesture.pos.x + gesture.size.width;
+  const preBottom = gesture.pos.y + gesture.size.height;
+  const fixedLeft = Math.abs(pos.x - gesture.pos.x) <= 4;
+  const fixedRight = Math.abs(pos.x + dragged.width - preRight) <= 4;
+  const fixedTop = Math.abs(pos.y - gesture.pos.y) <= 4;
+  const fixedBottom = Math.abs(pos.y + dragged.height - preBottom) <= 4;
+  // 推断不出固定边时退回保左上角（等效右下角锚点）。
+  const x = fixedLeft || !fixedRight ? gesture.pos.x : preRight - applied.width;
+  const y = fixedTop || !fixedBottom ? gesture.pos.y : preBottom - applied.height;
+  if (Math.abs(pos.x - x) <= 2 && Math.abs(pos.y - y) <= 2) return;
+  await appWindow
+    .setPosition(new api.PhysicalPosition(Math.round(x), Math.round(y)))
+    .catch(() => {});
+}
+
+/// 卡片四角拖拽 → 等比缩放系数：只有角拖（两轴同时偏离期望值：宽 = 320×系数、
+/// 高 = 内容×系数，各超 2 物理像素）才映射回 uiScale——取相对偏离更大的轴，
+/// 向内/向外方向一致；单边拖拽一律回弹到等比尺寸，卡片只在四个角上收放。
+/// 内容 zoom 跟随，与设置页滑杆共用同一持久化与归一化路径。
 /// 程序性 setSize 也会触发 onResized：与刚下发的物理尺寸一致（±2 物理像素）
 /// 的回声直接忽略。用户拖出尺寸差的瞬间要同步记下 compactUserResizeUntil——
 /// 内容自愈观察器（120ms）比去抖（260ms）跑得快，不标记就会把拖拽中途回弹；
 /// 手势彻底结束（程序化回弹完成）后再留 400ms 尾巴，观察器才恢复介入。
-/// 去抖到拖拽停止后再应用，避免拖动过程中反复 setZoom。
+/// 去抖到拖拽停止后再应用，避免拖动过程中反复 setZoom。角拖会移动原点
+/// （从左/上侧拖时），按手势起点快照把对角锚点贴回去，窗口不"走路"。
 async function startCompactResizeScale(onScale) {
   if (!isDesktop() || isMacPlatform()) return () => {};
   const api = await windowApi();
   if (!api) return () => {};
   const appWindow = api.getCurrentWindow();
   let timer = null;
+  let gesture = null;
+  let lastPos = await appWindow.outerPosition().catch(() => null);
+  const unlistenMovedPromise = appWindow.onMoved(({ payload }) => {
+    lastPos = payload;
+  });
   const unlistenPromise = appWindow.onResized(({ payload }) => {
     // 只认卡片形态下的 resize；形态切换（→expanded/strip）的程序性调整
     // 尺寸剧变，绝不能映射成缩放系数。
     if (activeWindowMode !== "compact") return;
     // 与刚下发尺寸不符的 resize 是用户拖出来的：立即标记拖拽中（同步，
-    // 在去抖之外），内容自愈观察器整个手势期间都不介入。
+    // 在去抖之外），内容自愈观察器整个手势期间都不介入；并给手势起点
+    // 快照（位置 + 期望尺寸），角拖结束后靠它贴回对角锚点。
     const expected = expectedPhysical.compact;
     if (
       expected &&
@@ -720,59 +748,85 @@ async function startCompactResizeScale(onScale) {
         Math.abs(payload.height - expected.height) > 2)
     ) {
       compactUserResizeUntil = Date.now() + USER_RESIZE_MARK_MS;
+      if (!gesture) {
+        gesture = {
+          pos: lastPos ? { x: lastPos.x, y: lastPos.y } : null,
+          size: { width: expected.width, height: expected.height },
+        };
+      }
     }
     window.clearTimeout(timer);
     timer = window.setTimeout(async () => {
       // 去抖窗口期内可能已切走形态，再核对一次。
       if (activeWindowMode !== "compact") return;
+      const anchor = gesture;
+      gesture = null;
       const factor = await appWindow.scaleFactor().catch(() => 1);
       const size = WINDOW_SIZES.compact;
       const contentHeight = compactContentHeight(size.height);
       const expectedWidth = Math.round(size.width * uiScale * factor);
       const expectedHeight = Math.round(contentHeight * uiScale * factor);
-      // 宽度偏离优先取宽比，其次高比；两轴都符合期望 = 程序性回声，忽略。
-      let ratio;
-      if (Math.abs(payload.width - expectedWidth) > 2) {
-        ratio = payload.width / factor / size.width;
-      } else if (Math.abs(payload.height - expectedHeight) > 2) {
-        ratio = payload.height / factor / contentHeight;
-      } else {
-        return;
+      const widthDiverged = Math.abs(payload.width - expectedWidth) > 2;
+      const heightDiverged = Math.abs(payload.height - expectedHeight) > 2;
+      // 两轴都符合期望 = 程序性回声，忽略。
+      if (!widthDiverged && !heightDiverged) return;
+      let changed = false;
+      // 角拖（两轴同时偏离）才缩放：取相对偏离更大的轴；单边拖拽只回弹。
+      if (widthDiverged && heightDiverged) {
+        const ratioW = payload.width / factor / size.width;
+        const ratioH = payload.height / factor / contentHeight;
+        const next = normalizeUiScale(
+          Math.abs(ratioW - 1) >= Math.abs(ratioH - 1) ? ratioW : ratioH,
+        );
+        if (Math.abs(next - uiScale) >= 0.01) {
+          setWindowUiScale(next);
+          await applyWebviewZoom(next);
+          changed = true;
+        }
       }
-      const next = normalizeUiScale(ratio);
-      if (Math.abs(next - uiScale) < 0.01) return;
-      setWindowUiScale(next);
-      await applyWebviewZoom(next);
-      // 两轴都按归一化后的系数回弹到等比尺寸（钳到 0.75–2.0 的边界会体现在
-      // 这里）；高度先沿用缓存值，zoom 变化触发的内容自愈随后精修。
+      // 两轴都按（可能更新后的）系数回弹到等比尺寸：角拖生效是缩放落地，
+      // 单边拖拽就是原样弹回；钳到 0.75–2.0 边界也在这里体现。
       const physical = await scaledPhysicalSize(api, appWindow, size.width, contentHeight);
       expectedPhysical.compact = physical;
       await appWindow.setSize(physical).catch((error) => {
         console.warn("Unable to apply the compact window size.", error);
       });
+      // 最小尺寸跟随新系数（原来要等下次进入形态才更新）。
+      await appWindow
+        .setMinSize(new api.LogicalSize(size.minWidth * uiScale, size.minHeight * uiScale))
+        .catch(() => {});
+      await restoreDragAnchor(api, appWindow, anchor, payload, physical);
       // 程序化回弹落地后再留一段尾巴，自愈观察器不在手势中途介入。
       compactUserResizeUntil = Date.now() + USER_RESIZE_TAIL_MS;
-      onScale?.(next);
+      if (changed) onScale?.(readUiScale());
     }, 260);
   });
   return async () => {
     window.clearTimeout(timer);
     const unlisten = await unlistenPromise.catch(() => null);
     unlisten?.();
+    const unlistenMoved = await unlistenMovedPromise.catch(() => null);
+    unlistenMoved?.();
   };
 }
 
-/// 胶囊条拖拽 → 等比缩放系数：与卡片同一思路。主轴（竖条 = 高、横条 = 宽）
-/// 偏离期望值（内容×系数）超过 2 物理像素时映射回 stripScale，内容 zoom
-/// 跟随、窗口回弹到等比尺寸；副轴-only 拖拽不处理，由 StripBar 的内容测量
-/// 观察器弹回设计常量（它不标记拖拽中，所以观察器会立即介入）。与设置页
-/// 滑杆共用同一持久化与归一化路径。
+/// 胶囊条拖拽 → 等比缩放系数：与卡片同一思路，但主轴（竖条 = 高、横条 = 宽）
+/// 上的边/角拖拽都生效——条太窄，角不好捏，主轴边就是天然的把手。主轴偏离
+/// 期望值（内容×系数）超过 2 物理像素时映射回 stripScale，内容 zoom 跟随、
+/// 窗口回弹到等比尺寸；副轴-only 拖拽不处理，由 StripBar 的内容测量观察器
+/// 弹回设计常量（它不标记拖拽中，所以观察器会立即介入）。与设置页滑杆共用
+/// 同一持久化与归一化路径。从上/左侧拖会移动原点，按手势起点快照贴回锚点。
 async function startStripResizeScale(onScale) {
   if (!isDesktop() || isMacPlatform()) return () => {};
   const api = await windowApi();
   if (!api) return () => {};
   const appWindow = api.getCurrentWindow();
   let timer = null;
+  let gesture = null;
+  let lastPos = await appWindow.outerPosition().catch(() => null);
+  const unlistenMovedPromise = appWindow.onMoved(({ payload }) => {
+    lastPos = payload;
+  });
   const unlistenPromise = appWindow.onResized(({ payload }) => {
     if (activeWindowMode !== "strip") return;
     // 只有主轴被拖才标记拖拽中：副轴-only 拖拽要留给内容测量观察器立即
@@ -783,12 +837,22 @@ async function startStripResizeScale(onScale) {
       const mainDiff = vertical
         ? Math.abs(payload.height - expected.height)
         : Math.abs(payload.width - expected.width);
-      if (mainDiff > 2) stripUserResizeUntil = Date.now() + USER_RESIZE_MARK_MS;
+      if (mainDiff > 2) {
+        stripUserResizeUntil = Date.now() + USER_RESIZE_MARK_MS;
+        if (!gesture) {
+          gesture = {
+            pos: lastPos ? { x: lastPos.x, y: lastPos.y } : null,
+            size: { width: expected.width, height: expected.height },
+          };
+        }
+      }
     }
     window.clearTimeout(timer);
     timer = window.setTimeout(async () => {
       // 去抖窗口期内可能已切走形态，再核对一次。
       if (activeWindowMode !== "strip") return;
+      const anchor = gesture;
+      gesture = null;
       const factor = await appWindow.scaleFactor().catch(() => 1);
       // 方向从当前窗口尺寸推断（竖条恒窄高、横条恒宽矮，与 rememberStripSize
       // 一致）；尺寸记录缺失时用 payload 宽高比兜底。
@@ -808,26 +872,37 @@ async function startStripResizeScale(onScale) {
       // 副轴-only 拖拽：忽略，由内容测量观察器弹回设计常量。
       if (Math.abs(payloadMain - expectedMain) <= 2) return;
       const next = normalizeUiScale(payloadMain / factor / cssMain);
-      if (Math.abs(next - stripScale) < 0.01) return;
-      setStripScale(next);
-      await applyWebviewZoom(next);
-      // 两轴都按归一化后的系数回弹到内容等比尺寸。
+      let changed = false;
+      if (Math.abs(next - stripScale) >= 0.01) {
+        setStripScale(next);
+        await applyWebviewZoom(next);
+        changed = true;
+      }
+      // 两轴都按（可能更新后的）系数回弹到内容等比尺寸。
       const physical = new api.PhysicalSize(
-        Math.round(css.width * next * factor),
-        Math.round(css.height * next * factor),
+        Math.round(css.width * stripScale * factor),
+        Math.round(css.height * stripScale * factor),
       );
       expectedPhysical.strip = physical;
       await appWindow.setSize(physical).catch((error) => {
         console.warn("Unable to apply the strip window size.", error);
       });
+      await appWindow
+        .setMinSize(
+          new api.LogicalSize(constants.minWidth * stripScale, constants.minHeight * stripScale),
+        )
+        .catch(() => {});
+      await restoreDragAnchor(api, appWindow, anchor, payload, physical);
       stripUserResizeUntil = Date.now() + USER_RESIZE_TAIL_MS;
-      onScale?.(next);
+      if (changed) onScale?.(readStripScale());
     }, 260);
   });
   return async () => {
     window.clearTimeout(timer);
     const unlisten = await unlistenPromise.catch(() => null);
     unlisten?.();
+    const unlistenMoved = await unlistenMovedPromise.catch(() => null);
+    unlistenMoved?.();
   };
 }
 
