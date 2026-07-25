@@ -59,10 +59,8 @@ import {
   closeWindow,
   getAutostart,
   installUpdate,
-  isCompactUserResizing,
   isDesktop,
   isMacPlatform,
-  isStripUserResizing,
   minimizeWindow,
   onScaleFactorChanged,
   onTrayShowExpanded,
@@ -77,8 +75,6 @@ import {
   setAutostart,
   setNativeTheme,
   setStripScale,
-  startCompactResizeScale,
-  startStripResizeScale,
   updateMacStatusItems,
   setWindowGlass,
   setWindowPinned,
@@ -998,7 +994,6 @@ function StripBar({
   onExpand,
   availableUpdate,
   onOpenUpdate,
-  onStripScaleDragged,
 }) {
   // 用户自选的 agent 一律占格；没有官方配额数据的显示 "--"，不伪造数字。
   const cells = agents.map((agentId) => ({
@@ -1019,9 +1014,6 @@ function StripBar({
     let timer = null;
     const fit = () => {
       timer = null;
-      // 用户拖主轴＝等比缩放的手势期间不弹回（startStripResizeScale 会收敛
-      // 到等比尺寸）；副轴-only 拖拽不标记，量出偏差立即弹回设计常量。
-      if (isStripUserResizing()) return;
       const isVertical = shell.classList.contains("strip-shell--vertical");
       if (isVertical) {
         const targetHeight = measureStripVerticalContent(shell);
@@ -1071,18 +1063,6 @@ function StripBar({
       observer.disconnect();
     };
   });
-  // 拖窗口边缘 → 缩放系数（windowClient 负责去抖、归一化与窗口回弹）；
-  // 系数回写根状态，设置页的滑杆随之同步（持久化在拖拽路径内部已完成）。
-  useEffect(() => {
-    if (!isDesktop()) return undefined;
-    let cancel = null;
-    startStripResizeScale(onStripScaleDragged).then((fn) => {
-      cancel = fn;
-    });
-    return () => {
-      cancel?.();
-    };
-  }, [onStripScaleDragged]);
   return (
     <main
       ref={shellRef}
@@ -1229,7 +1209,6 @@ function CompactWidget({
   onToggleTransparent,
   onExpand,
   onRefresh,
-  onUiScaleDragged,
   quotaAgent,
   onCycleQuotaAgent,
   widgetAgents,
@@ -1259,26 +1238,12 @@ function CompactWidget({
       cancel?.();
     };
   }, []);
-  // 拖窗口宽度 → 缩放系数（windowClient 负责去抖、归一化与窗口回弹）；
-  // 系数回写根状态，设置页的滑杆随之同步。
-  useEffect(() => {
-    if (!isDesktop()) return undefined;
-    let cancel = null;
-    startCompactResizeScale(onUiScaleDragged).then((fn) => {
-      cancel = fn;
-    });
-    return () => {
-      cancel?.();
-    };
-  }, [onUiScaleDragged]);
   // 一个观察器承担两条自愈：
   // 1) 宽度失配（zoom×物理尺寸失配，视口 < 320，右侧被裁）→ 整窗重应用
   //    （节流到 2s 一次，失配消失即止）；
   // 2) Agent 行数变化 → 窗口高度跟随内容（1-2 行回 320，更多行加高，
   //    工作区装不下的部分由列表内部滚动承担）。行数变化不改外壳尺寸，
   //    ResizeObserver 感知不到，所以每次渲染后再主动复核一次。
-  // 用户拖拽＝等比缩放的手势期间（isCompactUserResizing）两条都不介入：
-  // 这里 120ms 的自愈比拖拽缩放的 260ms 去抖跑得快，不回避会把拖拽回弹。
   useEffect(() => {
     if (!isDesktop()) return undefined;
     const shell = shellRef.current;
@@ -1286,7 +1251,6 @@ function CompactWidget({
     let timer = null;
     const check = () => {
       timer = null;
-      if (isCompactUserResizing()) return;
       const rect = shell.getBoundingClientRect();
       // 宽度失配（zoom×物理尺寸失配，视口 < 320，右侧被裁）是 Windows 单窗口
       // 变形独有的问题；macOS 面板没有 zoom，不会失配。
@@ -2121,7 +2085,7 @@ function AppearanceCard({ theme, onThemeChange, glassAlpha, onGlassAlpha, uiScal
         label="小组件缩放"
         hint={IS_MAC
           ? "等比缩放菜单栏面板，下次打开时生效。"
-          : "等比缩放桌面小插件，也可直接拖卡片四角调整；滑杆改动下次进入时生效。"}
+          : "等比缩放桌面小插件；滑杆改动下次进入时生效。"}
         min={UI_SCALE_RANGE.min * 100}
         max={UI_SCALE_RANGE.max * 100}
         step={5}
@@ -2132,7 +2096,7 @@ function AppearanceCard({ theme, onThemeChange, glassAlpha, onGlassAlpha, uiScal
       {!IS_MAC && (
         <SliderRow
           label="胶囊条缩放"
-          hint="等比缩放胶囊条，也可直接拖胶囊条边缘调整；与小组件互不影响，滑杆改动下次进入时生效。"
+          hint="等比缩放胶囊条，与小组件互不影响；下次进入时生效。"
           min={UI_SCALE_RANGE.min * 100}
           max={UI_SCALE_RANGE.max * 100}
           step={5}
@@ -3817,7 +3781,6 @@ export function App() {
         onExpand={() => handleWindowMode("expanded")}
         availableUpdate={availableUpdate}
         onOpenUpdate={handleOpenUpdate}
-        onStripScaleDragged={setStripScaleState}
       />
     );
   }
@@ -3840,7 +3803,6 @@ export function App() {
           onToggleTransparent={handleToggleTransparent}
           onExpand={handleWindowMode}
           onRefresh={handleForceRefresh}
-          onUiScaleDragged={setUiScale}
           quotaAgent={activeQuotaAgent}
           onCycleQuotaAgent={handleCycleQuotaAgent}
           widgetAgents={widgetAgents}
