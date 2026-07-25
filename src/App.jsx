@@ -2121,7 +2121,7 @@ function AppearanceCard({ theme, onThemeChange, glassAlpha, onGlassAlpha, uiScal
         label="小组件缩放"
         hint={IS_MAC
           ? "等比缩放菜单栏面板，下次打开时生效。"
-          : "等比缩放桌面小插件，也可直接拖卡片边缘调整；滑杆改动下次进入时生效。"}
+          : "等比缩放桌面小插件，也可直接拖卡片四角调整；滑杆改动下次进入时生效。"}
         min={UI_SCALE_RANGE.min * 100}
         max={UI_SCALE_RANGE.max * 100}
         step={5}
