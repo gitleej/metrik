@@ -36,6 +36,16 @@
 //! `QoderUsageFetcher.swift`）的一致行为。cookie 只认环境变量
 //! `QODER_COOKIE`/`METRIK_QODER_COOKIE`（浏览器 dashboard 抓取后由用户主动
 //! 提供），`QODER_SITE=cn|global` 指定站点，缺省时国内站优先逐个尝试。
+//!
+//! Kimi Work（kimi-desktop 桌面 Agent）：**已按真机核验**（2026-07，国内账号）。
+//! 桌面端把 kimi.com 的 Web 凭据明文存在 userData 目录——Windows 是
+//! `%APPDATA%/kimi-desktop/bridge-store/token-store.json`，daimon 的
+//! `config.json` 里也镜像了一份。配额走 connect-RPC：POST
+//! `www.kimi.com/apiv2/kimi.gateway.membership.v2.MembershipService/GetSubscriptionStats`，
+//! 空 JSON body + Bearer 即通（实测 x-msh-* 头不是必需的）。响应里
+//! `ratelimitCode5h/7d` 是滚动限流窗，`subscriptionBalance`（FEATURE_OMNI +
+//! SUBSCRIPTION）是订阅周期额度池；礼品余额与加速钱包键语义不同，先不展示。
+//! 令牌由 Kimi Work 自行续期，Metrik 每次拉取都重读文件，过期照实报错。
 
 use crate::domain::QuotaSample;
 use anyhow::{anyhow, bail, Context, Result};
@@ -54,6 +64,11 @@ const GLM_ZAI_URL: &str = "https://api.z.ai/api/monitor/usage/quota/limit";
 // `authentication.method` 回 METHOD_ACCESS_TOKEN），也认控制台 key；开放平台
 // key 不是这套。
 const KIMI_USAGE_URL: &str = "https://api.kimi.com/coding/v1/usages";
+// Kimi Work 订阅配额端点（connect-RPC）：空 JSON body + Bearer 即通，实测
+// x-msh-* 头非必需（2026-07 真机核验）。5h/7d 滚动窗与订阅周期额度池都在
+// GetSubscriptionStats 的响应里。
+const KIMIWORK_STATS_URL: &str =
+    "https://www.kimi.com/apiv2/kimi.gateway.membership.v2.MembershipService/GetSubscriptionStats";
 
 // ── 拉取入口（供 engine 层带缓存调用） ─────────────────────────
 
@@ -389,6 +404,33 @@ pub fn fetch_kimi_quota(timeout: Duration) -> Result<Vec<QuotaSample>> {
     let samples = parse_kimi_quota(&json);
     if samples.is_empty() {
         bail!("Kimi 配额响应缺少可用窗口");
+    }
+    Ok(samples)
+}
+
+/// Kimi Work（kimi-desktop 桌面 Agent）的官方配额：5h/7d 滚动限流窗外加
+/// 订阅周期的 OMNI 额度池。凭据是桌面端明文存的 kimi.com Web access_token，
+/// 只读不刷新（续期是 Kimi Work 自己的事）；过期按凭据失效如实报错。
+pub fn fetch_kimiwork_quota(timeout: Duration) -> Result<Vec<QuotaSample>> {
+    let token = resolve_kimiwork_credential().context(
+        "未找到 Kimi Work 的凭据（kimi-desktop 的 bridge-store/token-store.json，需先登录 Kimi Work）",
+    )?;
+    let agent = ureq::AgentBuilder::new().timeout(timeout).build();
+    let response = agent
+        .post(KIMIWORK_STATS_URL)
+        .set("Authorization", &format!("Bearer {token}"))
+        .set("Content-Type", "application/json")
+        .set("Accept", "application/json")
+        // connect-RPC 的 JSON 模式：空对象 body。
+        .send_string("{}")
+        .map_err(|error| map_ureq_error("Kimi Work", error))?;
+    let body = response
+        .into_string()
+        .context("读取 Kimi Work 配额响应失败")?;
+    let json: Value = serde_json::from_str(&body).context("Kimi Work 配额响应不是预期的 JSON")?;
+    let samples = parse_kimiwork_quota(&json, chrono::Utc::now().timestamp_millis());
+    if samples.is_empty() {
+        bail!("Kimi Work 配额响应缺少可用窗口");
     }
     Ok(samples)
 }
@@ -786,6 +828,41 @@ fn kimi_oauth_paths() -> Vec<PathBuf> {
         .collect()
 }
 
+/// Kimi Work（kimi-desktop）的凭据落点：Electron userData 目录（Windows 是
+/// %APPDATA%，macOS 是 ~/Library/Application Support）下，bridge-store 的
+/// token-store.json 存 kimi.com Web 令牌（`tokens.access_token`，真机核验
+/// 2026-07），daimon 的 config.json 里也镜像了一份（`credentials.kimiWeb.
+/// accessToken`）。都是明文，符合"只接主动暴露明文凭据"的原则；令牌由
+/// Kimi Work 自行续期，只读不写，每次拉取重读文件。
+fn kimiwork_token_paths() -> Vec<PathBuf> {
+    let Some(config) = dirs::config_dir() else {
+        return Vec::new();
+    };
+    let desktop = config.join("kimi-desktop");
+    vec![
+        desktop.join("bridge-store").join("token-store.json"),
+        desktop
+            .join("daimon-share")
+            .join("daimon")
+            .join("config.json"),
+    ]
+}
+
+fn resolve_kimiwork_credential() -> Option<String> {
+    for path in kimiwork_token_paths() {
+        let Ok(raw) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        // token-store.json 是 snake_case，daimon config.json 是 camelCase。
+        for field in ["access_token", "accessToken"] {
+            if let Some(token) = extract_scalar(&raw, field) {
+                return Some(token);
+            }
+        }
+    }
+    None
+}
+
 #[derive(Deserialize)]
 struct AuthEntry {
     key: Option<String>,
@@ -1034,6 +1111,63 @@ fn kimi_window_key(entry: &Value) -> &'static str {
         }
     }
     "five_hour"
+}
+
+/// Kimi Work：`GetSubscriptionStats` 的 `ratelimitCode5h/7d` 是滚动限流窗
+/// （`ratio` = 已用比例 0–1，`resetTime` = 窗口重置时刻）；`subscriptionBalance`
+/// 里 FEATURE_OMNI + SUBSCRIPTION 那条是订阅周期额度池（`amountUsedRatio` =
+/// 已用比例，`expireTime` = 周期重置/到期）。礼品余额（giftBalances）与加速
+/// 钱包（boosterWallets）键语义不同，先不展示。形状据真机核验（2026-07）。
+fn parse_kimiwork_quota(value: &Value, now: i64) -> Vec<QuotaSample> {
+    let mut samples = Vec::new();
+    for (field, key) in [
+        ("ratelimitCode5h", "five_hour"),
+        ("ratelimitCode7d", "seven_day"),
+    ] {
+        let Some(window) = value.get(field) else {
+            continue;
+        };
+        // enabled=false 的窗口未生效，不展示。
+        if window.get("enabled").and_then(Value::as_bool) == Some(false) {
+            continue;
+        }
+        let Some(ratio) = window.get("ratio").and_then(Value::as_f64) else {
+            continue;
+        };
+        samples.push(kimiwork_sample(
+            key,
+            ratio,
+            first_time(window, &["resetTime"]),
+            now,
+        ));
+    }
+    if let Some(balance) = value.get("subscriptionBalance") {
+        if balance.get("feature").and_then(Value::as_str) == Some("FEATURE_OMNI")
+            && balance.get("type").and_then(Value::as_str) == Some("SUBSCRIPTION")
+        {
+            if let Some(ratio) = balance.get("amountUsedRatio").and_then(Value::as_f64) {
+                samples.push(kimiwork_sample(
+                    "monthly_cycle",
+                    ratio,
+                    first_time(balance, &["expireTime"]),
+                    now,
+                ));
+            }
+        }
+    }
+    samples
+}
+
+fn kimiwork_sample(key: &str, used_ratio: f64, reset: Option<i64>, now: i64) -> QuotaSample {
+    QuotaSample {
+        adapter_id: "kimiwork",
+        window_key: key.to_owned(),
+        remaining_percent: ((1.0 - used_ratio) * 100.0).clamp(0.0, 100.0),
+        resets_at_ms: reset.and_then(|value| crate::domain::sane_resets_at_ms(key, value, now)),
+        collected_at_ms: now,
+        source_label: "Kimi Work 官方配额".into(),
+        quality: "official_live",
+    }
 }
 
 fn first_f64(value: &Value, names: &[&str]) -> Option<f64> {
@@ -1286,6 +1420,89 @@ mod tests {
         let json: Value =
             serde_json::from_str(r#"{"usage": {"limit": "0", "remaining": "0"}}"#).unwrap();
         assert!(parse_kimi_quota(&json).is_empty());
+    }
+
+    /// 真机核验（2026-07，kimi-desktop 国内账号，GetSubscriptionStats）：
+    /// 只把订阅/用户/余额标识换成占位符。ratelimitCode5h/7d 是滚动窗；
+    /// subscriptionBalance 是订阅周期额度池；礼品余额与加速钱包不展示。
+    const KIMIWORK_LIVE_RESPONSE: &str = r#"{
+        "ratelimitCode5h": {"ratio": 0.6108, "enabled": true, "resetTime": "2026-07-25T16:31:18.819233697Z"},
+        "ratelimitCode7d": {"ratio": 0.1222, "enabled": true, "resetTime": "2026-07-31T08:31:18.819233697Z"},
+        "subscriptionBalance": {"id": "test-balance", "feature": "FEATURE_OMNI", "type": "SUBSCRIPTION",
+            "unit": "UNIT_CREDIT", "amountUsedRatio": 0.2194, "kimiCodeUsedRatio": 0.218,
+            "expireTime": "2026-08-17T08:31:19.805580Z"},
+        "giftBalances": [{"id": "test-gift", "feature": "FEATURE_OMNI", "type": "GIFT",
+            "unit": "UNIT_CREDIT", "amountUsedRatio": 0.0439, "expireTime": "2026-12-31T15:59:59Z"}],
+        "boosterWallets": [{"id": "test-wallet", "userId": "test-user", "status": "STATUS_DISABLED"}]
+    }"#;
+
+    #[test]
+    fn kimiwork_quota_reads_the_live_shape() {
+        let json: Value = serde_json::from_str(KIMIWORK_LIVE_RESPONSE).unwrap();
+        let now = chrono::DateTime::parse_from_rfc3339("2026-07-25T15:00:00Z")
+            .unwrap()
+            .timestamp_millis();
+        let samples = parse_kimiwork_quota(&json, now);
+        assert_eq!(samples.len(), 3);
+        assert_eq!(samples[0].window_key, "five_hour");
+        assert!((samples[0].remaining_percent - 38.92).abs() < 0.001);
+        assert_eq!(
+            samples[0].resets_at_ms,
+            chrono::DateTime::parse_from_rfc3339("2026-07-25T16:31:18.819233697Z")
+                .ok()
+                .map(|value| value.timestamp_millis())
+        );
+        assert_eq!(samples[1].window_key, "seven_day");
+        assert!((samples[1].remaining_percent - 87.78).abs() < 0.001);
+        assert_eq!(samples[2].window_key, "monthly_cycle");
+        assert!((samples[2].remaining_percent - 78.06).abs() < 0.001);
+        assert_eq!(
+            samples[2].resets_at_ms,
+            chrono::DateTime::parse_from_rfc3339("2026-08-17T08:31:19.805580Z")
+                .ok()
+                .map(|value| value.timestamp_millis())
+        );
+        assert!(samples
+            .iter()
+            .all(|sample| sample.adapter_id == "kimiwork" && sample.quality == "official_live"));
+    }
+
+    #[test]
+    fn kimiwork_quota_skips_disabled_and_missing_windows() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-07-25T15:00:00Z")
+            .unwrap()
+            .timestamp_millis();
+        // 5h 窗禁用、无订阅余额 → 只剩 7d 一扇（无 resetTime 则为 None）。
+        let json: Value = serde_json::from_str(
+            r#"{"ratelimitCode5h": {"ratio": 0.5, "enabled": false},
+                "ratelimitCode7d": {"ratio": 0.25, "enabled": true}}"#,
+        )
+        .unwrap();
+        let samples = parse_kimiwork_quota(&json, now);
+        assert_eq!(samples.len(), 1);
+        assert_eq!(samples[0].window_key, "seven_day");
+        assert_eq!(samples[0].remaining_percent, 75.0);
+        assert!(samples[0].resets_at_ms.is_none());
+        // 全空 → 空，不编造。
+        let json: Value = serde_json::from_str(r#"{"boosterWallets": []}"#).unwrap();
+        assert!(parse_kimiwork_quota(&json, now).is_empty());
+    }
+
+    /// 打真实 MembershipService 接口的烟测（解析器只能证明"对得上夹具"）。
+    /// 需要本机装了 Kimi Work 并已登录。
+    #[test]
+    #[ignore = "reads the current user's Kimi Work credential and calls the live quota API"]
+    fn live_kimiwork_quota_smoke_test() {
+        let samples = fetch_kimiwork_quota(Duration::from_secs(15)).expect("fetch kimiwork quota");
+        assert!(!samples.is_empty(), "配额响应里没有可用窗口");
+        for sample in &samples {
+            println!(
+                "kimiwork quota: window={} remaining={:.1}% resets_at={:?}",
+                sample.window_key, sample.remaining_percent, sample.resets_at_ms
+            );
+            assert_eq!(sample.adapter_id, "kimiwork");
+            assert!((0.0..=100.0).contains(&sample.remaining_percent));
+        }
     }
 
     #[test]

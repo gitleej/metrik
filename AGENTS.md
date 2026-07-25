@@ -12,6 +12,7 @@ When implementing from a selected generated mock, treat that image as the source
 - The interface should feel Apple-like through restraint, typography, material depth, spacing, and motion; do not imitate Apple branding or proprietary screens.
 - The default desktop form is a compact approximately 380 x 440 widget. Full analytics remain available through a one-click expanded view; pinning above other windows is opt-in, not forced.
 - Gemini CLI is explicitly out of scope. The initial adapters are Codex and Claude Code; future agents must use the adapter contract.
+- Kimi Work (kimi-desktop) is a quota-only provider: official quota comes from the plaintext kimi.com Web token in `kimi-desktop/bridge-store/token-store.json` (mirrored in the daimon `config.json`) via `MembershipService/GetSubscriptionStats`; only the 5h/7d windows and the monthly OMNI subscription cycle are reported — gift balances and booster wallets stay hidden. Parsing the daimon runtime's local wire.jsonl is a deliberate follow-up, and macOS menu-bar specs were not extended (same precedent as workbuddy/qoder).
 - Statistics must distinguish official quota, locally parsed usage, and estimated cost. Never present estimates as official billing.
 - Never synthesize a comparison curve or silently replace a failed desktop read with demo numbers. Missing or stale data must be labeled explicitly.
 - The product is local-first. Multi-device sync is optional and must not upload prompts, conversation text, credentials, or raw tool output.
@@ -24,7 +25,7 @@ When implementing from a selected generated mock, treat that image as the source
 - The strip's window size is derived from the rendered content (measure the main-axis length after layout and resize to fit), never from hand-maintained size constants. Constants may seed the first frame only — they drifted out of sync with the CSS once and clipped the vertical strip's buttons on other DPI/font/scale combinations.
 - The compact widget's primary content is per-agent official quota windows (5h/weekly remaining + reset countdown), not local token summaries; token analytics live in the expanded view. Missing or stale quota stays explicitly labeled.
 - The strip prefers the five-hour window per cell, falling back to the first available ranked window.
-- UI scale is continuous and per-form: compact uses `metrik:uiScale` [0.75–2.0]; the strip has its own `metrik:stripScale` [0.75–2.0]. Both are settings-page sliders that apply on next form entry. The expanded view has no scale setting — its window is freely resizable and webview zoom stays 1.
+- UI scale is continuous and per-form: compact uses `metrik:uiScale` [0.75–2.0]; the strip has its own `metrik:stripScale` [0.75–2.0]. Both are settings-page sliders that apply on next form entry. Both floating forms also support border-drag scaling: dragging any edge or corner of the compact card, or the main axis of the strip, maps to the same scale factor (window snaps back to proportional size; the card can never be stretched out of proportion). The expanded view has no scale setting — its window is freely resizable and webview zoom stays 1.
 - Manual refresh triggers `usage_snapshot` with `force: true`, bypassing quota TTL caches; failure still retains and stale-labels old rows — never clears them.
 
 ## Durable cross-platform development workflow
