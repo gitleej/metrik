@@ -68,6 +68,7 @@ import {
   readStripScale,
   readUiScale,
   reassertCompactSize,
+  reassertStripSize,
   resizeCompactWindow,
   resizeMacosPanel,
   resizeStripWindow,
@@ -806,10 +807,15 @@ function Inspector({ snapshot, selectedAgent, onSelectAgent, onOpenSources }) {
   );
 }
 
+let windowActionQueue = Promise.resolve();
+
 function runWindowAction(action) {
-  action().catch((error) => {
+  // hide/move/zoom/resize/show 是一条事务；并发执行时旧屏幕 factor 算出的迟到
+  // resize 会覆盖新屏幕上的修正。统一排队，失败后也让后续操作继续。
+  windowActionQueue = windowActionQueue.then(action).catch((error) => {
     console.warn("Unable to update the desktop window.", error);
   });
+  return windowActionQueue;
 }
 
 /// 标题栏的主题快捷键：单击在亮/暗之间切换，右键（或长按）弹出含「自动」的
@@ -3415,17 +3421,6 @@ export function App() {
     }
   }, []);
 
-  // DPI 变化（跨屏拖动、系统改缩放）后重算悬浮形态物理尺寸，保持 zoom 与
-  // 窗口尺寸一致；strip 由内容测量观察器自愈，expanded 可缩放不干预。
-  useEffect(() => {
-    const stopPromise = onScaleFactorChanged(() => {
-      if (viewModeRef.current === "compact") runWindowAction(() => reassertCompactSize());
-    });
-    return () => {
-      stopPromise.then((stop) => stop?.());
-    };
-  }, []);
-
   const pinnedRef = useRef(pinned);
   pinnedRef.current = pinned;
   const viewModeRef = useRef(viewMode);
@@ -3538,6 +3533,36 @@ export function App() {
   const [stripScale, setStripScaleState] = useState(() => readStripScale());
   const handleStripScale = useCallback((next) => {
     setStripScaleState(setStripScale(next));
+  }, []);
+  const stripLayoutRef = useRef({
+    orientation: stripOrientation,
+    count: stripAgents.length,
+  });
+  stripLayoutRef.current = {
+    orientation: stripOrientation,
+    count: stripAgents.length,
+  };
+
+  // DPI 事件的 payload 是 Windows 已确认的新 factor，直接用它重算；compact
+  // 与 strip 都不能只靠 DOM 自愈，因为被裁的可能是 WebView 外层 HWND。
+  useEffect(() => {
+    const stopPromise = onScaleFactorChanged(({ scaleFactor } = {}) => {
+      if (viewModeRef.current === "compact") {
+        runWindowAction(() => reassertCompactSize(scaleFactor));
+        return;
+      }
+      if (viewModeRef.current === "strip") {
+        const layout = stripLayoutRef.current;
+        const estimate = stripWindowSize(layout.orientation, layout.count);
+        const content = stripContentSize(layout.orientation, estimate);
+        runWindowAction(() =>
+          reassertStripSize({ ...content, scaleFactor }),
+        );
+      }
+    });
+    return () => {
+      stopPromise.then((stop) => stop?.());
+    };
   }, []);
 
   // macOS 菜单栏与紧凑小组件共用 widgetAgents：用户勾选哪些 Agent，状态栏就
