@@ -1266,6 +1266,17 @@ pub fn run() {
                     emergency_database_path()
                 }
             };
+            // 旧版本写坏的 statusLine 只有用户手动关一次开关才会重写，而界面显示
+            // 的是「已安装」，没人会想到去切。启动时静默补一次，坏在旧版本上的人
+            // 升级即恢复。不属于 Metrik 的 statusLine 不会被碰。
+            match claude_hook::ClaudeHook::detected().repair() {
+                Ok(true) => eprintln!("Metrik repaired a stale Claude Code statusLine hook"),
+                Ok(false) => {}
+                Err(error) => eprintln!(
+                    "Metrik could not check the Claude Code statusLine hook ({error:#})"
+                ),
+            }
+
             app.manage(AppState {
                 database_path,
                 scan_gate: Arc::new(Mutex::new(())),
