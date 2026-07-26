@@ -12,8 +12,30 @@ Thumbs.db
 .dispatch/
 .agents/
 .codex/
+.claude/
+.maintainer/
+.worktrees/
+.codex-release-*/
 .playwright-cli/
 output/
+
+# 本机配置与凭据
+.env
+.env.*
+!.env.example
+*.pem
+*.p12
+*.pfx
+*.jks
+*.keystore
+
+# 本地数据库的常见扩展名
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.db
+*.db-shm
+*.db-wal
 
 # 更新包签名私钥：丢失或泄露都会让更新链路失效，绝不入库
 *.key

@@ -12,8 +12,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # 版本号是两台开发机共享的全局资源（见 AGENTS.md 的发版协议）。两边曾各自
-  # 把 0.6.6 提成 0.6.7，先打上 tag 的那侧胜出，另一侧的发版提交只能作废。
+  # 五个版本文件必须一致；同一个版本 tag 不能被并行的发版分支重复占用。
   version-guard:
     runs-on: ubuntu-latest
     steps:
