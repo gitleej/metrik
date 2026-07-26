@@ -263,11 +263,42 @@ impl ClaudeHook {
         }
     }
 
+    /// `render_script` 的逆操作：从已安装的脚本里回读被串联的原命令。
+    ///
+    /// 备份文件是用户可见的普通文件，会被清理 `.claude`、同步工具或杀软
+    /// 删掉。备份没了而 statusLine 仍是我们的时，重装若把 delegate 当成空，
+    /// 用户原有的 statusLine 就永久消失（备份已不在，卸载也还原不回来）。
+    /// 脚本本身带着 delegate，是这种情况下唯一的真相源。
+    fn installed_delegate(&self) -> Option<String> {
+        let script = std::fs::read_to_string(self.script_path()).ok()?;
+        #[cfg(windows)]
+        {
+            // 生成时 `'` 转义成 `''`，这里反向还原。
+            let line = script
+                .lines()
+                .find_map(|l| l.strip_prefix("$delegate = '"))?;
+            Some(line.strip_suffix('\'')?.replace("''", "'"))
+        }
+        #[cfg(not(windows))]
+        {
+            let line = script.lines().find_map(|l| l.strip_prefix("DELEGATE = "))?;
+            serde_json::from_str::<String>(line).ok()
+        }
+    }
+
+    /// Windows 上必须是「带引号的绝对路径」，两个条件缺一不可：
+    /// 绝对路径——Path 被写成 REG_SZ 的机器上 `%SystemRoot%` 不展开，
+    /// System32 不在任何进程的 PATH 里，裸 `powershell` 解析不到；
+    /// 引号——Claude Code 经 Git Bash 执行 statusLine，裸路径的反斜杠
+    /// 会被 bash 当转义符吃掉（C:\Windows\... → C:Windows...）。
+    /// 两种失败都是 exit 127 + 零输出，状态栏只表现为空白。
     fn hook_command(&self) -> String {
         let script = self.script_path();
         if cfg!(windows) {
+            let system_root =
+                std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_owned());
             format!(
-                "powershell -NoProfile -ExecutionPolicy Bypass -File \"{}\"",
+                "\"{system_root}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" -NoProfile -ExecutionPolicy Bypass -File \"{}\"",
                 script.display()
             )
         } else {
@@ -332,14 +363,16 @@ impl ClaudeHook {
         // 已有他人 statusLine：备份原设置并串联其 command；重装时沿用已备份的命令。
         let mut delegate = String::new();
         if self.status_line_is_ours(&settings) {
-            if let Some(command) = self
+            delegate = self
                 .read_backup()
                 .as_ref()
                 .and_then(|backup| backup.get("command"))
                 .and_then(Value::as_str)
-            {
-                delegate = command.to_owned();
-            }
+                .map(str::to_owned)
+                // 备份被删而脚本还在：从脚本回读。否则这里会把 delegate 当成
+                // 空的重装成「无委托」，用户原有的 statusLine 就永久没了。
+                .or_else(|| self.installed_delegate())
+                .unwrap_or_default();
         } else if let Some(existing) = settings
             .get("statusLine")
             .filter(|value| !value.is_null())
@@ -384,7 +417,13 @@ impl ClaudeHook {
                 .as_object_mut()
                 .context("settings.json 顶层不是对象")?;
             // 串联安装的：把用户原有的 statusLine 原样恢复。
-            match self.read_backup() {
+            // 备份被删时退而求其次，用脚本里的原命令重建——宁可丢 padding
+            // 之类的次要字段，也不能把用户的 statusLine 整个删掉。
+            let restored = self.read_backup().or_else(|| {
+                let delegate = self.installed_delegate().filter(|d| !d.is_empty())?;
+                Some(json!({ "type": "command", "command": delegate, "padding": 0 }))
+            });
+            match restored {
                 Some(backup) => {
                     root.insert("statusLine".into(), backup);
                 }
@@ -493,6 +532,26 @@ mod tests {
         assert!(!hook.script_path().exists());
     }
 
+    /// 回归：statusLine 由 Git Bash 执行，命令必须是带引号的绝对路径。
+    /// 裸 `powershell`（PATH 解析不到）和不带引号的绝对路径（反斜杠被
+    /// bash 吃掉）都会静默 exit 127，状态栏空白且钩子从不落盘。
+    #[cfg(windows)]
+    #[test]
+    fn windows_hook_command_is_quoted_absolute_path() {
+        let test = TestDirectory::new("hookcmd");
+        let command = ClaudeHook::with_dir(test.path().to_path_buf()).hook_command();
+        assert!(command.starts_with('"'), "exe 路径必须加引号: {command}");
+        let exe = command[1..].split('"').next().unwrap();
+        assert!(
+            exe.to_ascii_lowercase().ends_with("powershell.exe"),
+            "第一个 token 应是 powershell.exe: {command}"
+        );
+        assert!(
+            std::path::Path::new(exe).is_absolute(),
+            "必须用绝对路径，不能依赖 PATH: {command}"
+        );
+    }
+
     #[test]
     fn existing_foreign_status_line_is_chained_and_restored() {
         let test = TestDirectory::new("chain");
@@ -543,6 +602,36 @@ mod tests {
         assert_eq!(settings["statusLine"]["command"], "my-own-line 'quoted'");
         assert_eq!(settings["statusLine"]["padding"], 0);
         assert!(!test.path().join(BACKUP_FILE).exists());
+    }
+
+    /// 回归：备份文件被删掉（用户清理 .claude、同步工具、杀软）之后，
+    /// 重装不能把用户原有的 statusLine 静默降级成「无委托」，卸载也不能
+    /// 把 statusLine 整个删掉——两者都会让原配置永久消失。
+    #[test]
+    fn deleted_backup_recovers_delegate_from_installed_script() {
+        let test = TestDirectory::new("lostbackup");
+        fs::write(
+            test.path().join("settings.json"),
+            r#"{"statusLine": {"type": "command", "command": "my-own-line 'quoted'", "padding": 0}}"#,
+        )
+        .unwrap();
+        let hook = ClaudeHook::with_dir(test.path().to_path_buf());
+        hook.install().unwrap();
+
+        // 备份没了，但 statusLine 仍指向 Metrik 脚本。
+        fs::remove_file(test.path().join(BACKUP_FILE)).unwrap();
+
+        // 重装：delegate 必须从脚本回读，不能退化成无委托。
+        hook.install().unwrap();
+        let script = fs::read_to_string(hook.script_path()).unwrap();
+        assert!(script.contains("my-own-line"), "重装丢了 delegate");
+
+        // 卸载：按脚本里的原命令还原，而不是删掉 statusLine。
+        hook.uninstall().unwrap();
+        let settings: Value =
+            serde_json::from_str(&fs::read_to_string(test.path().join("settings.json")).unwrap())
+                .unwrap();
+        assert_eq!(settings["statusLine"]["command"], "my-own-line 'quoted'");
     }
 
     #[test]
