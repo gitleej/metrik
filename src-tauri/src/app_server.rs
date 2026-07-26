@@ -372,18 +372,25 @@ mod tests {
                 .expect("test PowerShell process should start"),
         );
         let ready_deadline = Instant::now() + Duration::from_secs(10);
-        while !marker.is_file() && Instant::now() < ready_deadline {
+        // 只等「文件存在」会撞上写入方还占着句柄（os error 32，"另一个程序正在
+        // 使用此文件"），或者读到 Set-Content 还没写完的空内容——两种都真实
+        // 发生过，全量并行跑约三成失败。直接等到「能读出一个 pid」为止。
+        let descendant_pid = loop {
             if let Ok(Some(status)) = child.child_mut().try_wait() {
                 panic!("test PowerShell process exited before recording its descendant: {status}");
             }
+            if let Some(pid) = std::fs::read_to_string(&marker)
+                .ok()
+                .and_then(|raw| raw.trim().parse::<u32>().ok())
+            {
+                break pid;
+            }
+            assert!(
+                Instant::now() < ready_deadline,
+                "test child never recorded a readable descendant pid"
+            );
             std::thread::sleep(Duration::from_millis(50));
-        }
-
-        let descendant_pid = std::fs::read_to_string(&marker)
-            .expect("test child should record its descendant pid")
-            .trim()
-            .parse::<u32>()
-            .expect("recorded descendant pid should be numeric");
+        };
         child.terminate();
 
         let filter = format!("PID eq {descendant_pid}");
