@@ -1165,7 +1165,7 @@ fn kimiwork_sample(key: &str, used_ratio: f64, reset: Option<i64>, now: i64) -> 
         remaining_percent: ((1.0 - used_ratio) * 100.0).clamp(0.0, 100.0),
         resets_at_ms: reset.and_then(|value| crate::domain::sane_resets_at_ms(key, value, now)),
         collected_at_ms: now,
-        source_label: "Kimi Work 官方配额".into(),
+        source_label: "Kimi 官方配额".into(),
         quality: "official_live",
     }
 }

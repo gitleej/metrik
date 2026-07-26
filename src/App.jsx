@@ -141,15 +141,6 @@ const AGENT_META = {
     iconSrc: kimiAppIcon,
     iconClass: "agent-icon--kimi",
   },
-  kimiwork: {
-    // 配额-only：Kimi Work 桌面端（kimi-desktop）。本地 token 用量在它的
-    // daimon 运行时里（wire.jsonl 与 Kimi 同格式），接入本地解析是后续项。
-    label: "Kimi Work",
-    // 紫罗兰：与 kimi 的品红同族，但偏向紫，与 zcode 的蓝紫也拉开。
-    accent: "#a055d6",
-    iconSrc: kimiAppIcon,
-    iconClass: "agent-icon--kimi",
-  },
   antigravity: {
     label: "Antigravity",
     // 琥珀金：六个 Agent 各占一个色相，不与 Claude 的珊瑚橙混淆。
@@ -176,6 +167,16 @@ const AGENT_META = {
 };
 
 const AGENT_ORDER = Object.keys(AGENT_META);
+
+function visibleAgentId(agentId) {
+  return agentId === "kimiwork" ? "kimi" : agentId;
+}
+
+function normalizeVisibleAgentList(agentIds) {
+  return [...new Set(agentIds.map(visibleAgentId))].filter((id) =>
+    AGENT_ORDER.includes(id),
+  );
+}
 
 // 胶囊条首帧尺寸估计：横条一格约 68px 宽；竖条是横条立起来的窄长条，
 // 一格约 54px 高（图标/百分比/进度条纵向堆叠）。
@@ -3186,7 +3187,7 @@ export function App() {
   const [period, setPeriod] = useState("today");
   const [selectedAgent, setSelectedAgent] = useState("all");
   const [quotaAgent, setQuotaAgent] = useState(
-    () => localStorage.getItem("metrik:quotaAgent") || "codex",
+    () => visibleAgentId(localStorage.getItem("metrik:quotaAgent") || "codex"),
   );
   const [activeNav, setActiveNav] = useState(initialNav);
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -3250,7 +3251,7 @@ export function App() {
     try {
       const stored = JSON.parse(localStorage.getItem("metrik:widgetAgents") || "null");
       if (Array.isArray(stored)) {
-        const valid = stored.filter((id) => AGENT_ORDER.includes(id));
+        const valid = normalizeVisibleAgentList(stored);
         if (valid.length) return valid;
       }
     } catch {
@@ -3519,7 +3520,7 @@ export function App() {
     try {
       const stored = JSON.parse(localStorage.getItem("metrik:stripAgents") || "null");
       if (Array.isArray(stored)) {
-        const valid = stored.filter((id) => AGENT_ORDER.includes(id));
+        const valid = normalizeVisibleAgentList(stored);
         if (valid.length) return valid;
       }
     } catch {

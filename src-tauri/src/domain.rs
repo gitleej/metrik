@@ -4,18 +4,15 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 /// 所有已启用 adapter 的 ID，前端 series 与汇总按此顺序输出。
-/// 所有已启用 adapter 的 ID，前端 series 与汇总按此顺序输出。
 /// qoder 是配额-only：本地不落可解析的 token 用量（QoderWork agents.db
 /// 字段恒 0），只有官网 Credits 配额来源，没有对应的日志 adapter。
-/// kimiwork 同样是配额-only：Kimi Work 桌面端的本地 token 用量在它的
-/// daimon 运行时里（wire.jsonl 与 Kimi 同格式），接入本地解析是后续项。
-pub const AGENT_IDS: [&str; 9] = [
+/// kimiwork 只保留为内部配额来源，窗口合并到 kimi，不作为独立可见 Agent。
+pub const AGENT_IDS: [&str; 8] = [
     "codex",
     "claude",
     "zcode",
     "opencode",
     "kimi",
-    "kimiwork",
     "antigravity",
     "workbuddy",
     "qoder",

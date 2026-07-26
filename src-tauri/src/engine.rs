@@ -909,7 +909,7 @@ fn query_snapshot_at(
             .map(|agent| {
                 Ok(AgentQuotaView {
                     agent: (*agent).to_owned(),
-                    windows: load_agent_quota_windows(connection, agent)?,
+                    windows: load_visible_agent_quota_windows(connection, agent)?,
                 })
             })
             .collect::<Result<Vec<_>>>()?,
@@ -1077,6 +1077,62 @@ fn load_agent_quota_windows(
             })
         })
         .collect()
+}
+
+fn quota_candidate_is_better(
+    current: &crate::domain::AgentQuotaWindow,
+    candidate: &crate::domain::AgentQuotaWindow,
+) -> bool {
+    let current_usable = current.view.available && !current.view.reset_expired;
+    let candidate_usable = candidate.view.available && !candidate.view.reset_expired;
+    if current_usable != candidate_usable {
+        return candidate_usable;
+    }
+    if current.view.stale != candidate.view.stale {
+        return !candidate.view.stale;
+    }
+    let quality_rank = |quality: &str| match quality {
+        "official_live" => 2,
+        "official_snapshot" => 1,
+        _ => 0,
+    };
+    let current_quality = quality_rank(&current.view.quality);
+    let candidate_quality = quality_rank(&candidate.view.quality);
+    if current_quality != candidate_quality {
+        return candidate_quality > current_quality;
+    }
+    candidate.view.age_minutes.unwrap_or(f64::INFINITY)
+        <= current.view.age_minutes.unwrap_or(f64::INFINITY)
+}
+
+/// Kimi Code 与 kimi-desktop 是同一可见额度身份。内部仍分桶拉取和缓存，
+/// 输出快照时按窗口键合并：重复窗口取当前更可靠/更新的一份，月度周期保留。
+fn load_visible_agent_quota_windows(
+    connection: &Connection,
+    agent_id: &str,
+) -> Result<Vec<crate::domain::AgentQuotaWindow>> {
+    if agent_id != "kimi" {
+        return load_agent_quota_windows(connection, agent_id);
+    }
+
+    let mut merged: HashMap<String, crate::domain::AgentQuotaWindow> =
+        load_agent_quota_windows(connection, "kimi")?
+            .into_iter()
+            .map(|window| (window.key.clone(), window))
+            .collect();
+    for mut candidate in load_agent_quota_windows(connection, "kimiwork")? {
+        candidate.label = quota_window_label("kimi", &candidate.key);
+        match merged.get(&candidate.key) {
+            Some(current) if !quota_candidate_is_better(current, &candidate) => {}
+            _ => {
+                merged.insert(candidate.key.clone(), candidate);
+            }
+        }
+    }
+
+    let mut windows: Vec<_> = merged.into_values().collect();
+    windows.sort_by_key(|window| quota_window_rank(&window.key));
+    Ok(windows)
 }
 
 fn load_quota(connection: &Connection, adapter_id: &str, window_key: &str) -> Result<QuotaView> {
@@ -2428,6 +2484,52 @@ mod tests {
         assert!(!secondary.stale);
         assert!(secondary.resets_in_minutes.unwrap() > 8_639.0);
         assert_eq!(secondary.source_label, "app-server");
+    }
+
+    #[test]
+    fn kimi_quota_merges_internal_sources_into_one_visible_agent() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(include_str!("../migrations/001_init.sql"))
+            .unwrap();
+        let now = Utc::now().timestamp_millis();
+        connection
+            .execute(
+                "INSERT INTO quota_snapshot (
+                    adapter_id, window_key, remaining_percent, resets_at_ms,
+                    collected_at_ms, quality, source_label
+                 ) VALUES
+                    ('kimi', 'five_hour', 70, ?1, ?2, 'official_live', 'kimi-code'),
+                    ('kimi', 'seven_day', 60, ?3, ?4, 'official_live', 'kimi-code'),
+                    ('kimiwork', 'five_hour', 50, ?1, ?4, 'official_live', 'kimi-desktop'),
+                    ('kimiwork', 'seven_day', 40, ?3, ?5, 'official_snapshot', 'kimi-desktop'),
+                    ('kimiwork', 'monthly_cycle', 80, ?6, ?4, 'official_live', 'kimi-desktop')",
+                params![
+                    now + Duration::hours(2).num_milliseconds(),
+                    now - Duration::minutes(5).num_milliseconds(),
+                    now + Duration::days(6).num_milliseconds(),
+                    now,
+                    now - Duration::hours(1).num_milliseconds(),
+                    now + Duration::days(20).num_milliseconds(),
+                ],
+            )
+            .unwrap();
+
+        let windows = load_visible_agent_quota_windows(&connection, "kimi").unwrap();
+
+        assert_eq!(
+            windows
+                .iter()
+                .map(|window| window.key.as_str())
+                .collect::<Vec<_>>(),
+            vec!["five_hour", "seven_day", "monthly_cycle"]
+        );
+        assert_eq!(windows[0].view.remaining_percent, 50.0);
+        assert_eq!(windows[0].view.source_label, "kimi-desktop");
+        assert_eq!(windows[1].view.remaining_percent, 60.0);
+        assert_eq!(windows[1].view.source_label, "kimi-code");
+        assert_eq!(windows[2].view.remaining_percent, 80.0);
+        assert!(!AGENT_IDS.contains(&"kimiwork"));
     }
 
     #[test]

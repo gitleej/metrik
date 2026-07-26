@@ -133,13 +133,6 @@ function demoSnapshot(period = "today") {
       {
         agent: "kimi",
         windows: [
-          { key: "five_hour", label: "Session", view: demoQuotaView(90, 130) },
-          { key: "seven_day", label: "每周", view: demoQuotaView(76, 4_320) },
-        ],
-      },
-      {
-        agent: "kimiwork",
-        windows: [
           { key: "five_hour", label: "Session", view: demoQuotaView(39, 92) },
           { key: "seven_day", label: "每周", view: demoQuotaView(88, 5_490) },
           { key: "monthly_cycle", label: "月度周期", view: demoQuotaView(78, 33_120) },
@@ -203,7 +196,7 @@ function demoSnapshot(period = "today") {
       { id: "antigravity-live", kind: "local", label: "Antigravity 用量", detail: "来自本机 language server 实时 RPC；IDE 未运行时为 0，不估算。尚未实机验收。", quality: "exact", qualityLabel: "精确解析" },
       { id: "workbuddy-local", kind: "local", label: "WorkBuddy 本地 Token", detail: "读取 CodeBuddy/WorkBuddy 会话转录的 usage 字段并以消息标识去重；未安装时保持为 0。", quality: "exact", qualityLabel: "精确解析" },
       { id: "qoder-quota", kind: "official", label: "Qoder 官方 Credits", detail: "设置 QODER_COOKIE 环境变量后读取官网额度；本地不落 token 用量，无本地统计。", quality: "official", qualityLabel: "官方" },
-      { id: "kimiwork-quota", kind: "official", label: "Kimi Work 官方配额", detail: "读取本机 Kimi Work 桌面端明文存储的 Web 凭据，查询订阅配额接口；本地 token 用量解析是后续项。", quality: "official", qualityLabel: "官方" },
+      { id: "kimi-quota", kind: "official", label: "Kimi 官方配额", detail: "合并 Kimi Code 与 kimi-desktop 的官方窗口；重复的 5h/7d 只显示一份，并保留月度订阅周期。", quality: "official", qualityLabel: "官方" },
     ],
     indexing: { pending: 0 },
   };
