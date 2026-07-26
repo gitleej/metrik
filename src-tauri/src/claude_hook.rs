@@ -23,6 +23,7 @@ use std::path::PathBuf;
 const QUOTA_FILE: &str = "metrik-quota.json";
 const BACKUP_FILE: &str = "metrik-statusline.backup.json";
 const DELEGATE_PLACEHOLDER: &str = "{{DELEGATE}}";
+const QUOTA_PATH_PLACEHOLDER: &str = "{{QUOTA_PATH}}";
 
 #[cfg(windows)]
 const SCRIPT_FILE: &str = "metrik-statusline.ps1";
@@ -33,38 +34,50 @@ const SCRIPT_FILE: &str = "metrik-statusline.py";
 const SCRIPT_BODY: &str = r#"# Metrik statusLine hook: persist Claude Code rate limits, no content is stored.
 $delegate = '{{DELEGATE}}'
 $raw = [Console]::In.ReadToEnd()
-try { $data = $raw | ConvertFrom-Json } catch { exit 0 }
-$rl = $data.rate_limits
+# 解析失败不能连累用户：额度抓不到是我们的事，用户原有的 statusLine 不该
+# 因此消失。所以这里只记下失败，照样往下走把 stdin 转给委托渲染。
+$data = $null
+try { $data = $raw | ConvertFrom-Json } catch {}
 $payload = @{ receivedAtMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() }
-if ($null -ne $rl) {
-  $windows = @{}
-  foreach ($prop in $rl.PSObject.Properties) {
-    $entry = $prop.Value
-    if ($null -ne $entry -and $null -ne $entry.used_percentage) {
-      $windows[$prop.Name] = @{ usedPercentage = [double]$entry.used_percentage }
-      if ($null -ne $entry.resets_at) { $windows[$prop.Name].resetsAt = [double]$entry.resets_at }
+if ($null -ne $data) {
+  $rl = $data.rate_limits
+  if ($null -ne $rl) {
+    $windows = @{}
+    foreach ($prop in $rl.PSObject.Properties) {
+      $entry = $prop.Value
+      if ($null -ne $entry -and $null -ne $entry.used_percentage) {
+        $windows[$prop.Name] = @{ usedPercentage = [double]$entry.used_percentage }
+        if ($null -ne $entry.resets_at) { $windows[$prop.Name].resetsAt = [double]$entry.resets_at }
+      }
     }
+    $payload.windows = $windows
   }
-  $payload.windows = $windows
 }
-$target = Join-Path $env:USERPROFILE '.claude\metrik-quota.json'
-$tmp = "$target.tmp-$PID"
-($payload | ConvertTo-Json -Depth 5 -Compress) | Out-File -FilePath $tmp -Encoding utf8
-Move-Item -Force $tmp $target
+# 落盘位置在生成时烘进来，不再从 $env:USERPROFILE 现推：设了
+# CLAUDE_CONFIG_DIR 的用户，配置目录并不在 ~/.claude，现推会写到 Metrik
+# 根本不读的地方。
+$target = '{{QUOTA_PATH}}'
+if ($null -ne $data) {
+  $tmp = "$target.tmp-$PID"
+  ($payload | ConvertTo-Json -Depth 5 -Compress) | Out-File -FilePath $tmp -Encoding utf8
+  Move-Item -Force $tmp $target
+}
 # Claude Code 每次重渲染状态栏都会杀掉上一次调用，而串联一个委托要好几秒，
 # 所以绝大多数调用是中途被 kill 的——finally 根本执行不到，临时文件就永远
 # 留在盘上（真机实测 5 分半漏 20 个，每个 Windows 用户都在漏）。被 kill 的
 # 进程救不了自己，只能由下一次调用替它收尸。委托最长跑 10 秒，5 分钟以上
 # 的必然是孤儿，不会误删正在用的文件。
+# 走 .NET 而不是 Get-ChildItem/Remove-Item：状态栏每次渲染都是全新的
+# PowerShell 进程，cmdlet 永远是冷的，首次加载实测 55~85 ms；同样的活
+# 用 .NET 只要 14~22 ms。这条路径跑得很频繁，省下来的是真的。
 $stale = (Get-Date).AddMinutes(-5)
-@(
-  @{ Path = $env:TEMP; Filter = 'metrik-statusline-*' },
-  @{ Path = Split-Path $target; Filter = 'metrik-quota.json.tmp-*' }
-) | ForEach-Object {
-  if ($_.Path) {
-    Get-ChildItem -LiteralPath $_.Path -Filter $_.Filter -File -ErrorAction SilentlyContinue |
-      Where-Object { $_.LastWriteTime -lt $stale } |
-      Remove-Item -Force -ErrorAction SilentlyContinue
+foreach ($sweep in @(@($env:TEMP, 'metrik-statusline-*'), @([IO.Path]::GetDirectoryName($target), 'metrik-quota.json.tmp-*'))) {
+  if ($sweep[0]) {
+    try {
+      foreach ($orphan in [IO.Directory]::GetFiles($sweep[0], $sweep[1])) {
+        try { if ([IO.File]::GetLastWriteTime($orphan) -lt $stale) { [IO.File]::Delete($orphan) } } catch {}
+      }
+    } catch {}
   }
 }
 $quotaParts = @()
@@ -127,7 +140,7 @@ if ($delegate) {
   elseif ($out) { $out }
   elseif ($quotaParts) { $quotaParts -join ' ' }
 } else {
-  $model = if ($data.model.display_name) { $data.model.display_name } else { 'Claude' }
+  $model = if ($null -ne $data -and $data.model.display_name) { $data.model.display_name } else { 'Claude' }
   (@($model) + $quotaParts) -join ' | '
 }
 "#;
@@ -138,29 +151,43 @@ const SCRIPT_BODY: &str = r#"#!/usr/bin/env python3
 import json, os, subprocess, sys, tempfile, time
 
 DELEGATE = "{{DELEGATE}}"
+# 落盘位置在生成时烘进来，不再从 ~ 现推：设了 CLAUDE_CONFIG_DIR 的用户，
+# 配置目录并不在 ~/.claude，现推会写到 Metrik 根本不读的地方。
+TARGET = "{{QUOTA_PATH}}"
 
 raw = sys.stdin.read()
+# 解析失败不能连累用户：额度抓不到是我们的事，用户原有的 statusLine 不该
+# 因此消失。所以这里只记下失败，照样往下走把 stdin 转给委托渲染。
 try:
     data = json.loads(raw)
 except Exception:
-    sys.exit(0)
+    data = None
 
-payload = {"receivedAtMs": int(time.time() * 1000)}
-rl = data.get("rate_limits") or {}
 windows = {}
-for key, entry in rl.items():
-    if isinstance(entry, dict) and entry.get("used_percentage") is not None:
-        windows[key] = {"usedPercentage": float(entry["used_percentage"])}
-        if entry.get("resets_at") is not None:
-            windows[key]["resetsAt"] = float(entry["resets_at"])
-if windows:
-    payload["windows"] = windows
-
-target = os.path.expanduser("~/.claude/metrik-quota.json")
-fd, tmp = tempfile.mkstemp(dir=os.path.dirname(target))
-with os.fdopen(fd, "w") as handle:
-    json.dump(payload, handle)
-os.replace(tmp, target)
+if data is not None:
+    payload = {"receivedAtMs": int(time.time() * 1000)}
+    rl = data.get("rate_limits") or {}
+    for key, entry in rl.items():
+        if isinstance(entry, dict) and entry.get("used_percentage") is not None:
+            windows[key] = {"usedPercentage": float(entry["used_percentage"])}
+            if entry.get("resets_at") is not None:
+                windows[key]["resetsAt"] = float(entry["resets_at"])
+    if windows:
+        payload["windows"] = windows
+    try:
+        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(TARGET))
+        try:
+            with os.fdopen(fd, "w") as handle:
+                json.dump(payload, handle)
+            os.replace(tmp, TARGET)
+        except Exception:
+            # 换名失败就把临时文件带走，别留在用户的配置目录里。
+            try:
+                os.unlink(tmp)
+            except Exception:
+                pass
+    except Exception:
+        pass
 
 quota_parts = []
 if "five_hour" in windows:
@@ -187,7 +214,7 @@ if DELEGATE:
     elif quota_parts:
         print(" ".join(quota_parts))
 else:
-    model = ((data.get("model") or {}).get("display_name")) or "Claude"
+    model = ((data or {}).get("model") or {}).get("display_name") or "Claude"
     print(" | ".join([model] + quota_parts))
 "#;
 
@@ -233,9 +260,18 @@ pub struct ClaudeHook {
 }
 
 impl ClaudeHook {
+    /// Claude 配置目录：优先 `$CLAUDE_CONFIG_DIR`，否则 `~/.claude`。
+    ///
+    /// 与 `claude_oauth::config_dir` 保持一致。这里原来写死 `~/.claude`：设了
+    /// `CLAUDE_CONFIG_DIR` 的用户，钩子会被装进 Claude Code 根本不读的那个
+    /// settings.json——界面显示「已安装」，实际永不执行、零数据，还在错误的
+    /// 目录里留下脚本和备份。
     pub fn detected() -> Self {
         Self {
-            claude_dir: dirs::home_dir().unwrap_or_default().join(".claude"),
+            claude_dir: std::env::var_os("CLAUDE_CONFIG_DIR")
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".claude")),
         }
     }
 
@@ -265,17 +301,24 @@ impl ClaudeHook {
         serde_json::from_str(raw.trim_start_matches('\u{feff}')).ok()
     }
 
-    /// 把被串联的原命令嵌入脚本。Windows 走 PowerShell 单引号转义；
-    /// 其他平台用 JSON 字符串字面量（与 Python 字面量兼容）。
-    fn render_script(delegate: &str) -> String {
+    /// 把被串联的原命令和额度落盘路径嵌入脚本。Windows 走 PowerShell 单引号
+    /// 转义；其他平台用 JSON 字符串字面量（与 Python 字面量兼容）。
+    fn render_script(&self, delegate: &str) -> String {
+        let quota = self.quota_path();
+        let quota = quota.to_string_lossy();
         #[cfg(windows)]
         {
-            SCRIPT_BODY.replace(DELEGATE_PLACEHOLDER, &delegate.replace('\'', "''"))
+            SCRIPT_BODY
+                .replace(DELEGATE_PLACEHOLDER, &delegate.replace('\'', "''"))
+                .replace(QUOTA_PATH_PLACEHOLDER, &quota.replace('\'', "''"))
         }
         #[cfg(not(windows))]
         {
-            let quoted = serde_json::to_string(delegate).unwrap_or_else(|_| "\"\"".to_owned());
-            SCRIPT_BODY.replace(&format!("\"{DELEGATE_PLACEHOLDER}\""), &quoted)
+            let quote =
+                |value: &str| serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_owned());
+            SCRIPT_BODY
+                .replace(&format!("\"{DELEGATE_PLACEHOLDER}\""), &quote(delegate))
+                .replace(&format!("\"{QUOTA_PATH_PLACEHOLDER}\""), &quote(&quota))
         }
     }
 
@@ -286,8 +329,8 @@ impl ClaudeHook {
     /// 乱码，乱码里冒出的引号把后面的行吃掉；串联那段整个包在 `try {} catch {}`
     /// 里，于是一声不响地失败——用户原有的 statusLine 消失，状态栏只剩额度。
     /// BOM 是让 5.1 按 UTF-8 读的唯一开关。
-    fn script_text(delegate: &str) -> String {
-        let body = Self::render_script(delegate);
+    fn script_text(&self, delegate: &str) -> String {
+        let body = self.render_script(delegate);
         if cfg!(windows) {
             format!("\u{feff}{body}")
         } else {
@@ -420,7 +463,7 @@ impl ClaudeHook {
             delegate = command;
         }
 
-        std::fs::write(self.script_path(), Self::script_text(&delegate))
+        std::fs::write(self.script_path(), self.script_text(&delegate))
             .context("无法写入钩子脚本")?;
         #[cfg(unix)]
         {
@@ -465,7 +508,7 @@ impl ClaudeHook {
         // 却可能是旧版本生成的（缺 BOM 就会让串联静默失效）。拿回读出来的
         // delegate 重新渲染一遍作为期望值，以后改 SCRIPT_BODY 也能自动补上。
         let installed_script = std::fs::read_to_string(self.script_path()).unwrap_or_default();
-        let expected_script = Self::script_text(&self.installed_delegate().unwrap_or_default());
+        let expected_script = self.script_text(&self.installed_delegate().unwrap_or_default());
         if installed_command == self.hook_command() && installed_script == expected_script {
             return Ok(false);
         }
@@ -667,6 +710,93 @@ mod tests {
         assert!(!test.path().join(BACKUP_FILE).exists());
     }
 
+    /// 在隔离环境里跑生成的脚本，返回它的 stdout。
+    ///
+    /// `USERPROFILE` 故意指向一个与安装目录无关的地方：脚本必须用生成时烘进去
+    /// 的绝对路径落盘，而不是现推 `~/.claude`。
+    #[cfg(windows)]
+    fn run_script(hook: &ClaudeHook, temp: &std::path::Path, payload: &[u8]) -> String {
+        let system_root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_owned());
+        let mut child = std::process::Command::new(format!(
+            r"{system_root}\System32\WindowsPowerShell\v1.0\powershell.exe"
+        ))
+        .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
+        .arg(hook.script_path())
+        .env("USERPROFILE", temp.join("elsewhere"))
+        .env("TEMP", temp)
+        .env("TMP", temp)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("生成的脚本应该能跑起来");
+        std::io::Write::write_all(&mut child.stdin.take().unwrap(), payload).unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert!(out.status.success(), "脚本不该以非零码退出");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    /// 回归：额度落盘位置必须是生成时烘进去的绝对路径。
+    ///
+    /// 原来脚本里写死 `$env:USERPROFILE\.claude\metrik-quota.json`，而 Rust 侧
+    /// 现在认 `CLAUDE_CONFIG_DIR`。两边一旦对不上，脚本把额度写到 Metrik 根本
+    /// 不读的地方，界面显示「已安装」却永远没有数据。
+    #[cfg(windows)]
+    #[test]
+    fn windows_script_writes_quota_to_the_installed_dir_not_userprofile() {
+        let test = TestDirectory::new("quotapath");
+        let temp = test.path().join("temp");
+        fs::create_dir_all(&temp).unwrap();
+        let hook = ClaudeHook::with_dir(test.path().join("cfg"));
+        fs::create_dir_all(test.path().join("cfg")).unwrap();
+        hook.install().unwrap();
+
+        run_script(
+            &hook,
+            &temp,
+            br#"{"rate_limits":{"five_hour":{"used_percentage":42}}}"#,
+        );
+
+        let written = fs::read_to_string(hook.quota_path())
+            .expect("额度必须写进安装目录，而不是 USERPROFILE 推出来的路径");
+        assert!(written.contains("42"), "额度内容不对: {written}");
+        assert!(
+            !test.path().join("elsewhere").exists(),
+            "不该在 USERPROFILE 下留下任何东西"
+        );
+    }
+
+    /// 回归：负载解析失败时，用户原有的 statusLine 仍然要渲染。
+    ///
+    /// 原来是 `catch { exit 0 }`——我们自己解析不了就整个退出，把用户的
+    /// statusLine 一起带走了。额度抓不到是我们的事，不该由用户承担。
+    #[cfg(windows)]
+    #[test]
+    fn windows_script_still_renders_delegate_when_payload_is_unparsable() {
+        let test = TestDirectory::new("badjson");
+        let temp = test.path().join("temp");
+        fs::create_dir_all(&temp).unwrap();
+        let system_root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_owned());
+        fs::write(
+            test.path().join("settings.json"),
+            json!({
+                "statusLine": {
+                    "type": "command",
+                    "command": format!(r"{system_root}\System32\cmd.exe /c echo METRIK-DELEGATE-OK"),
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let hook = ClaudeHook::with_dir(test.path().to_path_buf());
+        hook.install().unwrap();
+
+        let out = run_script(&hook, &temp, b"this is not json at all");
+        assert!(
+            out.contains("METRIK-DELEGATE-OK"),
+            "解析失败不该连累用户的 statusLine，实际输出: {out:?}"
+        );
+    }
+
     /// 回归：脚本必须替上一次被杀的调用收尸。
     ///
     /// Claude Code 每次重渲染状态栏都会杀掉上一次调用，而串联一个委托要好几秒，
@@ -808,7 +938,7 @@ mod tests {
         assert!(hook.repair().unwrap(), "过时的脚本正文应该被重新生成");
         assert_eq!(
             fs::read_to_string(hook.script_path()).unwrap(),
-            ClaudeHook::script_text("my-own-line"),
+            hook.script_text("my-own-line"),
             "重新生成的脚本应与当前生成器一致"
         );
         assert!(!hook.repair().unwrap(), "重新生成之后不该再写盘");
