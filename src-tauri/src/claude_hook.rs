@@ -410,6 +410,32 @@ impl ClaudeHook {
         self.status()
     }
 
+    /// 启动时自愈：statusLine 已经属于 Metrik，但命令过时或脚本不在了，重装一次。
+    ///
+    /// `install()` 只有界面上那个开关会调，升级和开机都不会。所以旧版本写坏的
+    /// statusLine 升级之后依然是坏的：用户看到空白状态栏，而 Metrik 界面显示
+    /// 「已安装」，没有任何线索提示他去关一次开关再打开。修一版生成器救不了
+    /// 已经写坏的那批人，得在启动时回头补一次。
+    ///
+    /// 两条边界：statusLine 不属于 Metrik 时一律不碰，这是别人的配置；命令已经
+    /// 正确且脚本在位时不写盘，否则每次启动都动 settings.json。
+    pub fn repair(&self) -> Result<bool> {
+        let settings = self.read_settings()?;
+        if !self.status_line_is_ours(&settings) {
+            return Ok(false);
+        }
+        let installed_command = settings
+            .get("statusLine")
+            .and_then(|value| value.get("command"))
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if installed_command == self.hook_command() && self.script_path().exists() {
+            return Ok(false);
+        }
+        self.install()?;
+        Ok(true)
+    }
+
     pub fn uninstall(&self) -> Result<ClaudeHookStatus> {
         let mut settings = self.read_settings()?;
         if self.status_line_is_ours(&settings) {
@@ -602,6 +628,68 @@ mod tests {
         assert_eq!(settings["statusLine"]["command"], "my-own-line 'quoted'");
         assert_eq!(settings["statusLine"]["padding"], 0);
         assert!(!test.path().join(BACKUP_FILE).exists());
+    }
+
+    /// 启动自愈：旧版本写坏的命令要修好，串联的原命令不能在修复中丢掉。
+    #[test]
+    fn repair_rewrites_a_stale_command_and_keeps_the_delegate() {
+        let test = TestDirectory::new("repairstale");
+        fs::write(
+            test.path().join("settings.json"),
+            r#"{"statusLine": {"type": "command", "command": "my-own-line", "padding": 0}}"#,
+        )
+        .unwrap();
+        let hook = ClaudeHook::with_dir(test.path().to_path_buf());
+        hook.install().unwrap();
+
+        // 模拟旧版本留下的坏命令：仍指向 Metrik 脚本，但不是当前生成器的产物。
+        let stale = format!("powershell -File {}", hook.script_path().display());
+        fs::write(
+            test.path().join("settings.json"),
+            format!(
+                r#"{{"statusLine": {{"type": "command", "command": {}, "padding": 0}}}}"#,
+                serde_json::to_string(&stale).unwrap()
+            ),
+        )
+        .unwrap();
+
+        assert!(hook.repair().unwrap(), "过时的命令应该被修复");
+        let settings: Value =
+            serde_json::from_str(&fs::read_to_string(test.path().join("settings.json")).unwrap())
+                .unwrap();
+        assert_eq!(settings["statusLine"]["command"], hook.hook_command());
+        let script = fs::read_to_string(hook.script_path()).unwrap();
+        assert!(script.contains("my-own-line"), "自愈把 delegate 丢了");
+
+        // 已经正确：不再写盘，否则每次启动都动 settings.json。
+        assert!(!hook.repair().unwrap(), "命令正确时不该重写");
+
+        // 命令没问题但脚本被删掉了，状态栏同样是空的，也要补回来。
+        fs::remove_file(hook.script_path()).unwrap();
+        assert!(hook.repair().unwrap(), "脚本丢失应该被补回");
+        assert!(hook.script_path().exists());
+    }
+
+    /// 自愈只修 Metrik 自己的 statusLine。别人的配置——包括用户压根没装钩子
+    /// 的情况——一律不碰，否则自愈本身就变成了这次要修的那种覆盖。
+    #[test]
+    fn repair_never_touches_a_foreign_or_absent_status_line() {
+        let test = TestDirectory::new("repairforeign");
+        let hook = ClaudeHook::with_dir(test.path().to_path_buf());
+
+        // 没有 settings.json：不该无中生有装一个钩子。
+        assert!(!hook.repair().unwrap());
+        assert!(!test.path().join("settings.json").exists());
+
+        // 别人的 statusLine：原样保留。
+        let foreign = r#"{"statusLine": {"type": "command", "command": "my-own-line"}}"#;
+        fs::write(test.path().join("settings.json"), foreign).unwrap();
+        assert!(!hook.repair().unwrap());
+        let settings: Value =
+            serde_json::from_str(&fs::read_to_string(test.path().join("settings.json")).unwrap())
+                .unwrap();
+        assert_eq!(settings["statusLine"]["command"], "my-own-line");
+        assert!(!hook.script_path().exists());
     }
 
     /// 回归：备份文件被删掉（用户清理 .claude、同步工具、杀软）之后，
