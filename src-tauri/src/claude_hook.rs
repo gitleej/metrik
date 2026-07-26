@@ -263,6 +263,22 @@ impl ClaudeHook {
         }
     }
 
+    /// 落盘的脚本正文。Windows 上必须带 UTF-8 BOM。
+    ///
+    /// PowerShell 5.1 读没有 BOM 的 `.ps1` 时按系统 ANSI 代码页解码。中文
+    /// （936）、日文（932）等非 UTF-8 代码页上，脚本里的非 ASCII 注释会被解成
+    /// 乱码，乱码里冒出的引号把后面的行吃掉；串联那段整个包在 `try {} catch {}`
+    /// 里，于是一声不响地失败——用户原有的 statusLine 消失，状态栏只剩额度。
+    /// BOM 是让 5.1 按 UTF-8 读的唯一开关。
+    fn script_text(delegate: &str) -> String {
+        let body = Self::render_script(delegate);
+        if cfg!(windows) {
+            format!("\u{feff}{body}")
+        } else {
+            body
+        }
+    }
+
     /// `render_script` 的逆操作：从已安装的脚本里回读被串联的原命令。
     ///
     /// 备份文件是用户可见的普通文件，会被清理 `.claude`、同步工具或杀软
@@ -388,7 +404,7 @@ impl ClaudeHook {
             delegate = command;
         }
 
-        std::fs::write(self.script_path(), Self::render_script(&delegate))
+        std::fs::write(self.script_path(), Self::script_text(&delegate))
             .context("无法写入钩子脚本")?;
         #[cfg(unix)]
         {
@@ -429,7 +445,12 @@ impl ClaudeHook {
             .and_then(|value| value.get("command"))
             .and_then(Value::as_str)
             .unwrap_or_default();
-        if installed_command == self.hook_command() && self.script_path().exists() {
+        // 脚本正文一并比对，不能只看文件在不在：命令从外面看是对的，脚本正文
+        // 却可能是旧版本生成的（缺 BOM 就会让串联静默失效）。拿回读出来的
+        // delegate 重新渲染一遍作为期望值，以后改 SCRIPT_BODY 也能自动补上。
+        let installed_script = std::fs::read_to_string(self.script_path()).unwrap_or_default();
+        let expected_script = Self::script_text(&self.installed_delegate().unwrap_or_default());
+        if installed_command == self.hook_command() && installed_script == expected_script {
             return Ok(false);
         }
         self.install()?;
@@ -630,6 +651,31 @@ mod tests {
         assert!(!test.path().join(BACKUP_FILE).exists());
     }
 
+    /// 回归：Windows 上生成的 `.ps1` 必须带 UTF-8 BOM。没有 BOM 时 PS 5.1 按系统
+    /// ANSI 代码页解码，中文（936）、日文（932）等代码页会把脚本里的非 ASCII
+    /// 注释解成乱码、把后面的行吃掉，串联那段死在 `try {} catch {}` 里不出声，
+    /// 用户原有的 statusLine 就此消失，状态栏只剩额度。
+    #[cfg(windows)]
+    #[test]
+    fn windows_script_is_written_as_utf8_with_bom() {
+        let test = TestDirectory::new("scriptbom");
+        let hook = ClaudeHook::with_dir(test.path().to_path_buf());
+        hook.install().unwrap();
+
+        let bytes = fs::read(hook.script_path()).unwrap();
+        assert_eq!(
+            &bytes[..3],
+            &[0xEF, 0xBB, 0xBF],
+            "脚本必须以 UTF-8 BOM 开头，否则 PS 5.1 会按 ANSI 代码页解码"
+        );
+        // BOM 只有在正文含非 ASCII 时才真正起作用；正文变成纯 ASCII 之后
+        // 这条回归就失去了意义，所以一并盯住。
+        assert!(
+            SCRIPT_BODY.bytes().any(|b| !b.is_ascii()),
+            "SCRIPT_BODY 已无非 ASCII 内容，BOM 断言不再能防住这个 bug，请重新审视"
+        );
+    }
+
     /// 启动自愈：旧版本写坏的命令要修好，串联的原命令不能在修复中丢掉。
     #[test]
     fn repair_rewrites_a_stale_command_and_keeps_the_delegate() {
@@ -668,6 +714,21 @@ mod tests {
         fs::remove_file(hook.script_path()).unwrap();
         assert!(hook.repair().unwrap(), "脚本丢失应该被补回");
         assert!(hook.script_path().exists());
+
+        // 命令没问题、脚本也在，但脚本正文是旧版本生成的（这里模拟缺 BOM）：
+        // 从外面看不出问题，串联却已经静默失效，同样必须重新生成。
+        let stale_script = fs::read_to_string(hook.script_path())
+            .unwrap()
+            .trim_start_matches('\u{feff}')
+            .to_owned();
+        fs::write(hook.script_path(), &stale_script).unwrap();
+        assert!(hook.repair().unwrap(), "过时的脚本正文应该被重新生成");
+        assert_eq!(
+            fs::read_to_string(hook.script_path()).unwrap(),
+            ClaudeHook::script_text("my-own-line"),
+            "重新生成的脚本应与当前生成器一致"
+        );
+        assert!(!hook.repair().unwrap(), "重新生成之后不该再写盘");
     }
 
     /// 自愈只修 Metrik 自己的 statusLine。别人的配置——包括用户压根没装钩子
