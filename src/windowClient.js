@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { platform as tauriPlatform } from "@tauri-apps/plugin-os";
 import { detectRuntimePlatform } from "./platformDetection";
+import { monitorForWindowPosition, physicalWindowSize } from "./windowGeometry";
 
 const WINDOW_SIZES = {
   // minHeight 260 = 标题栏+周期签+摘要双块+底栏（约 208）+ 单行 Agent（52）：
@@ -138,12 +139,20 @@ function rememberCompactHeight(height) {
 /// compact/strip 的窗口尺寸：乘各自缩放系数后取整到物理像素再下发，
 /// 避免分数 DPI（125%/150%）下逻辑尺寸取整产生的半像素裁切。
 /// 小组件用 uiScale（默认参数），胶囊条传自己的 stripScale。
-async function scaledPhysicalSize(api, appWindow, width, height, scale = uiScale) {
-  const factor = await appWindow.scaleFactor().catch(() => 1);
-  return new api.PhysicalSize(
-    Math.round(width * scale * factor),
-    Math.round(height * scale * factor),
-  );
+async function scaledPhysicalSize(
+  api,
+  appWindow,
+  width,
+  height,
+  scale = uiScale,
+  targetScaleFactor = null,
+) {
+  const factor =
+    Number.isFinite(targetScaleFactor) && targetScaleFactor > 0
+      ? targetScaleFactor
+      : await appWindow.scaleFactor().catch(() => 1);
+  const physical = physicalWindowSize(width, height, scale, factor);
+  return new api.PhysicalSize(physical.width, physical.height);
 }
 
 /// 内容缩放用 WebView 原生 zoom（等同浏览器 Ctrl+缩放）：视口单位、媒体查询
@@ -167,10 +176,28 @@ async function applyStartupUiScale(mode) {
   const api = await windowApi();
   if (!api) return;
   await applyWebviewZoom(uiScale);
-  if (mode !== "compact" || uiScale === 1) return;
+  if (mode !== "compact") return;
   const appWindow = api.getCurrentWindow();
   const size = WINDOW_SIZES.compact;
-  const physical = await scaledPhysicalSize(api, appWindow, size.width, compactContentHeight(size.height));
+  const height = compactContentHeight(size.height);
+  const placement = await floatingPlacement(
+    api,
+    "compact",
+    { width: size.width, height },
+    uiScale,
+  );
+  // tauri.conf 的 320×320 只负责首帧；内容可能因 75% 缩放或单行 Agent
+  // 收到更小，启动路径也必须像形态切换一样解除配置最小尺寸。
+  await appWindow.setMinSize(null);
+  await appWindow.setResizable(false);
+  const physical = await scaledPhysicalSize(
+    api,
+    appWindow,
+    size.width,
+    height,
+    uiScale,
+    placement.monitor?.scaleFactor,
+  );
   await appWindow.setSize(physical);
   await clampIntoWorkArea(api, appWindow, physical);
 }
@@ -226,6 +253,69 @@ async function ensurePositionAfterShow(api, appWindow, target) {
     .setPosition(new api.PhysicalPosition(Math.round(target.x), Math.round(target.y)))
     .catch(() => {});
   await clampIntoWorkArea(api, appWindow);
+}
+
+/// 形态记忆位置可能在另一台 DPI 不同的屏幕上。先用目标坐标选显示器，再用该
+/// 显示器的 scaleFactor 算物理尺寸；不能先按当前屏幕算完再搬过去。
+async function floatingPlacement(api, mode, logicalSize, contentScale) {
+  const stored = readStoredPosition(mode);
+  const requested = lastPositions[mode] || stored;
+  if (!requested) return { position: null, monitor: null };
+  const monitors = await api.availableMonitors().catch(() => []);
+  const monitor = monitorForWindowPosition(
+    monitors,
+    requested,
+    logicalSize,
+    contentScale,
+  );
+  if (!monitor) return { position: null, monitor: null };
+  return {
+    position: new api.PhysicalPosition(
+      Math.round(requested.x),
+      Math.round(requested.y),
+    ),
+    monitor,
+  };
+}
+
+/// Windows 偶尔丢弃隐藏窗口的 setPosition，或在 show 后才完成 DPI 切换。
+/// 显示并补发位置后再读一次最终 factor；若与预计算目标不一致，重设物理尺寸。
+async function reconcileFloatingSizeAfterShow(
+  api,
+  appWindow,
+  width,
+  height,
+  contentScale,
+  previousPhysical,
+) {
+  const factor = await appWindow.scaleFactor().catch(() => null);
+  if (!Number.isFinite(factor) || factor <= 0) return previousPhysical;
+  const physical = await scaledPhysicalSize(
+    api,
+    appWindow,
+    width,
+    height,
+    contentScale,
+    factor,
+  );
+  const current = await appWindow.innerSize().catch(() => null);
+  const sizeMatches =
+    current &&
+    Math.abs(current.width - physical.width) <= 1 &&
+    Math.abs(current.height - physical.height) <= 1;
+  if (
+    previousPhysical &&
+    physical.width === previousPhysical.width &&
+    physical.height === previousPhysical.height &&
+    sizeMatches
+  ) {
+    return previousPhysical;
+  }
+  await appWindow.setSize(physical).catch((error) => {
+    console.warn("Unable to reconcile the floating window size.", error);
+  });
+  await clampIntoWorkArea(api, appWindow, physical);
+  return physical;
 }
 
 // compact 与 strip 各自记位，互不覆盖；expanded 不记位。
@@ -484,34 +574,68 @@ async function applyWindowMode(mode, options = {}) {
   if (mode === "strip") {
     const width = Math.max(size.minWidth, Math.round(options.width || size.width));
     const height = Math.max(size.minHeight, Math.round(options.height || size.height));
-    const physical = await scaledPhysicalSize(api, appWindow, width, height, stripScale);
-    await appWindow.setSize(physical);
+    const placement = await floatingPlacement(
+      api,
+      "strip",
+      { width, height },
+      stripScale,
+    );
+    // 先恢复目标位置；窗口 DPI 变化后再按目标显示器 factor 设尺寸。
+    if (placement.position) {
+      await appWindow.setPosition(placement.position).catch(() => {});
+    }
+    const physical = await scaledPhysicalSize(
+      api,
+      appWindow,
+      width,
+      height,
+      stripScale,
+      placement.monitor?.scaleFactor,
+    );
+    await appWindow.setSize(physical).catch((error) => {
+      console.warn("Unable to apply the strip window size.", error);
+    });
     // 缩放只走设置页滑杆：原生无边框窗口的 resize 命中区覆盖所有边，
     // 限制不到四角（0.11.0–0.11.1 的拖拽缩放因此移除）。
     await appWindow.setResizable(false);
-    // 有记忆位置回记忆位置；首次进入保持当前位置（出现在卡片原地）。
-    const storedStrip = readStoredPosition("strip");
-    const stripTarget =
-      lastPositions.strip ||
-      (storedStrip ? new api.PhysicalPosition(storedStrip.x, storedStrip.y) : null);
-    if (stripTarget) await appWindow.setPosition(stripTarget).catch(() => {});
     // 伸出屏幕的部分钳回工作区（挂靠残留、方向切换变宽等）；
     // 完全不在任何屏幕上（拔了扩展屏等）时居中，胶囊条永远看得见、够得着。
-    const clamped = await clampIntoWorkArea(api, appWindow);
+    const clamped = await clampIntoWorkArea(api, appWindow, physical);
     if (!clamped) await appWindow.center().catch(() => {});
     // 钳位/居中后的最终坐标是显示后校验的基准。
     const stripFinal = await appWindow.outerPosition().catch(() => null);
     await appWindow.show().catch(() => {});
     await ensurePositionAfterShow(api, appWindow, stripFinal);
+    await reconcileFloatingSizeAfterShow(
+      api,
+      appWindow,
+      width,
+      height,
+      stripScale,
+      physical,
+    );
     await appWindow.setFocus().catch(() => {});
     return;
   }
 
+  const compactHeight = compactContentHeight(size.height);
+  const placement = await floatingPlacement(
+    api,
+    "compact",
+    { width: size.width, height: compactHeight },
+    uiScale,
+  );
+  // compact 与 strip 一样先到目标屏，再按目标 DPI 算尺寸。
+  if (placement.position) {
+    await appWindow.setPosition(placement.position).catch(() => {});
+  }
   const compactPhysical = await scaledPhysicalSize(
     api,
     appWindow,
     size.width,
-    compactContentHeight(size.height),
+    compactHeight,
+    uiScale,
+    placement.monitor?.scaleFactor,
   );
   // setSize 失败不能中断 apply（窗口会停在 hidden 状态）：告警后继续，
   // 尺寸偏差由内容自愈观察器收敛。
@@ -523,13 +647,9 @@ async function applyWindowMode(mode, options = {}) {
   // 缩放只走设置页滑杆（同胶囊条，拖拽缩放在 0.11.0–0.11.1 后移除）。
   await appWindow.setResizable(false);
 
-  const stored = readStoredPosition("compact");
-  const target =
-    lastPositions.compact || (stored ? new api.PhysicalPosition(stored.x, stored.y) : null);
-  if (target) {
-    await appWindow.setPosition(target).catch(() => appWindow.center());
+  if (placement.position) {
     // 缩放系数调大后，记忆位置 + 新尺寸可能伸出屏幕，钳回工作区。
-    await clampIntoWorkArea(api, appWindow);
+    await clampIntoWorkArea(api, appWindow, compactPhysical);
   } else {
     await appWindow.center();
   }
@@ -537,6 +657,14 @@ async function applyWindowMode(mode, options = {}) {
   const compactFinal = await appWindow.outerPosition().catch(() => null);
   await appWindow.show().catch(() => {});
   await ensurePositionAfterShow(api, appWindow, compactFinal);
+  await reconcileFloatingSizeAfterShow(
+    api,
+    appWindow,
+    size.width,
+    compactHeight,
+    uiScale,
+    compactPhysical,
+  );
   await appWindow.setFocus().catch(() => {});
 }
 
@@ -566,7 +694,14 @@ async function resizeStripWindow({ width, height }) {
     anchor.right = Math.abs(pos.x + outer.width - workRight) <= 8;
     anchor.bottom = Math.abs(pos.y + outer.height - workBottom) <= 8;
   }
-  const physical = await scaledPhysicalSize(api, appWindow, targetWidth, targetHeight, stripScale);
+  const physical = await scaledPhysicalSize(
+    api,
+    appWindow,
+    targetWidth,
+    targetHeight,
+    stripScale,
+    monitor?.scaleFactor,
+  );
   await appWindow.setSize(physical).catch((error) => {
     console.warn("Unable to resize the strip window.", error);
   });
@@ -607,7 +742,14 @@ async function resizeCompactWindow({ height }) {
     const capCss = monitor.workArea.size.height / factor / uiScale - 48;
     targetHeight = Math.min(targetHeight, Math.max(size.minHeight, Math.floor(capCss)));
   }
-  const physical = await scaledPhysicalSize(api, appWindow, size.width, targetHeight);
+  const physical = await scaledPhysicalSize(
+    api,
+    appWindow,
+    size.width,
+    targetHeight,
+    uiScale,
+    factor,
+  );
   await appWindow.setSize(physical).catch((error) => {
     console.warn("Unable to resize the compact window.", error);
   });
@@ -622,20 +764,48 @@ async function resizeCompactWindow({ height }) {
 /// DPI 变化（拖到另一台显示器、系统改缩放）后按当前缩放系数重算 compact
 /// 物理尺寸：zoom 不变、不 hide/show，只把视口校正回 320 CSS px。
 /// 否则 zoom 与物理尺寸失配时视口缩成 ~256px，320 的最小内容宽度被裁。
-async function reassertCompactSize() {
+async function reassertCompactSize(scaleFactor = null) {
   if (isMacPlatform()) return;
   const api = await windowApi();
   if (!api) return;
   const appWindow = api.getCurrentWindow();
   const size = WINDOW_SIZES.compact;
+  await applyWebviewZoom(uiScale);
   const physical = await scaledPhysicalSize(
     api,
     appWindow,
     size.width,
     compactContentHeight(size.height),
+    uiScale,
+    scaleFactor,
   );
   await appWindow.setSize(physical).catch((error) => {
     console.warn("Unable to reassert the compact window size.", error);
+  });
+  await clampIntoWorkArea(api, appWindow, physical);
+}
+
+/// strip 不能只靠 DOM ResizeObserver：跨屏时 WebView 的 CSS 视口可能仍认为自己
+/// 完整，真正被裁的是外层 HWND。DPI 事件必须像 compact 一样直接重断言。
+async function reassertStripSize({ width, height, scaleFactor = null }) {
+  if (isMacPlatform()) return;
+  const api = await windowApi();
+  if (!api) return;
+  const appWindow = api.getCurrentWindow();
+  const size = WINDOW_SIZES.strip;
+  const targetWidth = Math.max(size.minWidth, Math.round(width || size.width));
+  const targetHeight = Math.max(size.minHeight, Math.round(height || size.height));
+  await applyWebviewZoom(stripScale);
+  const physical = await scaledPhysicalSize(
+    api,
+    appWindow,
+    targetWidth,
+    targetHeight,
+    stripScale,
+    scaleFactor,
+  );
+  await appWindow.setSize(physical).catch((error) => {
+    console.warn("Unable to reassert the strip window size.", error);
   });
   await clampIntoWorkArea(api, appWindow, physical);
 }
@@ -653,7 +823,9 @@ async function onScaleFactorChanged(handler) {
   if (!isDesktop() || isMacPlatform()) return () => {};
   const api = await windowApi();
   if (!api) return () => {};
-  const unlistenPromise = api.getCurrentWindow().onScaleChanged(() => handler());
+  const unlistenPromise = api
+    .getCurrentWindow()
+    .onScaleChanged(({ payload }) => handler(payload));
   return async () => {
     const unlisten = await unlistenPromise.catch(() => null);
     unlisten?.();
@@ -954,6 +1126,7 @@ export {
   readStripScale,
   readUiScale,
   reassertCompactSize,
+  reassertStripSize,
   resizeCompactWindow,
   resizeMacosPanel,
   resizeStripWindow,
