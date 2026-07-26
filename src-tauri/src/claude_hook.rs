@@ -16,6 +16,10 @@ use std::path::PathBuf;
 /// `metrik-statusline.backup.json`，脚本落完额度数据后把 stdin 原样转给
 /// 原命令渲染显示；单行输出在行尾追加 5h/7d 百分比，多行输出原样透传
 /// （多行 statusLine 自带排版）。卸载时原样恢复备份。
+/// 委托命令的执行方式：ps1 脚本走进程内 SetIn 喂 stdin；其他命令（bash/exe
+/// 等）走临时文件 + Start-Process 标准输入/输出重定向——PS 5.1 的 `$input|&`
+/// 原生管道会随机整段丢输出（真机实测），Start-Process 重定向是唯一稳定
+/// 传输；委托挂死时 10 秒超时强杀，不冻结状态栏。
 const QUOTA_FILE: &str = "metrik-quota.json";
 const BACKUP_FILE: &str = "metrik-statusline.backup.json";
 const DELEGATE_PLACEHOLDER: &str = "{{DELEGATE}}";
@@ -54,7 +58,8 @@ if ($delegate) {
   # 串联模式：显示交给用户原有的 statusLine 命令。单行输出在行尾追加额度；
   # 多行输出原样透传（多行 statusLine 自带排版，追加会把它压坏）。
   # PowerShell 脚本走进程内执行（SetIn 喂 stdin），零编码转换；
-  # 其他命令回退到子进程管道（$input 转发 stdin）。
+  # 其他命令走临时文件 + Start-Process 重定向——PS 5.1 的 $input|& 原生
+  # 管道会随机整段丢输出（真机实测），Start-Process 的重定向是唯一稳定传输。
   $lines = @()
   try {
     $psFile = [regex]::Match($delegate, '-File\s+"?([^"]+\.ps1)"?')
@@ -62,10 +67,42 @@ if ($delegate) {
       [Console]::SetIn((New-Object System.IO.StringReader($raw)))
       $lines = @(& $psFile.Groups[1].Value 2>$null)
     } else {
-      try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}
-      # '& ' 调用运算符必不可少：委托命令以带引号的 exe 路径开头时，
-      # 没有它 scriptblock 创建会直接抛管道语法错误，委托整个不执行。
-      $lines = @($raw | & ([scriptblock]::Create('$input | & ' + $delegate)) 2>$null)
+      # 委托拆成 exe + 参数行："引号 exe + 参数" 或 "裸 exe + 参数"。
+      $exe = $null
+      $argLine = ""
+      $m = [regex]::Match($delegate, '^\s*"([^"]+)"\s*(.*)$')
+      if ($m.Success) {
+        $exe = $m.Groups[1].Value
+        $argLine = $m.Groups[2].Value
+      } else {
+        $m = [regex]::Match($delegate, '^\s*(\S+)\s*(.*)$')
+        if ($m.Success) {
+          $exe = $m.Groups[1].Value
+          $argLine = $m.Groups[2].Value
+        }
+      }
+      if ($exe -and (Test-Path $exe)) {
+        $tmpIn = Join-Path $env:TEMP "metrik-statusline-in-$PID.json"
+        $tmpOut = Join-Path $env:TEMP "metrik-statusline-out-$PID.txt"
+        try {
+          [IO.File]::WriteAllText($tmpIn, $raw)
+          try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}
+          $proc = Start-Process -FilePath $exe -ArgumentList $argLine `
+            -RedirectStandardInput $tmpIn -RedirectStandardOutput $tmpOut `
+            -NoNewWindow -PassThru
+          # 委托挂死不能冻结状态栏：10 秒超时强杀。
+          if (-not $proc.WaitForExit(10000)) { try { $proc.Kill() } catch {} }
+          if (Test-Path $tmpOut) { $lines = @(Get-Content $tmpOut -Encoding UTF8) }
+        } finally {
+          Remove-Item -Force $tmpIn, $tmpOut -ErrorAction SilentlyContinue
+        }
+      } else {
+        # exe 拆不出/不在盘上（PATH 里的裸命令、复合命令）：尽力走旧管道，
+        # '& ' 调用运算符必不可少——委托以带引号的 exe 路径开头时，没有它
+        # scriptblock 创建会直接抛管道语法错误。
+        try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}
+        $lines = @($raw | & ([scriptblock]::Create('$input | & ' + $delegate)) 2>$null)
+      }
     }
   } catch {}
   $lines = @($lines | ForEach-Object { [string]$_ })
