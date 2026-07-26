@@ -51,6 +51,22 @@ $target = Join-Path $env:USERPROFILE '.claude\metrik-quota.json'
 $tmp = "$target.tmp-$PID"
 ($payload | ConvertTo-Json -Depth 5 -Compress) | Out-File -FilePath $tmp -Encoding utf8
 Move-Item -Force $tmp $target
+# Claude Code 每次重渲染状态栏都会杀掉上一次调用，而串联一个委托要好几秒，
+# 所以绝大多数调用是中途被 kill 的——finally 根本执行不到，临时文件就永远
+# 留在盘上（真机实测 5 分半漏 20 个，每个 Windows 用户都在漏）。被 kill 的
+# 进程救不了自己，只能由下一次调用替它收尸。委托最长跑 10 秒，5 分钟以上
+# 的必然是孤儿，不会误删正在用的文件。
+$stale = (Get-Date).AddMinutes(-5)
+@(
+  @{ Path = $env:TEMP; Filter = 'metrik-statusline-*' },
+  @{ Path = Split-Path $target; Filter = 'metrik-quota.json.tmp-*' }
+) | ForEach-Object {
+  if ($_.Path) {
+    Get-ChildItem -LiteralPath $_.Path -Filter $_.Filter -File -ErrorAction SilentlyContinue |
+      Where-Object { $_.LastWriteTime -lt $stale } |
+      Remove-Item -Force -ErrorAction SilentlyContinue
+  }
+}
 $quotaParts = @()
 if ($payload.windows -and $payload.windows.five_hour) { $quotaParts += ('5h ' + [math]::Round($payload.windows.five_hour.usedPercentage) + '%') }
 if ($payload.windows -and $payload.windows.seven_day) { $quotaParts += ('7d ' + [math]::Round($payload.windows.seven_day.usedPercentage) + '%') }
@@ -649,6 +665,70 @@ mod tests {
         assert_eq!(settings["statusLine"]["command"], "my-own-line 'quoted'");
         assert_eq!(settings["statusLine"]["padding"], 0);
         assert!(!test.path().join(BACKUP_FILE).exists());
+    }
+
+    /// 回归：脚本必须替上一次被杀的调用收尸。
+    ///
+    /// Claude Code 每次重渲染状态栏都会杀掉上一次调用，而串联一个委托要好几秒，
+    /// 所以绝大多数调用是中途被 kill 的，`finally` 执行不到，临时文件永远留在盘上
+    /// （真机实测 5 分半漏 20 个）。这条直接跑生成的脚本，环境隔离到临时目录。
+    #[cfg(windows)]
+    #[test]
+    fn windows_script_sweeps_temp_files_orphaned_by_a_killed_run() {
+        use std::time::{Duration, SystemTime};
+
+        let test = TestDirectory::new("tempsweep");
+        let home = test.path().join("home");
+        let temp = test.path().join("temp");
+        fs::create_dir_all(home.join(".claude")).unwrap();
+        fs::create_dir_all(&temp).unwrap();
+        let hook = ClaudeHook::with_dir(home.join(".claude"));
+        hook.install().unwrap();
+
+        // 上一次被 kill 留下的孤儿，以及一份正在被别的调用使用的新文件。
+        let orphans = [
+            temp.join("metrik-statusline-in-999999.json"),
+            temp.join("metrik-statusline-out-999999.txt"),
+            home.join(".claude").join("metrik-quota.json.tmp-999999"),
+        ];
+        let live = temp.join("metrik-statusline-in-111111.json");
+        for path in orphans.iter().chain([&live]) {
+            fs::write(path, "{}").unwrap();
+        }
+        let long_ago = SystemTime::now() - Duration::from_secs(30 * 60);
+        for path in &orphans {
+            fs::File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_modified(long_ago)
+                .unwrap();
+        }
+
+        let system_root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_owned());
+        let mut child = std::process::Command::new(format!(
+            r"{system_root}\System32\WindowsPowerShell\v1.0\powershell.exe"
+        ))
+        .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
+        .arg(hook.script_path())
+        .env("USERPROFILE", &home)
+        .env("TEMP", &temp)
+        .env("TMP", &temp)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("生成的脚本应该能跑起来");
+        std::io::Write::write_all(
+            &mut child.stdin.take().unwrap(),
+            br#"{"rate_limits":{"five_hour":{"used_percentage":7}}}"#,
+        )
+        .unwrap();
+        assert!(child.wait().unwrap().success());
+
+        for path in &orphans {
+            assert!(!path.exists(), "过期的临时文件没被清掉: {}", path.display());
+        }
+        assert!(live.exists(), "还在用的临时文件不能被误删");
     }
 
     /// 回归：Windows 上生成的 `.ps1` 必须带 UTF-8 BOM。没有 BOM 时 PS 5.1 按系统
