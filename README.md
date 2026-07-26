@@ -105,7 +105,7 @@ cargo test live_snapshot_smoke_test -- --ignored --nocapture  # 读真实本机�
 - Kimi 与 Antigravity 的解析未经作者实机核对（本机没装这两个），数字有偏差欢迎提 issue。Antigravity 另外要求 IDE 正在运行才有数据。
 - 首次索引大日志会占一段 CPU 和磁盘。期间界面照常可用、进度可见，未覆盖完整历史的数字会标注出来。
 
-架构与去重逻辑见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)，视觉对照见 [design-qa.md](design-qa.md)，验收证据见 [ACCEPTANCE.md](ACCEPTANCE.md)。
+架构与去重逻辑见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)，长期产品约束见 [docs/PRODUCT-CONSTRAINTS.md](docs/PRODUCT-CONSTRAINTS.md)，Windows 验收清单见 [ACCEPTANCE.md](ACCEPTANCE.md)。
 
 ## License
 
