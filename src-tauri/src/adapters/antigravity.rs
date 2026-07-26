@@ -703,7 +703,11 @@ mod tests {
         let events = normalize_generator_metadata(&value, "cascade-1", i64::MIN);
         assert_eq!(events.len(), 2);
         // processed = input + cache_read + cache_write(0) + output；reasoning 不叠加。
-        assert_eq!(events[0].tokens.processed(), 100 + 900 + 0 + 40);
+        // 那个 `+ 0` 是 cache_write 这一项，写出来才对得上公式；clippy 的
+        // identity_op 只在 --all-targets 下看得到，为它删掉反而丢了意图。
+        #[allow(clippy::identity_op)]
+        let expected_processed = 100 + 900 + 0 + 40;
+        assert_eq!(events[0].tokens.processed(), expected_processed);
         assert_eq!(events[0].tokens.reasoning_output, 12);
         assert_eq!(events[0].tokens.cache_write, 0);
         assert_eq!(events[0].event_key, "response:resp-a");
