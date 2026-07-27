@@ -1185,7 +1185,7 @@ Wait-Process -Id $child.Id
                 "statusLine": {
                     "type": "command",
                     "command": format!(
-                        r#""{system_root}\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "{}" "{}""#,
+                        r#""{system_root}\System32\WindowsPowerShell\v1.0\powershell.exe" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{}" "{}""#,
                         script.display(),
                         marker.display()
                     ),
@@ -1197,10 +1197,13 @@ Wait-Process -Id $child.Id
         let hook = ClaudeHook::with_dir(test.path().to_path_buf());
         hook.install().unwrap();
 
+        // Use the production timeout so a contended CI runner still has time to start
+        // PowerShell and record the descendant before the process tree is terminated.
+        let delegate_timeout = Duration::from_secs(10);
         let started = Instant::now();
-        let output = render_statusline(&hook, b"{}", &temp, Duration::from_secs(2));
+        let output = render_statusline(&hook, b"{}", &temp, delegate_timeout);
         assert_eq!(output, "");
-        assert!(started.elapsed() < Duration::from_secs(6));
+        assert!(started.elapsed() < delegate_timeout + Duration::from_secs(4));
 
         let descendant_pid = fs::read_to_string(&marker)
             .expect("delegate should record its descendant before timing out")
