@@ -1327,6 +1327,14 @@ fn source_views(report: ScanReport, sync_status: Option<SyncView>) -> Vec<Source
             quality: "exact".into(),
             quality_label: "精确解析".into(),
         },
+        SourceView {
+            id: "qoder-quota".into(),
+            kind: "official".into(),
+            label: "Qoder 官方 Credits".into(),
+            detail: "账户级 Credits 覆盖 Qoder、QoderWork 与 Qoder CLI；通过用户提供的官网 Cookie 读取，不读取或解密客户端登录凭据，也不把本地遥测的零 token 当作用量。".into(),
+            quality: "official".into(),
+            quality_label: "官方".into(),
+        },
     ];
 
     if let Some(sync_status) = sync_status.filter(|status| status.enabled) {

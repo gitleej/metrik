@@ -158,7 +158,7 @@ const AGENT_META = {
     iconClass: "agent-icon--workbuddy",
   },
   qoder: {
-    // 配额-only：Qoder/QoderWork 本地不落 token 用量，只有官网 Credits。
+    // 配额-only：Qoder/QoderWork/Qoder CLI 共用官网账户级 Credits。
     label: "Qoder",
     // 深青蓝：与 codex 的宝蓝、opencode 的青绿保持距离。
     accent: "#3a7ca5",
@@ -2247,7 +2247,7 @@ function QoderQuotaCard({ onSnapshotRefresh }) {
     <div className="settings-card">
       <h2>Qoder 官方额度</h2>
       <p className="settings-muted">
-        Qoder/QoderWork 本地不落 token 用量，只能读官网 Credits 额度，需要你提供一次
+        Qoder、QoderWork 与 Qoder CLI 共用账户级 Credits；本地客户端不提供可可靠解析的 token 用量，只能读官网 Credits 额度，需要你提供一次
         登录 cookie。cookie 仅明文保存在本机（不入账本、不进同步导出），可随时清除。
       </p>
       <details className="settings-guide">

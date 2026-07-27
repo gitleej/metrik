@@ -30,6 +30,10 @@ change.
   only `Kimi`. Their credential sources stay separate internally, while
   duplicate official windows keep the fresher reliable sample. The monthly OMNI
   cycle remains visible; gift and booster balances remain hidden.
+- Qoder, QoderWork, and Qoder CLI are one visible `Qoder` quota identity.
+  Their account-level Credits are shared, so they must never create separate
+  agent counters or be summed. Qoder CLI's local telemetry is not a token
+  source when it reports zero counters.
 - Do not expose credentials or raw provider responses through UI, logs, storage,
   sync, fixtures, or diagnostics.
 

@@ -4,8 +4,8 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 /// 所有已启用 adapter 的 ID，前端 series 与汇总按此顺序输出。
-/// qoder 是配额-only：本地不落可解析的 token 用量（QoderWork agents.db
-/// 字段恒 0），只有官网 Credits 配额来源，没有对应的日志 adapter。
+/// qoder 是配额-only：Qoder、QoderWork 与 Qoder CLI 共用同一账户级 Credits
+/// 配额来源。Qoder CLI 的本地遥测 token 字段实测为 0，不能作为用量账本来源。
 /// kimiwork 只保留为内部配额来源，窗口合并到 kimi，不作为独立可见 Agent。
 pub const AGENT_IDS: [&str; 8] = [
     "codex",
