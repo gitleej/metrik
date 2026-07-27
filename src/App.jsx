@@ -36,6 +36,7 @@ import opencodeAppIcon from "./assets/opencode-app-icon.png";
 import qoderAppIcon from "./assets/qoder-app-icon.png";
 import workbuddyAppIcon from "./assets/workbuddy-app-icon.svg";
 import zcodeAppIcon from "./assets/zcode-app-icon.png";
+import { horizontalStripTargetWidth } from "./windowGeometry";
 import {
   configureQoderCookie,
   configureSync,
@@ -227,10 +228,14 @@ function measureStripHorizontalTarget(shell) {
   const style = window.getComputedStyle(shell);
   const cellCount = Math.max(1, shell.querySelectorAll(".strip-cell").length);
   const controlsWidth = controls.getBoundingClientRect().width;
-  return (
-    STRIP_CELL_WIDTH * cellCount + controlsWidth +
-    parseFloat(style.paddingLeft) + parseFloat(style.paddingRight) + 1
-  );
+  return horizontalStripTargetWidth({
+    cellCount,
+    cellWidth: STRIP_CELL_WIDTH,
+    controlsWidth,
+    paddingLeft: parseFloat(style.paddingLeft),
+    paddingRight: parseFloat(style.paddingRight),
+    gap: parseFloat(style.columnGap || style.gap) || 0,
+  });
 }
 
 const AGENT_LABELS = Object.fromEntries(
@@ -809,6 +814,7 @@ function Inspector({ snapshot, selectedAgent, onSelectAgent, onOpenSources }) {
 }
 
 let windowActionQueue = Promise.resolve();
+let latestWindowCorrection = 0;
 
 function runWindowAction(action) {
   // hide/move/zoom/resize/show 是一条事务；并发执行时旧屏幕 factor 算出的迟到
@@ -817,6 +823,14 @@ function runWindowAction(action) {
     console.warn("Unable to update the desktop window.", error);
   });
   return windowActionQueue;
+}
+
+function runLatestWindowCorrection(action) {
+  const correction = ++latestWindowCorrection;
+  return runWindowAction(() => {
+    if (correction !== latestWindowCorrection) return undefined;
+    return action();
+  });
 }
 
 /// 标题栏的主题快捷键：单击在亮/暗之间切换，右键（或长按）弹出含「自动」的
@@ -1027,7 +1041,7 @@ function StripBar({
         if (!targetHeight) return;
         // 交叉轴是设计常量：竖条恒为 52 宽（方向切换后窗口可能还停在横条宽度）。
         if (Math.abs(targetHeight - shell.clientHeight) < 1 && shell.clientWidth === STRIP_VERTICAL_WIDTH) return;
-        runWindowAction(() =>
+        runLatestWindowCorrection(() =>
           resizeStripWindow({ width: STRIP_VERTICAL_WIDTH, height: Math.ceil(targetHeight) }),
         );
         return;
@@ -1036,7 +1050,7 @@ function StripBar({
       if (!targetWidth) return;
       // 交叉轴是设计常量：横条恒为 40 高。
       if (Math.abs(targetWidth - shell.clientWidth) < 1 && shell.clientHeight === STRIP_BAR_HEIGHT) return;
-      runWindowAction(() =>
+      runLatestWindowCorrection(() =>
         resizeStripWindow({ width: Math.ceil(targetWidth), height: STRIP_BAR_HEIGHT }),
       );
     };
@@ -1228,10 +1242,10 @@ function CompactWidget({
   const ComparisonArrow = comparisonIsLower ? ArrowDown : ArrowUp;
   const shellRef = useRef(null);
   // 宽度失配自愈的节流时间戳：失配不消失时观察器会一直触发，没有节流会
-  // 每 120ms 整窗重应用一次；距上次不足 2s 不再重复愈（失配消失即止），
+  // 每 120ms 重断言一次尺寸；距上次不足 2s 不再重复自愈（失配消失即止），
   // 替代旧的 3 次终身上限——上限烧完后失配就永远留着了。跨屏/DPI 变化时
-  // 清零，让新显示器上的自愈立即恢复资格（双屏场景下旧屏烧完上限、新屏
-  // 没机会自愈的坑）。重应用本身由根组件的 reassertCompactSize 订阅负责。
+  // 清零，让新显示器上的自愈立即恢复资格。自愈只重断言当前尺寸，不再完整
+  // hide/show 窗口或恢复记忆位置，避免旧显示器状态覆盖新 DPI。
   const lastDesyncHealRef = useRef(0);
   useEffect(() => {
     if (!isDesktop()) return undefined;
@@ -1246,8 +1260,8 @@ function CompactWidget({
     };
   }, []);
   // 一个观察器承担两条自愈：
-  // 1) 宽度失配（zoom×物理尺寸失配，视口 < 320，右侧被裁）→ 整窗重应用
-  //    （节流到 2s 一次，失配消失即止）；
+  // 1) 宽度失配（zoom×物理尺寸失配，视口 < 320，右侧被裁）→ 按当前 DPI
+  //    重断言尺寸（节流到 2s 一次，失配消失即止）；
   // 2) Agent 行数变化 → 窗口高度跟随内容（1-2 行回 320，更多行加高，
   //    工作区装不下的部分由列表内部滚动承担）。行数变化不改外壳尺寸，
   //    ResizeObserver 感知不到，所以每次渲染后再主动复核一次。
@@ -1267,7 +1281,7 @@ function CompactWidget({
         const now = Date.now();
         if (now - lastDesyncHealRef.current < 2000) return;
         lastDesyncHealRef.current = now;
-        runWindowAction(() => applyWindowMode("compact"));
+        runLatestWindowCorrection(() => reassertCompactSize());
         return;
       }
       const list = shell.querySelector(".widget-agent-list");
@@ -1299,7 +1313,7 @@ function CompactWidget({
         return;
       }
       if (Math.abs(target - shell.clientHeight) >= 2) {
-        runWindowAction(() => resizeCompactWindow({ height: target }));
+        runLatestWindowCorrection(() => resizeCompactWindow({ height: target }));
       }
     };
     const schedule = () => {
@@ -3549,14 +3563,14 @@ export function App() {
   useEffect(() => {
     const stopPromise = onScaleFactorChanged(({ scaleFactor } = {}) => {
       if (viewModeRef.current === "compact") {
-        runWindowAction(() => reassertCompactSize(scaleFactor));
+        runLatestWindowCorrection(() => reassertCompactSize(scaleFactor));
         return;
       }
       if (viewModeRef.current === "strip") {
         const layout = stripLayoutRef.current;
         const estimate = stripWindowSize(layout.orientation, layout.count);
         const content = stripContentSize(layout.orientation, estimate);
-        runWindowAction(() =>
+        runLatestWindowCorrection(() =>
           reassertStripSize({ ...content, scaleFactor }),
         );
       }

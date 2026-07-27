@@ -2,8 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  horizontalStripTargetWidth,
   monitorForWindowPosition,
   physicalWindowSize,
+  viewportCorrectedPhysicalSize,
+  viewportCorrectedZoom,
 } from "./windowGeometry.js";
 
 function monitor(x, width, scaleFactor, workHeight = 1080) {
@@ -65,4 +68,70 @@ test("fully off-screen remembered positions do not select a monitor", () => {
     1,
   );
   assert.equal(selected, null);
+});
+
+test("horizontal strip width includes every outer flex gap", () => {
+  assert.equal(
+    horizontalStripTargetWidth({
+      cellCount: 2,
+      cellWidth: 68,
+      controlsWidth: 146,
+      paddingLeft: 6,
+      paddingRight: 5,
+      gap: 4,
+    }),
+    302,
+  );
+  assert.equal(
+    horizontalStripTargetWidth({
+      cellCount: 0,
+      cellWidth: 68,
+      controlsWidth: 146,
+      paddingLeft: 6,
+      paddingRight: 5,
+      gap: 4,
+    }),
+    230,
+  );
+});
+
+test("runtime viewport corrects a hidden WebView zoom layer", () => {
+  assert.deepEqual(
+    viewportCorrectedPhysicalSize({
+      currentPhysicalWidth: 560,
+      currentPhysicalHeight: 560,
+      viewportWidth: 256,
+      viewportHeight: 256,
+      expectedWidth: 320,
+      expectedHeight: 320,
+    }),
+    { width: 700, height: 700 },
+  );
+});
+
+test("runtime viewport correction rejects transient invalid measurements", () => {
+  assert.equal(
+    viewportCorrectedPhysicalSize({
+      currentPhysicalWidth: 560,
+      currentPhysicalHeight: 560,
+      viewportWidth: 0,
+      viewportHeight: 0,
+      expectedWidth: 320,
+      expectedHeight: 320,
+    }),
+    null,
+  );
+});
+
+test("runtime viewport can cancel a hidden WebView zoom layer", () => {
+  assert.equal(
+    viewportCorrectedZoom({
+      contentScale: 1,
+      viewportWidth: 256,
+      viewportHeight: 256,
+      expectedWidth: 320,
+      expectedHeight: 320,
+    }),
+    0.8,
+  );
 });

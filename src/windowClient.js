@@ -1,7 +1,12 @@
 import { invoke } from "@tauri-apps/api/core";
 import { platform as tauriPlatform } from "@tauri-apps/plugin-os";
 import { detectRuntimePlatform } from "./platformDetection";
-import { monitorForWindowPosition, physicalWindowSize } from "./windowGeometry";
+import {
+  monitorForWindowPosition,
+  physicalWindowSize,
+  viewportCorrectedPhysicalSize,
+  viewportCorrectedZoom,
+} from "./windowGeometry";
 
 const WINDOW_SIZES = {
   // minHeight 260 = 标题栏+周期签+摘要双块+底栏（约 208）+ 单行 Agent（52）：
@@ -199,7 +204,14 @@ async function applyStartupUiScale(mode) {
     placement.monitor?.scaleFactor,
   );
   await appWindow.setSize(physical);
-  await clampIntoWorkArea(api, appWindow, physical);
+  await reconcileFloatingSizeAfterShow(
+    api,
+    appWindow,
+    size.width,
+    height,
+    uiScale,
+    physical,
+  );
 }
 
 /// 窗口重设尺寸后可能伸出屏幕（固定状态下竖条切横条最典型：位置不动、
@@ -278,8 +290,28 @@ async function floatingPlacement(api, mode, logicalSize, contentScale) {
   };
 }
 
+async function settleWebviewLayout() {
+  if (typeof window === "undefined" || typeof window.requestAnimationFrame !== "function") {
+    return;
+  }
+  await new Promise((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(timeout);
+      resolve();
+    };
+    const timeout = window.setTimeout(finish, 120);
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(finish);
+    });
+  });
+}
+
 /// Windows 偶尔丢弃隐藏窗口的 setPosition，或在 show 后才完成 DPI 切换。
-/// 显示并补发位置后再读一次最终 factor；若与预计算目标不一致，重设物理尺寸。
+/// 最终以 CSS 视口为准：若 WebView2 还残留系统/浏览器 zoom，就用当前物理尺寸
+/// 与实测视口反算窗口尺寸。只重复两次，避免异常瞬时值形成无限 resize 循环。
 async function reconcileFloatingSizeAfterShow(
   api,
   appWindow,
@@ -288,9 +320,10 @@ async function reconcileFloatingSizeAfterShow(
   contentScale,
   previousPhysical,
 ) {
+  await settleWebviewLayout();
   const factor = await appWindow.scaleFactor().catch(() => null);
   if (!Number.isFinite(factor) || factor <= 0) return previousPhysical;
-  const physical = await scaledPhysicalSize(
+  const formulaPhysical = await scaledPhysicalSize(
     api,
     appWindow,
     width,
@@ -298,24 +331,105 @@ async function reconcileFloatingSizeAfterShow(
     contentScale,
     factor,
   );
-  const current = await appWindow.innerSize().catch(() => null);
-  const sizeMatches =
+  let current = await appWindow.innerSize().catch(() => null);
+  let appliedPhysical = current || previousPhysical || formulaPhysical;
+
+  const formulaMatches =
     current &&
-    Math.abs(current.width - physical.width) <= 1 &&
-    Math.abs(current.height - physical.height) <= 1;
-  if (
-    previousPhysical &&
-    physical.width === previousPhysical.width &&
-    physical.height === previousPhysical.height &&
-    sizeMatches
-  ) {
-    return previousPhysical;
+    Math.abs(current.width - formulaPhysical.width) <= 1 &&
+    Math.abs(current.height - formulaPhysical.height) <= 1;
+  if (!formulaMatches) {
+    appliedPhysical = formulaPhysical;
+    await appWindow.setSize(formulaPhysical).catch((error) => {
+      console.warn("Unable to apply the calculated floating window size.", error);
+    });
+    await settleWebviewLayout();
+    current = await appWindow.innerSize().catch(() => null);
   }
-  await appWindow.setSize(physical).catch((error) => {
-    console.warn("Unable to reconcile the floating window size.", error);
+
+  const initialViewportWidth = window.innerWidth;
+  const initialViewportHeight = window.innerHeight;
+  if (
+    Math.abs(initialViewportWidth - width) <= 1 &&
+    Math.abs(initialViewportHeight - height) <= 1
+  ) {
+    await clampIntoWorkArea(api, appWindow, current || appliedPhysical);
+    return current || appliedPhysical;
+  }
+
+  // 外框已经是设计尺寸 × 应用比例 × DPI，但视口仍偏小时，优先抵消 WebView2
+  // 额外保留的 zoom。这样不会为了显示完整内容而把整个卡片无端放大。
+  const correctedZoom = viewportCorrectedZoom({
+    contentScale,
+    viewportWidth: initialViewportWidth,
+    viewportHeight: initialViewportHeight,
+    expectedWidth: width,
+    expectedHeight: height,
   });
-  await clampIntoWorkArea(api, appWindow, physical);
-  return physical;
+  if (correctedZoom) {
+    await applyWebviewZoom(correctedZoom);
+    await settleWebviewLayout();
+    current = await appWindow.innerSize().catch(() => current);
+    if (
+      Math.abs(window.innerWidth - width) <= 1 &&
+      Math.abs(window.innerHeight - height) <= 1
+    ) {
+      await clampIntoWorkArea(api, appWindow, current || appliedPhysical);
+      return current || appliedPhysical;
+    }
+  }
+
+  for (let pass = 0; pass < 2; pass += 1) {
+    const viewportWidth = window.innerWidth;
+    const viewportHeight = window.innerHeight;
+    if (
+      Math.abs(viewportWidth - width) <= 1 &&
+      Math.abs(viewportHeight - height) <= 1
+    ) {
+      await clampIntoWorkArea(api, appWindow, appliedPhysical);
+      return appliedPhysical;
+    }
+
+    const corrected = current
+      ? viewportCorrectedPhysicalSize({
+          currentPhysicalWidth: current.width,
+          currentPhysicalHeight: current.height,
+          viewportWidth,
+          viewportHeight,
+          expectedWidth: width,
+          expectedHeight: height,
+        })
+      : null;
+    appliedPhysical = corrected
+      ? new api.PhysicalSize(corrected.width, corrected.height)
+      : formulaPhysical;
+    await appWindow.setSize(appliedPhysical).catch((error) => {
+      console.warn("Unable to reconcile the floating window size.", error);
+    });
+    await settleWebviewLayout();
+    current = await appWindow.innerSize().catch(() => null);
+  }
+
+  if (
+    Math.abs(window.innerWidth - width) <= 1 &&
+    Math.abs(window.innerHeight - height) <= 1
+  ) {
+    await clampIntoWorkArea(api, appWindow, current || appliedPhysical);
+    return current || appliedPhysical;
+  }
+
+  console.warn("Floating window viewport remains desynchronized.", {
+    expectedWidth: width,
+    expectedHeight: height,
+    viewportWidth: window.innerWidth,
+    viewportHeight: window.innerHeight,
+    contentScale,
+    scaleFactor: factor,
+    targetPhysicalWidth: appliedPhysical.width,
+    targetPhysicalHeight: appliedPhysical.height,
+  });
+  await clampIntoWorkArea(api, appWindow, appliedPhysical);
+  return appliedPhysical;
 }
 
 // compact 与 strip 各自记位，互不覆盖；expanded 不记位。
@@ -694,7 +808,7 @@ async function resizeStripWindow({ width, height }) {
     anchor.right = Math.abs(pos.x + outer.width - workRight) <= 8;
     anchor.bottom = Math.abs(pos.y + outer.height - workBottom) <= 8;
   }
-  const physical = await scaledPhysicalSize(
+  let physical = await scaledPhysicalSize(
     api,
     appWindow,
     targetWidth,
@@ -705,6 +819,14 @@ async function resizeStripWindow({ width, height }) {
   await appWindow.setSize(physical).catch((error) => {
     console.warn("Unable to resize the strip window.", error);
   });
+  physical = await reconcileFloatingSizeAfterShow(
+    api,
+    appWindow,
+    targetWidth,
+    targetHeight,
+    stripScale,
+    physical,
+  );
   // 测量收敛出的尺寸记作下次变形的首帧（否则首帧永远是常量估计）。
   rememberStripSize(targetWidth, targetHeight);
   if ((anchor.right || anchor.bottom) && pos && workArea) {
@@ -742,7 +864,7 @@ async function resizeCompactWindow({ height }) {
     const capCss = monitor.workArea.size.height / factor / uiScale - 48;
     targetHeight = Math.min(targetHeight, Math.max(size.minHeight, Math.floor(capCss)));
   }
-  const physical = await scaledPhysicalSize(
+  let physical = await scaledPhysicalSize(
     api,
     appWindow,
     size.width,
@@ -753,6 +875,14 @@ async function resizeCompactWindow({ height }) {
   await appWindow.setSize(physical).catch((error) => {
     console.warn("Unable to resize the compact window.", error);
   });
+  physical = await reconcileFloatingSizeAfterShow(
+    api,
+    appWindow,
+    size.width,
+    targetHeight,
+    uiScale,
+    physical,
+  );
   // 高度收敛值记作下次变形的首帧。
   rememberCompactHeight(targetHeight);
   // 变高可能把窗口底边顶出屏幕；钳位用刚算出的 physical（setSize 异步生效，
@@ -782,7 +912,14 @@ async function reassertCompactSize(scaleFactor = null) {
   await appWindow.setSize(physical).catch((error) => {
     console.warn("Unable to reassert the compact window size.", error);
   });
-  await clampIntoWorkArea(api, appWindow, physical);
+  await reconcileFloatingSizeAfterShow(
+    api,
+    appWindow,
+    size.width,
+    compactContentHeight(size.height),
+    uiScale,
+    physical,
+  );
 }
 
 /// strip 不能只靠 DOM ResizeObserver：跨屏时 WebView 的 CSS 视口可能仍认为自己
@@ -807,7 +944,14 @@ async function reassertStripSize({ width, height, scaleFactor = null }) {
   await appWindow.setSize(physical).catch((error) => {
     console.warn("Unable to reassert the strip window size.", error);
   });
-  await clampIntoWorkArea(api, appWindow, physical);
+  await reconcileFloatingSizeAfterShow(
+    api,
+    appWindow,
+    targetWidth,
+    targetHeight,
+    stripScale,
+    physical,
+  );
 }
 
 /// macOS 菜单栏面板的高度跟随内容（宽度恒为 compact 设计宽）。

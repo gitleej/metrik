@@ -59,6 +59,9 @@ change.
 - Floating-form size uses the destination monitor's DPI. Compact and strip
   reassert size from native DPI-change payloads, and window mutations are
   serialized so stale resizes cannot overwrite corrections.
+- The rendered CSS viewport is the final sizing authority for Windows floating
+  forms. After native resize, compact and strip must compensate WebView zoom
+  drift and verify the full design viewport rather than trusting HWND size alone.
 - Strip window size is measured from rendered content. Constants may seed the
   first frame but are not the source of truth.
 - Compact and strip have independent continuous UI scales in the range
