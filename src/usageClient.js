@@ -195,7 +195,7 @@ function demoSnapshot(period = "today") {
       { id: "kimi-local", kind: "local", label: "Kimi 本地 Token", detail: "只计单轮增量记录（会话累计记录会重复计数）；未安装 Kimi 时保持为 0。", quality: "exact", qualityLabel: "精确解析" },
       { id: "antigravity-live", kind: "local", label: "Antigravity 用量", detail: "来自本机 language server 实时 RPC；IDE 未运行时为 0，不估算。尚未实机验收。", quality: "exact", qualityLabel: "精确解析" },
       { id: "workbuddy-local", kind: "local", label: "WorkBuddy 本地 Token", detail: "读取 CodeBuddy/WorkBuddy 会话转录的 usage 字段并以消息标识去重；未安装时保持为 0。", quality: "exact", qualityLabel: "精确解析" },
-      { id: "qoder-quota", kind: "official", label: "Qoder 官方 Credits", detail: "设置 QODER_COOKIE 环境变量后读取官网额度；本地不落 token 用量，无本地统计。", quality: "official", qualityLabel: "官方" },
+      { id: "qoder-quota", kind: "official", label: "Qoder 官方 Credits", detail: "覆盖 Qoder、QoderWork 与 Qoder CLI 的账户级额度；设置 QODER_COOKIE 环境变量后读取官网额度，不把本地零 token 遥测当作用量。", quality: "official", qualityLabel: "官方" },
       { id: "kimi-quota", kind: "official", label: "Kimi 官方配额", detail: "合并 Kimi Code 与 kimi-desktop 的官方窗口；重复的 5h/7d 只显示一份，并保留月度订阅周期。", quality: "official", qualityLabel: "官方" },
     ],
     indexing: { pending: 0 },

@@ -72,6 +72,7 @@ Quota rows are replaced wholesale, never merged, so a window a plan no longer ha
 
 - **Codex**: `primary` and `secondary` are slots, not window semantics — a plan may carry a weekly window in the `primary` slot and have no `secondary` at all. Windows are classified by `windowDurationMins` (≤ 1440 minutes is a session window, otherwise weekly); the slot name is only a fallback when the duration is absent. A successful `app-server` read replaces the whole Codex row set.
 - **Claude**: the statusLine hook file is the zero-credential source. Windows handles the hook inside `metrik.exe --statusline` before desktop initialization; macOS and Linux use the generated Python hook. The opt-in OAuth source (off by default) reads the token Claude Code already stores and queries the official usage endpoint; the token is never persisted, uploaded, or logged. A successful read from either source replaces the whole Claude row set; a failed OAuth read falls back to the hook file rather than to a guess.
+- **Qoder**: Qoder, QoderWork, and Qoder CLI share one account-level Credits quota. The existing dashboard-cookie source reads that one quota only; it does not decrypt CLI credentials. Qoder CLI local telemetry with zero token counters is ignored rather than counted.
 - A window whose reset time has passed without fresh data renders as `--`, not as its last known percentage.
 
 ## Storage
