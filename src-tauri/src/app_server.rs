@@ -130,7 +130,7 @@ impl Drop for ManagedChild {
     }
 }
 
-fn terminate_process_tree(child: &mut Child) {
+pub(crate) fn terminate_process_tree(child: &mut Child) {
     if matches!(child.try_wait(), Ok(Some(_))) {
         return;
     }
