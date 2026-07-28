@@ -2182,6 +2182,7 @@ dependencies = [
  "dirs 6.0.0",
  "hex",
  "image",
+ "libc",
  "rusqlite",
  "rustls",
  "serde",
