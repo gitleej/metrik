@@ -600,7 +600,7 @@ function UsageChart({ snapshot, selectedAgent, dark = false }) {
 function formatUsd(value) {
   const amount = Number(value || 0);
   const decimals = amount >= 100 ? 0 : amount >= 10 ? 1 : 2;
-  return `$${amount.toFixed(decimals)}`;
+  return `US$${amount.toFixed(decimals)}`;
 }
 
 const TOKEN_COMPONENTS = [
@@ -629,6 +629,7 @@ function BreakdownSection({ snapshot, selectedAgent }) {
   const costRows = cost?.available
     ? cost.byAgent.filter((row) =>
         (selectedAgent === "all" || row.agent === selectedAgent) && (row.usd > 0 || row.unpricedTokens > 0))
+      .sort((left, right) => right.usd - left.usd)
     : [];
   const scopedUsd = costRows.reduce((sum, row) => sum + row.usd, 0);
   const scopedUnpriced = costRows.reduce((sum, row) => sum + row.unpricedTokens, 0);
@@ -3188,6 +3189,10 @@ function initialWindowMode() {
   return localStorage.getItem("metrik:viewMode") === "strip" ? "strip" : "compact";
 }
 
+function stripPositionMode(orientation) {
+  return `strip-${orientation}`;
+}
+
 /// 托盘菜单的"设置"直接开在设置页；其余情况从概览进。
 function initialNav() {
   if (typeof window === "undefined") return "overview";
@@ -3440,12 +3445,18 @@ export function App() {
   pinnedRef.current = pinned;
   const viewModeRef = useRef(viewMode);
   viewModeRef.current = viewMode;
+  const stripOrientationRef = useRef(stripOrientation);
+  stripOrientationRef.current = stripOrientation;
   // 变形前的形态：applyWindowMode 的 fromMode 用它按形态分别记位，互不污染。
   const previousViewModeRef = useRef(viewMode);
 
   // 拖动后记住小组件位置，供下次启动恢复。
   useEffect(() => {
-    const stopPromise = startPositionMemory(() => viewModeRef.current);
+    const stopPromise = startPositionMemory(() => (
+      viewModeRef.current === "strip"
+        ? stripPositionMode(stripOrientationRef.current)
+        : viewModeRef.current
+    ));
     return () => {
       stopPromise.then((stop) => stop?.());
     };
@@ -3631,21 +3642,32 @@ export function App() {
   }, []);
   // 进入 strip 时整窗变形一次（含启动恢复）；之后窗口尺寸由 StripBar 的
   // 内容测量观察器按真实渲染收敛，不再用手写常量重算。
-  const stripApplied = useRef(false);
+  const stripApplied = useRef(null);
   useEffect(() => {
     if (IS_MAC) return;
     if (viewMode !== "strip") {
-      stripApplied.current = false;
+      stripApplied.current = null;
       return;
     }
-    if (stripApplied.current) return;
-    stripApplied.current = true;
+    if (stripApplied.current === stripOrientation) return;
+    const previousOrientation = stripApplied.current;
+    stripApplied.current = stripOrientation;
     const fromMode = previousViewModeRef.current;
+    const positionMode = stripPositionMode(stripOrientation);
+    const fromPositionMode = previousOrientation
+      ? stripPositionMode(previousOrientation)
+      : fromMode === "strip"
+        ? positionMode
+        : fromMode;
     runWindowAction(async () => {
       // 首帧直接用上次测量收敛的尺寸（没有才回退常量估计），
       // 避免变形后 240ms 再跳一次的两段式卡顿。
       const estimate = stripWindowSize(stripOrientation, stripAgents.length);
-      await applyWindowMode("strip", { ...stripContentSize(stripOrientation, estimate), fromMode });
+      await applyWindowMode("strip", {
+        ...stripContentSize(stripOrientation, estimate),
+        positionMode,
+        ...(fromPositionMode !== positionMode ? { fromPositionMode } : {}),
+      });
       // expanded 期间置顶被强制解除；回到悬浮形态按用户选择重新断言。
       await setWindowPinned(pinnedRef.current);
     });
@@ -3709,6 +3731,9 @@ export function App() {
     }
     const fromMode = viewModeRef.current;
     previousViewModeRef.current = fromMode;
+    const fromPositionMode = fromMode === "strip"
+      ? stripPositionMode(stripOrientationRef.current)
+      : fromMode;
     setViewMode(nextMode);
     if (nextMode === "compact") setActiveNav("overview");
     if (nextMode !== "expanded") localStorage.setItem("metrik:viewMode", nextMode);
@@ -3717,7 +3742,7 @@ export function App() {
     // 重新断言，固定只属于悬浮形态。
     if (nextMode === "strip") return;
     runWindowAction(async () => {
-      await applyWindowMode(nextMode, { fromMode });
+      await applyWindowMode(nextMode, { fromPositionMode });
       if (nextMode === "compact") await setWindowPinned(pinnedRef.current);
     });
   }, []);

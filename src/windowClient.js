@@ -432,13 +432,18 @@ async function reconcileFloatingSizeAfterShow(
   return appliedPhysical;
 }
 
-// compact 与 strip 各自记位，互不覆盖；expanded 不记位。
+// compact 与横/竖胶囊条各自记位，互不覆盖；expanded 不记位。
 const POSITION_KEYS = {
   compact: "metrik:widgetPosition",
-  strip: "metrik:stripPosition",
+  "strip-horizontal": "metrik:stripHorizontalPosition",
+  "strip-vertical": "metrik:stripVerticalPosition",
 };
 
-const lastPositions = { compact: null, strip: null };
+const lastPositions = {
+  compact: null,
+  "strip-horizontal": null,
+  "strip-vertical": null,
+};
 
 function isDesktop() {
   return typeof window !== "undefined" && Boolean(window.__TAURI_INTERNALS__);
@@ -448,7 +453,9 @@ function readStoredPosition(mode) {
   const key = POSITION_KEYS[mode];
   if (!key) return null;
   try {
-    const raw = JSON.parse(localStorage.getItem(key) || "null");
+    // 将已有横向胶囊条的位置作为一次性兼容回退，避免升级后丢失原有位置。
+    const raw = JSON.parse(localStorage.getItem(key)
+      || (mode === "strip-horizontal" ? localStorage.getItem("metrik:stripPosition") : "null"));
     if (!raw || !Number.isFinite(raw.x) || !Number.isFinite(raw.y)) return null;
     return raw;
   } catch {
@@ -486,13 +493,16 @@ async function rememberWindowPosition(api, appWindow, mode) {
     if (!onAnyScreen) return;
   }
   if (monitor) {
-    const top = monitor.position.y;
-    const workBottom = monitor.workArea
-      ? monitor.workArea.position.y + monitor.workArea.size.height
-      : top + monitor.size.height;
-    // 滑出上缘（挂靠）或压进任务栏下面的坐标都不记，
-    // 避免下次开机窗口停在够不着的地方。
-    if (pos.y < top || pos.y > workBottom - 24) return;
+    const workArea = monitor.workArea || {
+      position: monitor.position,
+      size: monitor.size,
+    };
+    const left = workArea.position.x;
+    const top = workArea.position.y;
+    const right = left + workArea.size.width;
+    const bottom = top + workArea.size.height;
+    // 边缘挂靠收起后只剩一条细边：四个方向都不能覆盖正常位置记忆。
+    if (pos.x < left || pos.x > right - 24 || pos.y < top || pos.y > bottom - 24) return;
   }
   lastPositions[mode] = pos;
   localStorage.setItem(key, JSON.stringify({ x: pos.x, y: pos.y }));
@@ -636,12 +646,12 @@ async function applyWindowMode(mode, options = {}) {
   const appWindow = api.getCurrentWindow();
   const size = WINDOW_SIZES[mode] || WINDOW_SIZES.compact;
 
-  // 变形前记下离开的悬浮形态的坐标：compact/strip 各记各的，互不污染
+  // 变形前记下离开的悬浮形态的坐标：compact/横条/竖条各记各的，互不污染
   // （以前无条件写 lastPositions.compact，从胶囊条进大视图会把小插件的
   // 记忆污染成胶囊条坐标，回来时就"复位"了）。同形态重入（启动恢复、
   // 自检重断言）不是变形，不记。
-  if (POSITION_KEYS[options.fromMode] && options.fromMode !== mode) {
-    lastPositions[options.fromMode] = await appWindow.outerPosition().catch(() => null);
+  if (POSITION_KEYS[options.fromPositionMode] && options.fromPositionMode !== options.positionMode) {
+    await rememberWindowPosition(api, appWindow, options.fromPositionMode);
   }
 
   if (mode === "expanded") {
@@ -690,7 +700,7 @@ async function applyWindowMode(mode, options = {}) {
     const height = Math.max(size.minHeight, Math.round(options.height || size.height));
     const placement = await floatingPlacement(
       api,
-      "strip",
+      options.positionMode || "strip-horizontal",
       { width, height },
       stripScale,
     );
@@ -1035,26 +1045,36 @@ const DOCK_PEEK_PX = 6;
 const DOCK_HIDE_DELAY_MS = 900;
 const DOCK_POLL_MS = 250;
 
-/// 边缘挂靠：小插件拖到屏幕上缘后自动收起，只留一条细边；
-/// 鼠标碰到细边滑出，移开后再收回。拖离上缘即恢复普通窗口。
-/// 细边落在窗口的非客户区，webview 收不到 hover 事件，
-/// 所以挂靠期间用全局光标位置轮询判断进出。
+/// 边缘挂靠：未固定的卡片和胶囊条可贴四边自动收起，只留一条细边。
+/// 细边落在窗口的非客户区，webview 收不到 hover，因此以全局光标位置判断显示。
 async function startEdgeDock({ getMode, getPinned }) {
-  // 边缘挂靠是桌面浮窗的交互；菜单栏面板不需要（它本来就贴在菜单栏上）。
   if (isMacPlatform()) return () => {};
   const api = await windowApi();
   if (!api) return () => {};
   const win = api.getCurrentWindow();
-  let dock = null; // { x, width, height, exposedY, hiddenY, scale, top }
+  let dock = null; // { edge, x, y, width, height, left, top, right, bottom, scale }
   let hidden = false;
   let disposed = false;
   let outsideSinceMs = null;
   let checkTimer;
   let pollTimer;
 
-  const slideTo = async (y) => {
+  const canDock = () => getMode() === "compact" || getMode() === "strip";
+  const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
+  const peek = () => Math.round(DOCK_PEEK_PX * dock.scale);
+  const exposedPosition = () => ({ x: dock.x, y: dock.y });
+  const hiddenPosition = () => {
+    const visible = peek();
+    switch (dock.edge) {
+      case "bottom": return { x: dock.x, y: dock.bottom - visible };
+      case "left": return { x: dock.left - dock.width + visible, y: dock.y };
+      case "right": return { x: dock.right - visible, y: dock.y };
+      default: return { x: dock.x, y: dock.top - dock.height + visible };
+    }
+  };
+  const slideTo = async (position) => {
     if (!dock) return;
-    await win.setPosition(new api.PhysicalPosition(dock.x, y)).catch(() => {});
+    await win.setPosition(new api.PhysicalPosition(position.x, position.y)).catch(() => {});
   };
 
   const stopPoll = () => {
@@ -1063,8 +1083,7 @@ async function startEdgeDock({ getMode, getPinned }) {
   };
 
   const undock = async () => {
-    // 已收起时先滑回可见位置，再解除挂靠，避免窗口留在屏幕外。
-    if (dock && hidden) await slideTo(dock.exposedY);
+    if (dock && hidden) await slideTo(exposedPosition());
     dock = null;
     hidden = false;
     outsideSinceMs = null;
@@ -1074,32 +1093,31 @@ async function startEdgeDock({ getMode, getPinned }) {
 
   const poll = async () => {
     if (disposed || !dock) return;
-    // 固定 = 锁定位置：立即解除挂靠，不再自动收起。
-    // 离开 compact（折叠成胶囊条等）同样立即解除：挂靠计时器记的是旧形态的
-    // 高度，继续收起会把新形态的窗口整个滑出屏幕。
-    if (getPinned() || getMode() !== "compact") {
+    if (getPinned() || !canDock()) {
       await undock();
       return;
     }
-    let cursor;
-    try {
-      cursor = await api.cursorPosition();
-    } catch {
-      return;
-    }
-    const stripHeight = Math.round(DOCK_PEEK_PX * dock.scale);
-    const insideX = cursor.x >= dock.x && cursor.x <= dock.x + dock.width;
+    const cursor = await api.cursorPosition().catch(() => null);
+    if (!cursor) return;
     if (hidden) {
-      const onStrip = insideX && cursor.y <= dock.top + stripHeight;
+      const visible = peek();
+      const onStrip = dock.edge === "bottom"
+        ? cursor.x >= dock.x && cursor.x <= dock.x + dock.width && cursor.y >= dock.bottom - visible && cursor.y <= dock.bottom + visible
+        : dock.edge === "left"
+          ? cursor.y >= dock.y && cursor.y <= dock.y + dock.height && cursor.x >= dock.left - visible && cursor.x <= dock.left + visible
+          : dock.edge === "right"
+            ? cursor.y >= dock.y && cursor.y <= dock.y + dock.height && cursor.x >= dock.right - visible && cursor.x <= dock.right + visible
+            : cursor.x >= dock.x && cursor.x <= dock.x + dock.width && cursor.y >= dock.top - visible && cursor.y <= dock.top + visible;
       if (onStrip) {
         hidden = false;
         outsideSinceMs = null;
-        await slideTo(dock.exposedY);
+        await slideTo(exposedPosition());
       }
       return;
     }
     const insideWindow =
-      insideX && cursor.y >= dock.top && cursor.y <= dock.top + dock.height;
+      cursor.x >= dock.x && cursor.x <= dock.x + dock.width
+      && cursor.y >= dock.y && cursor.y <= dock.y + dock.height;
     if (insideWindow) {
       outsideSinceMs = null;
       return;
@@ -1108,13 +1126,13 @@ async function startEdgeDock({ getMode, getPinned }) {
     if (Date.now() - outsideSinceMs >= DOCK_HIDE_DELAY_MS) {
       hidden = true;
       outsideSinceMs = null;
-      await slideTo(dock.hiddenY);
+      await slideTo(hiddenPosition());
     }
   };
 
   const check = async () => {
     if (disposed) return;
-    if (getMode() !== "compact" || getPinned()) {
+    if (!canDock() || getPinned()) {
       if (dock) await undock();
       return;
     }
@@ -1131,30 +1149,37 @@ async function startEdgeDock({ getMode, getPinned }) {
       return;
     }
     if (!pos || !size || !monitor) return;
-    const top = monitor.position.y;
+    const workArea = monitor.workArea || { position: monitor.position, size: monitor.size };
+    const left = workArea.position.x;
+    const top = workArea.position.y;
+    const right = left + workArea.size.width;
+    const bottom = top + workArea.size.height;
     const scale = monitor.scaleFactor || 1;
-    if (hidden && dock && pos.y <= dock.hiddenY + 2) {
-      // 自己滑出屏幕触发的 move 事件，保持隐藏态。
+    if (hidden && dock) {
+      const parked = hiddenPosition();
+      if (Math.abs(pos.x - parked.x) <= 2 && Math.abs(pos.y - parked.y) <= 2) return;
+    }
+    const nearest = [
+      { edge: "left", distance: Math.abs(pos.x - left) },
+      { edge: "right", distance: Math.abs(pos.x + size.width - right) },
+      { edge: "top", distance: Math.abs(pos.y - top) },
+      { edge: "bottom", distance: Math.abs(pos.y + size.height - bottom) },
+    ].sort((a, b) => a.distance - b.distance)[0];
+    if (!nearest || nearest.distance > Math.round(DOCK_TRIGGER_PX * scale)) {
+      if (dock) await undock();
       return;
     }
-    if (pos.y <= top + Math.round(DOCK_TRIGGER_PX * scale)) {
-      dock = {
-        x: pos.x,
-        width: size.width,
-        height: size.height,
-        top,
-        scale,
-        exposedY: top,
-        hiddenY: top - size.height + Math.round(DOCK_PEEK_PX * scale),
-      };
-      hidden = false;
-      outsideSinceMs = null;
-      // 隐藏后只留细边，必须置顶才碰得到。
-      await win.setAlwaysOnTop(true).catch(() => {});
-      if (!pollTimer) pollTimer = window.setInterval(poll, DOCK_POLL_MS);
-    } else if (dock) {
-      await undock();
-    }
+    const edge = nearest.edge;
+    const x = edge === "left" ? left : edge === "right" ? right - size.width
+      : clamp(pos.x, left, Math.max(left, right - size.width));
+    const y = edge === "top" ? top : edge === "bottom" ? bottom - size.height
+      : clamp(pos.y, top, Math.max(top, bottom - size.height));
+    dock = { edge, x, y, width: size.width, height: size.height, left, top, right, bottom, scale };
+    hidden = false;
+    outsideSinceMs = null;
+    await slideTo(exposedPosition());
+    await win.setAlwaysOnTop(true).catch(() => {});
+    if (!pollTimer) pollTimer = window.setInterval(poll, DOCK_POLL_MS);
   };
 
   const onMove = () => {

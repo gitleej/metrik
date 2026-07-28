@@ -60,6 +60,10 @@ change.
   mode always drops always-on-top and provides no pin control.
 - Strip resizing preserves the screen edge it is flush to. Fully off-screen
   positions recover to the center and must never be persisted.
+- Unpinned compact and strip forms dock to any work-area edge, auto-hide after
+  pointer exit, and reveal from that edge's remaining visible sliver. Pinning
+  immediately keeps the complete form visible. Horizontal and vertical strip
+  placements are remembered independently.
 - Floating-form size uses the destination monitor's DPI. Compact and strip
   reassert size from native DPI-change payloads, and window mutations are
   serialized so stale resizes cannot overwrite corrections.
