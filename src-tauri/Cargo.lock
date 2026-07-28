@@ -2175,13 +2175,14 @@ dependencies = [
 
 [[package]]
 name = "metrik"
-version = "0.12.7"
+version = "0.12.8"
 dependencies = [
  "anyhow",
  "chrono",
  "dirs 6.0.0",
  "hex",
  "image",
+ "libc",
  "rusqlite",
  "rustls",
  "serde",
