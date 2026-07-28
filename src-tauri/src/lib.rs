@@ -1322,7 +1322,6 @@ pub fn run() {
         .expect("error while running Metrik");
 }
 
-#[cfg(windows)]
 pub fn run_statusline() {
     claude_hook::run_statusline();
 }

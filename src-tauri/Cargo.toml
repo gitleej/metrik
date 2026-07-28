@@ -37,6 +37,10 @@ walkdir = "2"
 [target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]
 tauri-plugin-single-instance = "2"
 
+[target.'cfg(unix)'.dependencies]
+# 原生 statusLine：委托超时后按进程组终止（killpg），和 Windows 的进程树终止对齐。
+libc = "0.2"
+
 [target.'cfg(target_os = "macos")'.dependencies]
 # 菜单栏面板：把 main 窗口换成不抢焦点的 NSPanel。crates.io 上没有 Tauri 2 版本，
 # 只能走 git 分支；上游停更时需要自行维护。
