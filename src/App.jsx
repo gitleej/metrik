@@ -600,7 +600,7 @@ function UsageChart({ snapshot, selectedAgent, dark = false }) {
 function formatUsd(value) {
   const amount = Number(value || 0);
   const decimals = amount >= 100 ? 0 : amount >= 10 ? 1 : 2;
-  return `US$${amount.toFixed(decimals)}`;
+  return `$${amount.toFixed(decimals)}`;
 }
 
 const TOKEN_COMPONENTS = [
