@@ -102,15 +102,13 @@ cargo test live_snapshot_smoke_test -- --ignored --nocapture  # 读真实本机�
 - 安装包未做代码签名，首次运行需要在系统提示里手动放行。Release 页附 SHA256 可校验文件完整性。
 - Windows 上没装 WebView2 的话，安装器需要联网获取运行时。
 - 只提供 Windows 和 macOS 安装包，Linux 需自行构建。
-- Kimi 与 Antigravity 的解析未经作者实机核对（本机没装这两个），数字有偏差欢迎提 issue。Antigravity 另外要求 IDE 正在运行才有数据。
+- Antigravity 需要 IDE 正在运行才有数据。
 - 首次索引大日志会占一段 CPU 和磁盘。期间界面照常可用、进度可见，未覆盖完整历史的数字会标注出来。
-
-架构与去重逻辑见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)，长期产品约束见 [docs/PRODUCT-CONSTRAINTS.md](docs/PRODUCT-CONSTRAINTS.md)，Windows 验收清单见 [ACCEPTANCE.md](ACCEPTANCE.md)。
 
 ## License
 
 [AGPL-3.0-or-later](LICENSE)，Copyright © 2026 keros68。
 
-自用、修改、fork 都没有限制。要求只有一条：**分发修改版，或者拿它对外提供网络服务，就得同样以 AGPL-3.0 开源**，包括你改过的部分。
+本项目允许自由使用、修改和 fork。分发修改版，或基于修改版对外提供网络服务时，需按 AGPL-3.0 开放对应源码。
 
 v0.10.0 及更早的版本按 MIT 发布，那些版本仍然适用 MIT。
