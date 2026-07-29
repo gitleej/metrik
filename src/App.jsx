@@ -26,6 +26,7 @@ import {
   Minus,
   PushPinSimple,
   ShieldCheck,
+  Trash,
   X,
 } from "@phosphor-icons/react";
 import antigravityAppIcon from "./assets/antigravity-app-icon.png";
@@ -50,6 +51,7 @@ import {
   getUsageSessions,
   getUsageSnapshot,
   rebuildLocalLedger,
+  removeSyncDevice,
   setClaudeHook,
 } from "./usageClient";
 import {
@@ -2356,6 +2358,7 @@ function SettingsSection({ onSnapshotRefresh, widgetAgents, onToggleWidgetAgent,
   const [directoryInput, setDirectoryInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [feedback, setFeedback] = useState(null);
+  const [removingDeviceId, setRemovingDeviceId] = useState(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -2389,6 +2392,22 @@ function SettingsSection({ onSnapshotRefresh, widgetAgents, onToggleWidgetAgent,
       setFeedback({ tone: "error", message: `未能更新同步设置：${error}` });
     } finally {
       setBusy(false);
+    }
+  };
+
+  const removeDevice = async (deviceId) => {
+    setBusy(true);
+    setFeedback(null);
+    try {
+      const next = await removeSyncDevice(deviceId);
+      setSettings(next);
+      setFeedback({ tone: "success", message: "设备已删除，已清除它的同步事件与导出文件。" });
+      onSnapshotRefresh();
+    } catch (error) {
+      setFeedback({ tone: "error", message: `未能删除设备：${error}` });
+    } finally {
+      setBusy(false);
+      setRemovingDeviceId(null);
     }
   };
 
@@ -2524,9 +2543,48 @@ function SettingsSection({ onSnapshotRefresh, widgetAgents, onToggleWidgetAgent,
                     <ul className="settings-device-list">
                       {settings.devices.map((device) => (
                         <li key={device.id}>
-                          <strong>{device.label}</strong>
-                          <span>{device.id}</span>
-                          <small>{device.events} 条事件 · 导出于 {formatSyncTime(device.exportedAtMs)}</small>
+                          <div className="settings-device-head">
+                            <div className="settings-device-info">
+                              <strong>{device.label}</strong>
+                              <span>{device.id}</span>
+                              <small>{device.events} 条事件 · 导出于 {formatSyncTime(device.exportedAtMs)}</small>
+                            </div>
+                            {removingDeviceId !== device.id && (
+                              <button
+                                type="button"
+                                className="ledger-button ledger-button--secondary settings-device-remove"
+                                disabled={busy || settings?.demo}
+                                onClick={() => setRemovingDeviceId(device.id)}
+                              >
+                                <Trash size={15} weight="light" aria-hidden="true" />
+                                删除
+                              </button>
+                            )}
+                          </div>
+                          {removingDeviceId === device.id && (
+                            <div className="ledger-confirmation" role="group" aria-labelledby={`device-confirm-title-${device.id}`}>
+                              <strong id={`device-confirm-title-${device.id}`}>删除该设备？</strong>
+                              <p>将移除它的同步事件与共享文件夹中的导出文件。若该设备仍在线，会在下次同步后重新出现。</p>
+                              <div className="ledger-confirm-actions">
+                                <button
+                                  type="button"
+                                  className="ledger-button ledger-button--secondary"
+                                  disabled={busy}
+                                  onClick={() => setRemovingDeviceId(null)}
+                                >
+                                  取消
+                                </button>
+                                <button
+                                  type="button"
+                                  className="ledger-button ledger-button--primary"
+                                  disabled={busy}
+                                  onClick={() => removeDevice(device.id)}
+                                >
+                                  {busy ? "正在删除…" : "确认删除"}
+                                </button>
+                              </div>
+                            </div>
+                          )}
                         </li>
                       ))}
                     </ul>

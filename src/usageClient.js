@@ -435,6 +435,13 @@ async function configureSync(directory) {
   return invoke("configure_sync", { directory });
 }
 
+async function removeSyncDevice(deviceId) {
+  if (!isTauriRuntime()) {
+    throw new Error("浏览器演示模式不能删除设备");
+  }
+  return invoke("remove_sync_device", { deviceId });
+}
+
 async function getClaudeHookStatus() {
   if (!isTauriRuntime()) {
     return { demo: true, installed: false, conflict: false, lastDataAtMs: null };
@@ -490,6 +497,7 @@ export {
   rebuildLocalLedger,
   getSyncSettings,
   configureSync,
+  removeSyncDevice,
   getClaudeHookStatus,
   setClaudeHook,
   getClaudeOauthStatus,

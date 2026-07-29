@@ -144,6 +144,31 @@ pub fn configure(connection: &mut Connection, directory: Option<String>) -> Resu
     sync_view(connection)
 }
 
+/// 删除一台远端设备：清空它的同步事件与设备记录，并移除共享文件夹里
+/// 它的导出文件。只删本地行不删文件的话，下次 `run_sync` 会因为
+/// `sync_device.exported_at_ms` 已不存在而重新导入同一份文件，删除形同无效。
+/// 本机设备（自身）不接受删除——它不在"已发现的设备"列表里，这里只做防御性校验。
+pub fn remove_device(connection: &mut Connection, device_id: &str) -> Result<SyncView> {
+    let (own_device_id, _) = device_identity(connection)?;
+    if device_id == own_device_id {
+        bail!("无法删除本机设备");
+    }
+
+    if let Some(dir) = sync_directory(connection)? {
+        let _ = std::fs::remove_file(dir.join(export_file_name(device_id)));
+    }
+
+    let transaction = connection.transaction()?;
+    transaction.execute(
+        "DELETE FROM remote_usage_event WHERE device_id = ?1",
+        [device_id],
+    )?;
+    transaction.execute("DELETE FROM sync_device WHERE device_id = ?1", [device_id])?;
+    transaction.commit()?;
+
+    sync_view(connection)
+}
+
 pub fn sync_view(connection: &Connection) -> Result<SyncView> {
     let (device_id, device_label) = device_identity(connection)?;
     let directory = sync_directory(connection)?;
@@ -561,6 +586,55 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM usage_event", [], |row| row.get(0))
             .unwrap();
         assert_eq!(mine, 1);
+    }
+
+    #[test]
+    fn remove_device_clears_rows_and_export_file() {
+        let shared = TestDirectory::new("remove");
+        let now = Utc::now().timestamp_millis();
+
+        let mut device_a = open_test_db();
+        set_setting(
+            &device_a,
+            SETTING_SYNC_DIR,
+            &shared.path().to_string_lossy(),
+        )
+        .unwrap();
+        insert_local_event(&device_a, "event-a", now - 1_000, 111);
+        let (device_a_id, _) = device_identity(&device_a).unwrap();
+        run_sync(&mut device_a, now);
+        let export_path = shared.path().join(export_file_name(&device_a_id));
+        assert!(export_path.exists());
+
+        let mut device_b = open_test_db();
+        set_setting(
+            &device_b,
+            SETTING_SYNC_DIR,
+            &shared.path().to_string_lossy(),
+        )
+        .unwrap();
+        run_sync(&mut device_b, now);
+        assert_eq!(sync_view(&device_b).unwrap().devices.len(), 1);
+
+        // B 删除 A：本地行清空，共享文件夹里的 A 导出文件一并移除，
+        // 否则下次同步会原样重新导入。
+        let view = remove_device(&mut device_b, &device_a_id).unwrap();
+        assert!(view.devices.is_empty());
+        let remote: i64 = device_b
+            .query_row("SELECT COUNT(*) FROM remote_usage_event", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(remote, 0);
+        assert!(!export_path.exists());
+    }
+
+    #[test]
+    fn remove_device_rejects_self() {
+        let mut local = open_test_db();
+        let (own_id, _) = device_identity(&local).unwrap();
+        let error = remove_device(&mut local, &own_id).unwrap_err().to_string();
+        assert!(error.contains("本机设备"));
     }
 
     #[test]

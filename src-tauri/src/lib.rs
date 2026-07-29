@@ -622,6 +622,26 @@ async fn configure_sync(
     .map_err(|error| format!("sync configuration task failed: {error}"))?
 }
 
+#[tauri::command]
+async fn remove_sync_device(
+    device_id: String,
+    state: State<'_, AppState>,
+) -> Result<domain::SyncView, String> {
+    let database_path = state.database_path.clone();
+    let scan_gate = Arc::clone(&state.scan_gate);
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let _gate = scan_gate
+            .lock()
+            .map_err(|_| "usage scan lock poisoned".to_owned())?;
+        let mut connection =
+            storage::open_database(&database_path).map_err(|error| error.to_string())?;
+        sync::remove_device(&mut connection, &device_id).map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("sync device removal task failed: {error}"))?
+}
+
 /// Windows 的 SWCA Acrylic：与 Win11 的 DWM Acrylic 不同，它接受自定义
 /// tint 颜色，磨砂更通透、可控（CodexBar 式亮玻璃在 Windows 上的对应物）。
 #[cfg(windows)]
@@ -1307,6 +1327,7 @@ pub fn run() {
             rebuild_local_ledger,
             sync_settings,
             configure_sync,
+            remove_sync_device,
             claude_hook_status,
             set_claude_hook,
             claude_oauth_status,
