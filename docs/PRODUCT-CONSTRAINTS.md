@@ -82,6 +82,17 @@ change.
 
 - Compact mode is a native menu-bar panel that follows current system
   appearance and material. It is not a floating Windows-style strip.
+- The panel material is system vibrancy from the HUD family, kept in the
+  active state because the non-activating panel never becomes key. The
+  glass-density slider adjusts a scrim above vibrancy, so blur stays native
+  while density sweeps continuously from airy to near-solid in both light
+  and dark appearance.
+- The panel has a fixed design size (width 320, height follows content). The
+  widget-scale setting is a Windows-only concept and is hidden on macOS; the
+  panel is part of the system UI and does not scale.
+- Appearance changes made in the separate expanded window (glass density)
+  propagate live to the panel webview via the Tauri event bus — WKWebView
+  storage events do not cross windows.
 - Content overlays must remain readable on both light and dark desktops.
 - The menu bar uses Metrik's own minimal grammar: one monochrome provider icon
   plus official remaining percentage for every selected agent, `--` for

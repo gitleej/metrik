@@ -1093,9 +1093,11 @@ fn open_expanded_window(app: tauri::AppHandle, nav: Option<String>) -> Result<()
 
 /// macOS 菜单栏面板在紧凑卡片与胶囊条之间切换尺寸；后端负责在改尺寸后
 /// 重新锚定菜单栏图标。其它平台不调用此命令。
+/// 高度按高分屏可用高留足余量（前端已按 screen.availHeight 钳过），
+/// 这里只挡明显异常的值。
 #[tauri::command]
 fn resize_macos_panel(app: tauri::AppHandle, width: f64, height: f64) -> Result<(), String> {
-    if !(48.0..=640.0).contains(&width) || !(40.0..=640.0).contains(&height) {
+    if !(48.0..=640.0).contains(&width) || !(40.0..=2400.0).contains(&height) {
         return Err("macOS 面板尺寸超出允许范围".into());
     }
     #[cfg(target_os = "macos")]

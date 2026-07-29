@@ -56,6 +56,7 @@ import {
   UI_SCALE_RANGE,
   applyStartupUiScale,
   applyWindowMode,
+  broadcastMacAppearance,
   checkForUpdate,
   closeWindow,
   getAutostart,
@@ -63,6 +64,7 @@ import {
   isDesktop,
   isMacPlatform,
   minimizeWindow,
+  onMacAppearance,
   onScaleFactorChanged,
   onTrayShowExpanded,
   openExpandedWindow,
@@ -667,7 +669,10 @@ function BreakdownSection({ snapshot, selectedAgent }) {
         <article className="breakdown-card">
           <h2>成本估算</h2>
           <p className="cost-total">
-            <strong>{formatUsd(scopedUsd)}</strong>
+            <strong>
+              <span className="cost-currency">$</span>
+              {formatUsd(scopedUsd).slice(1)}
+            </strong>
             <span>本周期 · API 等价</span>
           </p>
           <ul className="comp-legend">
@@ -1309,7 +1314,7 @@ function CompactWidget({
         );
         const macTarget = Math.min(target, cap);
         if (Math.abs(macTarget - shell.clientHeight) >= 2) {
-          runWindowAction(() => resizeMacosPanel({ width: rect.width || 320, height: macTarget }));
+          runWindowAction(() => resizeMacosPanel({ height: macTarget }));
         }
         return;
       }
@@ -2103,18 +2108,20 @@ function AppearanceCard({ theme, onThemeChange, glassAlpha, onGlassAlpha, uiScal
         ariaLabel="玻璃浓度百分比"
         onChange={onGlassAlpha}
       />
-      <SliderRow
-        label="小组件缩放"
-        hint={IS_MAC
-          ? "等比缩放菜单栏面板，下次打开时生效。"
-          : "等比缩放桌面小插件；滑杆改动下次进入时生效。"}
-        min={UI_SCALE_RANGE.min * 100}
-        max={UI_SCALE_RANGE.max * 100}
-        step={5}
-        percent={Math.round(uiScale * 100)}
-        ariaLabel="小组件缩放百分比"
-        onChange={onUiScale}
-      />
+      {/* mac 的菜单栏面板是系统 UI 的一部分，尺寸固定不提供缩放；
+          缩放只针对 Windows 的桌面小插件与胶囊条。 */}
+      {!IS_MAC && (
+        <SliderRow
+          label="小组件缩放"
+          hint="等比缩放桌面小插件；滑杆改动下次进入时生效。"
+          min={UI_SCALE_RANGE.min * 100}
+          max={UI_SCALE_RANGE.max * 100}
+          step={5}
+          percent={Math.round(uiScale * 100)}
+          ariaLabel="小组件缩放百分比"
+          onChange={onUiScale}
+        />
+      )}
       {!IS_MAC && (
         <SliderRow
           label="胶囊条缩放"
@@ -3286,6 +3293,7 @@ export function App() {
   const handleGlassAlpha = useCallback((next) => {
     setGlassAlpha(next);
     localStorage.setItem("metrik:glassAlpha", String(next));
+    if (IS_MAC) runWindowAction(() => broadcastMacAppearance({ glassAlpha: next }));
   }, []);
   // 卡片/胶囊的整体缩放系数（连续值）：窗口尺寸与 WebView 原生 zoom 同乘一个系数，
   // 等比放大不会变形；expanded 有独立系数。生效在 windowClient 的形态切换里，
@@ -3488,6 +3496,22 @@ export function App() {
       media?.removeEventListener?.("change", apply);
     };
   }, [transparent, viewMode]);
+
+  // mac 的设置页开在独立的完整视图窗口里，面板是另一个 webview 实例，
+  // 拖滑杆时面板自己的 React 状态不会变。WKWebView 的 storage 事件不跨
+  // 窗口触发（每窗口独立 process pool），所以经 Tauri 事件总线把玻璃浓度
+  // 实时推进面板（改 CSS 变量当场可见）。广播也会回到发送方，处理是幂等
+  // 的。其它平台单窗口无此问题。
+  useEffect(() => {
+    if (!IS_MAC || !isDesktop()) return undefined;
+    const unlistenPromise = onMacAppearance((payload) => {
+      const alpha = Number(payload.glassAlpha);
+      if (Number.isFinite(alpha) && alpha >= 0.6 && alpha <= 0.96) setGlassAlpha(alpha);
+    });
+    return () => {
+      unlistenPromise.then((unlisten) => unlisten());
+    };
+  }, []);
 
   // 边缘挂靠：拖到屏幕上缘自动收起，鼠标碰边弹出。
   useEffect(() => {

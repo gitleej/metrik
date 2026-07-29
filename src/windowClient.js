@@ -551,6 +551,22 @@ async function onTrayShowExpanded(handler) {
   return listen("tray://show-expanded", () => handler());
 }
 
+/// mac 外观改动（玻璃浓度）的跨窗口广播：设置页开在独立的完整视图窗口，
+/// 面板是另一个 webview 实例。WKWebView 的 storage 事件不跨窗口触发
+/// （每个窗口是独立 process pool），所以走 Tauri 事件总线；emit 也会回到
+/// 发送方自己，监听方要能幂等处理。其它平台单窗口，不用广播。
+async function broadcastMacAppearance(payload) {
+  if (!isDesktop() || !isMacPlatform()) return;
+  const { emit } = await import("@tauri-apps/api/event");
+  await emit("metrik://mac-appearance", payload).catch(() => {});
+}
+
+async function onMacAppearance(handler) {
+  if (!isDesktop() || !isMacPlatform()) return () => {};
+  const { listen } = await import("@tauri-apps/api/event");
+  return listen("metrik://mac-appearance", (event) => handler(event.payload || {}));
+}
+
 /// 拖动结束后持久化窗口位置（compact 与 strip 各记各的；expanded 不记）。
 async function startPositionMemory(getMode) {
   if (isMacPlatform()) return () => {};
@@ -632,11 +648,8 @@ async function applyWindowMode(mode, options = {}) {
   // macOS 的完整视图是独立窗口；菜单栏 NSPanel 只保留 compact 卡片。
   if (isMacPlatform()) {
     if (!isDesktop()) return;
-    const size = WINDOW_SIZES.compact;
-    const width = size.width;
     // 首帧直接用上次内容测量的高度（同 Windows 的尺寸缓存），避免两段式跳变。
-    const height = compactContentHeight(size.height);
-    await invoke("resize_macos_panel", { width, height });
+    await resizeMacosPanel({ height: compactContentHeight(WINDOW_SIZES.compact.height) });
     return;
   }
 
@@ -964,12 +977,18 @@ async function reassertStripSize({ width, height, scaleFactor = null }) {
   );
 }
 
-/// macOS 菜单栏面板的高度跟随内容（宽度恒为 compact 设计宽）。
+/// macOS 菜单栏面板的高度跟随内容（宽度恒为 compact 设计宽，不做缩放——
+/// 面板是系统 UI 的一部分，尺寸固定；缩放系数只属于 Windows 小插件）。
 /// 面板顶部锚定菜单栏图标，长高向下延伸——macos.rs 的 resize_panel 会
-/// 在尺寸变化后重算锚点，不会漂移。
-async function resizeMacosPanel({ width, height }) {
+/// 在尺寸变化后重算锚点，不会漂移。高度按屏幕可用高钳一次，
+/// 面板不能长出屏幕底。
+async function resizeMacosPanel({ width = WINDOW_SIZES.compact.width, height }) {
   if (!isDesktop() || !isMacPlatform()) return;
-  await invoke("resize_macos_panel", { width, height }).catch(() => {});
+  const maxHeight = Math.max(40, Math.floor((window.screen?.availHeight || 900) - 80));
+  await invoke("resize_macos_panel", {
+    width: Math.round(width),
+    height: Math.min(Math.round(height), maxHeight),
+  }).catch(() => {});
 }
 
 /// 显示器 DPI 变化时回调；调用方据此重算悬浮形态的物理尺寸。
@@ -1026,11 +1045,13 @@ async function setWindowGlass(enabled, radius = 12) {
     await makeWebviewTransparent();
   }
   try {
-    // macOS 的 vibrancy 是单选的：menu 是原生菜单同款材质。面板不再锁死
-    // dark，而是像 CodexBar 的 NSMenu 一样跟随应用当前的系统外观。
+    // macOS 的 vibrancy 是单选的：hudWindow 是系统 HUD 浮层一族的材质，
+    // 比 menu 更薄更清透，跟随系统外观。面板是 nonactivating（永远不会成为
+    // key window），state 必须锁 active，否则材质一直是失焦的发灰态。
+    // 浓度不在这里调——CSS 按滑杆在 vibrancy 之上叠深浅可调的罩层。
     await appWindow.setEffects(
       isMacPlatform()
-        ? { effects: ["menu"], state: "active", radius }
+        ? { effects: ["hudWindow"], state: "active", radius }
         : { effects: ["blur"] },
     );
     return "native";
@@ -1281,6 +1302,7 @@ export {
   WINDOW_SIZES,
   applyStartupUiScale,
   applyWindowMode,
+  broadcastMacAppearance,
   checkForUpdate,
   closeWindow,
   getAutostart,
@@ -1289,6 +1311,7 @@ export {
   isMacPlatform,
   minimizeWindow,
   normalizeUiScale,
+  onMacAppearance,
   onScaleFactorChanged,
   onTrayShowExpanded,
   openExpandedWindow,
