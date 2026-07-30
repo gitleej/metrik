@@ -25,12 +25,13 @@ jobs:
 
     runs-on: ${{ matrix.platform }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # 不开 npm 缓存：它的 post 步骤会在 macOS 上失败，把已经构建成功、产物也传完
       # 的 job 标红（0.3.0、0.4.0 各误报一次）。发布不频繁，不值得为这点缓存收益
-      # 换一个会骗人的红叉。
-      - uses: actions/setup-node@v4
+      # 换一个会骗人的红叉。setup-node v5+ 会在 package.json 含 packageManager 字段时
+      # 自动开缓存——本仓库没有该字段，所以升级后仍是零缓存，与原意图一致。
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
 
