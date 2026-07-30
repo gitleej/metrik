@@ -52,6 +52,12 @@ change.
 
 - Compact transparency comes from a native whole-window system backdrop. Do not
   simulate glass by lowering only Metrik's own background opacity.
+- The compact and strip glass offers three user-selectable tints: a dark HUD
+  tint (default), a bright white frost with dark content, and a clear tint that
+  paints a blurred sample of the current wallpaper behind the content, tracking
+  the window position as it moves (it shows the wallpaper, not windows behind).
+  All three honor the glass-density slider; the choice is a Windows-only setting
+  because the macOS panel material follows the system.
 - Expanded mode remains opaque and owns its light/dark theme independently.
 - Compact, strip, and expanded forms are reachable from one another in one
   click. Each form remembers its own position and never overwrites another

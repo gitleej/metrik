@@ -860,10 +860,15 @@ mod host_backdrop {
         static BACKDROP: RefCell<Option<BackdropState>> = const { RefCell::new(None) };
     }
 
-    pub fn enable(hwnd: isize) -> Result<(), String> {
+    /// `opacity` 是壁纸采样层自身的不透明度：1.0 是纯壁纸背板（透明配色用），
+    /// 0.78 是深色/浅色玻璃沿用的旧值。已经建好的背板只改不透明度，不重建。
+    pub fn enable(hwnd: isize, opacity: f32) -> Result<(), String> {
         BACKDROP.with(|slot| {
-            if slot.borrow().is_some() {
-                return Ok(());
+            if let Some(state) = slot.borrow().as_ref() {
+                return state
+                    ._visual
+                    .SetOpacity(opacity)
+                    .map_err(|error| error.to_string());
             }
 
             let options = DispatcherQueueOptions {
@@ -887,7 +892,9 @@ mod host_backdrop {
             visual
                 .SetRelativeSizeAdjustment(Vector2 { X: 1.0, Y: 1.0 })
                 .map_err(|error| error.to_string())?;
-            visual.SetOpacity(0.78).map_err(|error| error.to_string())?;
+            visual
+                .SetOpacity(opacity)
+                .map_err(|error| error.to_string())?;
             let brush = compositor
                 .CreateHostBackdropBrush()
                 .map_err(|error| error.to_string())?;
@@ -989,19 +996,44 @@ async fn set_glass_backdrop(
     enabled: bool,
     tint: [u8; 4],
     dark: bool,
+    clear: Option<bool>,
 ) -> Result<(), String> {
     #[cfg(windows)]
     {
         let hwnd = window.hwnd().map_err(|error| error.to_string())?.0 as isize;
+        let clear = clear.unwrap_or(false);
         let (sender, receiver) = std::sync::mpsc::sync_channel(1);
         window
             .run_on_main_thread(move || {
-                let result = if enabled {
+                let result = if enabled && clear {
+                    // 「透明」配色不用任何系统材质：这台机器上 WebView2 的合成
+                    // 表面不透明，垫在它后面的材质一律看不见（见
+                    // docs/WINDOWS-GLASS-NOTES.md 的判别实验）。观感全部由前端
+                    // 的壁纸磨砂底图承担，原生这边只负责两件事：清掉可能残留的
+                    // accent/DWM 背板，以及给窗口系统圆角——外壳是不透明的，
+                    // 没有圆角会露出方形白角。
+                    let _ = swca::clear_dwm_acrylic(hwnd);
+                    let _ = swca::set_acrylic(hwnd, None);
+                    let _ = swca::extend_glass_frame(hwnd, false);
+                    host_backdrop::disable();
+                    match swca::set_round_corners(hwnd, true) {
+                        Ok(()) => {
+                            eprintln!("[glass] clear (wallpaper frost drawn by the webview)");
+                            Ok(())
+                        }
+                        Err(error) => {
+                            eprintln!("[glass] clear failed: {error}");
+                            Err(error)
+                        }
+                    }
+                } else if enabled {
                     let _ = swca::clear_dwm_acrylic(hwnd);
                     let _ = swca::set_round_corners(hwnd, true);
+                    // 深色/浅色维持原设计：HostBackdrop 优先。SWCA Acrylic 在
+                    // Win11 26200 上只报成功、渲染成实心板（实测），只作兜底。
                     let host_result = swca::extend_glass_frame(hwnd, true)
                         .and_then(|_| swca::enable_host_backdrop(hwnd))
-                        .and_then(|_| host_backdrop::enable(hwnd));
+                        .and_then(|_| host_backdrop::enable(hwnd, 0.78));
                     match host_result {
                         Ok(()) => {
                             eprintln!("[glass] HostBackdrop enabled");
@@ -1009,13 +1041,15 @@ async fn set_glass_backdrop(
                         }
                         Err(host_error) => {
                             eprintln!("[glass] HostBackdrop failed: {host_error}");
-                            let _ = swca::set_acrylic(hwnd, None);
-                            swca::set_blur(hwnd, tint).or_else(|blur_error| {
-                                swca::set_dwm_acrylic(hwnd, dark).map_err(|dwm_error| {
-                                    format!(
-                                        "HostBackdrop failed: {host_error}; BlurBehind failed: \
-                                         {blur_error}; DWM fallback failed: {dwm_error}"
-                                    )
+                            swca::set_acrylic(hwnd, Some(tint)).or_else(|acrylic_error| {
+                                let _ = swca::set_acrylic(hwnd, None);
+                                swca::set_blur(hwnd, tint).or_else(|blur_error| {
+                                    swca::set_dwm_acrylic(hwnd, dark).map_err(|dwm_error| {
+                                        format!(
+                                            "HostBackdrop failed: {host_error}; Acrylic failed: {acrylic_error}; BlurBehind failed: \
+                                             {blur_error}; DWM fallback failed: {dwm_error}"
+                                        )
+                                    })
                                 })
                             })
                         }
@@ -1042,8 +1076,179 @@ async fn set_glass_backdrop(
     }
     #[cfg(not(windows))]
     {
-        let _ = (window, enabled, tint, dark);
+        let _ = (window, enabled, tint, dark, clear);
         Err("SWCA acrylic 仅适用于 Windows".into())
+    }
+}
+
+/// 透明配色的磨砂底图：按 Pogget 的管线取当前壁纸 → 按显示器裁剪 →
+/// 高斯模糊 → 缓存。前端把它按窗口屏幕位置贴在卡片/胶囊背景上，
+/// 视觉上等价于"透出模糊的桌面"，实际不依赖任何 DWM 材质。
+#[cfg(windows)]
+mod glass_wallpaper {
+    use std::path::PathBuf;
+    use std::sync::Mutex;
+    use std::time::SystemTime;
+
+    use base64::Engine;
+
+    struct CacheEntry {
+        source: PathBuf,
+        modified: SystemTime,
+        monitor: (u32, u32),
+        blur_step: u32,
+        data_url: String,
+    }
+
+    static CACHE: Mutex<Option<CacheEntry>> = Mutex::new(None);
+
+    #[link(name = "user32")]
+    extern "system" {
+        fn SystemParametersInfoW(
+            action: u32,
+            param: u32,
+            pv_param: *mut core::ffi::c_void,
+            win_ini: u32,
+        ) -> i32;
+    }
+
+    fn wallpaper_path() -> Option<PathBuf> {
+        const SPI_GETDESKWALLPAPER: u32 = 0x0073;
+        let mut buffer = [0u16; 512];
+        let ok = unsafe {
+            SystemParametersInfoW(
+                SPI_GETDESKWALLPAPER,
+                buffer.len() as u32,
+                buffer.as_mut_ptr().cast(),
+                0,
+            )
+        };
+        if ok != 0 {
+            let len = buffer.iter().position(|&c| c == 0).unwrap_or(0);
+            if len > 0 {
+                let path = PathBuf::from(String::from_utf16_lossy(&buffer[..len]));
+                if path.is_file() {
+                    return Some(path);
+                }
+            }
+        }
+        // 幻灯片/主题壁纸时 SPI 可能给不出文件；系统会在这里留一份转码副本。
+        let transcoded = dirs::config_dir()?.join("Microsoft/Windows/Themes/TranscodedWallpaper");
+        transcoded.is_file().then_some(transcoded)
+    }
+
+    /// 壁纸指纹（路径 + 修改时间）。壁纸幻灯片会定时换图，前端靠轮询这个
+    /// 廉价签名发现变化，只有变了才重新取整张底图。
+    pub fn signature() -> Result<String, String> {
+        let source = wallpaper_path().ok_or("当前壁纸文件不可读")?;
+        let modified = source
+            .metadata()
+            .and_then(|meta| meta.modified())
+            .map_err(|error| error.to_string())?
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map_err(|error| error.to_string())?
+            .as_secs();
+        Ok(format!("{}|{modified}", source.to_string_lossy()))
+    }
+
+    /// 按显示器尺寸裁剪并模糊当前壁纸，返回 data URL。
+    /// `blur_step` 是量化后的模糊档（全分辨率 sigma），量化是为了让拖动浓度
+    /// 滑杆只落在少数几档上，命中缓存、不必每一格都重算。
+    /// 同一壁纸 + 同一显示器 + 同一档位直接走缓存。
+    pub fn blurred_for_monitor(monitor: (u32, u32), blur_step: u32) -> Result<String, String> {
+        let source = wallpaper_path().ok_or("当前壁纸文件不可读")?;
+        let modified = source
+            .metadata()
+            .and_then(|meta| meta.modified())
+            .map_err(|error| error.to_string())?;
+        if let Some(entry) = CACHE.lock().unwrap().as_ref() {
+            if entry.source == source
+                && entry.modified == modified
+                && entry.monitor == monitor
+                && entry.blur_step == blur_step
+            {
+                return Ok(entry.data_url.clone());
+            }
+        }
+
+        let bytes = std::fs::read(&source).map_err(|error| error.to_string())?;
+        let image = image::load_from_memory(&bytes).map_err(|error| error.to_string())?;
+        // 3/4 分辨率：低模糊档要保住壁纸细节，半分辨率会先糊一层。
+        let scale = 0.75;
+        let out_w = ((monitor.0 as f32 * scale) as u32).clamp(480, 2400);
+        let out_h = ((monitor.1 as f32 * scale) as u32).clamp(270, 1500);
+        let cover = image.resize_to_fill(out_w, out_h, image::imageops::FilterType::Lanczos3);
+        let sigma = blur_step as f32 * (out_w as f32 / monitor.0 as f32);
+        let blurred = if sigma >= 0.5 {
+            cover.blur(sigma)
+        } else {
+            cover
+        };
+        let mut jpeg = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 90)
+            .encode_image(&blurred)
+            .map_err(|error| error.to_string())?;
+        let data_url = format!(
+            "data:image/jpeg;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(&jpeg)
+        );
+        *CACHE.lock().unwrap() = Some(CacheEntry {
+            source,
+            modified,
+            monitor,
+            blur_step,
+            data_url: data_url.clone(),
+        });
+        Ok(data_url)
+    }
+}
+
+#[tauri::command]
+async fn get_glass_wallpaper(
+    window: tauri::WebviewWindow,
+    blur: Option<u32>,
+) -> Result<serde_json::Value, String> {
+    #[cfg(windows)]
+    {
+        let blur_step = blur.unwrap_or(6).min(40);
+        let monitor = window
+            .current_monitor()
+            .map_err(|error| error.to_string())?
+            .ok_or("窗口不在任何显示器上")?;
+        let size = *monitor.size();
+        let position = *monitor.position();
+        let data_url = tauri::async_runtime::spawn_blocking(move || {
+            glass_wallpaper::blurred_for_monitor((size.width, size.height), blur_step)
+        })
+        .await
+        .map_err(|error| format!("glass wallpaper task failed: {error}"))??;
+        Ok(serde_json::json!({
+            "dataUrl": data_url,
+            "width": size.width,
+            "height": size.height,
+            "monitorX": position.x,
+            "monitorY": position.y,
+        }))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (window, blur);
+        Err("壁纸磨砂底图仅适用于 Windows".into())
+    }
+}
+
+/// 壁纸指纹：前端轮询它发现壁纸幻灯片换图，变了才重取磨砂底图。
+#[tauri::command]
+async fn glass_wallpaper_signature() -> Result<String, String> {
+    #[cfg(windows)]
+    {
+        tauri::async_runtime::spawn_blocking(glass_wallpaper::signature)
+            .await
+            .map_err(|error| format!("glass wallpaper signature task failed: {error}"))?
+    }
+    #[cfg(not(windows))]
+    {
+        Err("壁纸磨砂底图仅适用于 Windows".into())
     }
 }
 
@@ -1336,6 +1541,8 @@ pub fn run() {
             configure_qoder_cookie,
             set_taskbar_button,
             set_glass_backdrop,
+            get_glass_wallpaper,
+            glass_wallpaper_signature,
             set_native_theme,
             open_expanded_window,
             resize_macos_panel,

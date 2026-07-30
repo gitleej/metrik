@@ -45,7 +45,7 @@ struct ScanReport {
     errors: HashMap<String, usize>,
     diagnostics: HashMap<String, AdapterDiagnostics>,
     /// adapter 自报的"存在但读不了"的存储形态（见 AgentAdapter::coverage_gaps）。
-    /// 非空 → 该 Agent 标"部分覆盖"，原因原样展示。
+    /// 非空 → 该 Agent 标"数据不完整"，原因原样展示。
     coverage_gaps: HashMap<String, Vec<String>>,
     backfill_pending: usize,
 }
@@ -1200,7 +1200,7 @@ fn source_views(report: ScanReport, sync_status: Option<SyncView>) -> Vec<Source
     let codex_partial = codex_diagnostics.partial_sources > 0 || errors("codex") > 0;
     let claude_partial = claude_diagnostics.partial_sources > 0 || errors("claude") > 0;
     // 读不了的存储形态（如 OpenCode 1.2+ 的 SQLite）也是覆盖缺口：
-    // 此时的 0 是"读不到"而非"没用过"，必须标部分覆盖。
+    // 此时的 0 是"读不到"而非"没用过"，必须标数据不完整。
     let opencode_gaps = report
         .coverage_gaps
         .get("opencode")
@@ -1231,7 +1231,7 @@ fn source_views(report: ScanReport, sync_status: Option<SyncView>) -> Vec<Source
             ),
             quality: if codex_partial { "partial" } else { "exact" }.into(),
             quality_label: if codex_partial {
-                "部分覆盖"
+                "数据不完整"
             } else {
                 "精确解析"
             }
@@ -1249,7 +1249,7 @@ fn source_views(report: ScanReport, sync_status: Option<SyncView>) -> Vec<Source
             ),
             quality: if claude_partial { "partial" } else { "exact" }.into(),
             quality_label: if claude_partial {
-                "部分覆盖"
+                "数据不完整"
             } else {
                 "精确解析"
             }
@@ -1272,7 +1272,7 @@ fn source_views(report: ScanReport, sync_status: Option<SyncView>) -> Vec<Source
             }
             .into(),
             quality_label: if diagnostics("zcode").partial_sources > 0 || errors("zcode") > 0 {
-                "部分覆盖"
+                "数据不完整"
             } else {
                 "精确解析"
             }
@@ -1295,7 +1295,7 @@ fn source_views(report: ScanReport, sync_status: Option<SyncView>) -> Vec<Source
             ),
             quality: if opencode_partial { "partial" } else { "exact" }.into(),
             quality_label: if opencode_partial {
-                "部分覆盖"
+                "数据不完整"
             } else {
                 "精确解析"
             }
@@ -1312,7 +1312,7 @@ fn source_views(report: ScanReport, sync_status: Option<SyncView>) -> Vec<Source
                 coverage_detail(&kimi_diagnostics, errors("kimi"))
             ),
             quality: if kimi_partial { "partial" } else { "exact" }.into(),
-            quality_label: if kimi_partial { "部分覆盖" } else { "精确解析" }.into(),
+            quality_label: if kimi_partial { "数据不完整" } else { "精确解析" }.into(),
         },
         SourceView {
             id: "antigravity-live".into(),
@@ -1353,7 +1353,7 @@ fn source_views(report: ScanReport, sync_status: Option<SyncView>) -> Vec<Source
                 ),
             },
             quality: if failed { "partial" } else { "exact" }.into(),
-            quality_label: if failed { "部分覆盖" } else { "精确解析" }.into(),
+            quality_label: if failed { "数据不完整" } else { "精确解析" }.into(),
         });
     }
 
@@ -1886,7 +1886,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(codex.quality, "partial");
-        assert_eq!(codex.quality_label, "部分覆盖");
+        assert_eq!(codex.quality_label, "数据不完整");
         assert!(codex.detail.contains("格式异常 2 行"));
         assert!(codex.detail.contains("文本读取失败 1 行"));
         assert!(codex.detail.contains("可能不完整"));
@@ -1912,7 +1912,7 @@ mod tests {
     #[test]
     fn unreadable_store_marks_opencode_partial_with_the_reason() {
         // OpenCode 1.2+ 的 SQLite 库读不了：0 是"读不到"不是"没用过"，
-        // 必须标部分覆盖并把原因展示出来，不许显示成精确的 0。
+        // 必须标数据不完整并把原因展示出来，不许显示成精确的 0。
         let mut report = ScanReport::default();
         report.coverage_gaps.insert(
             "opencode".into(),
@@ -1926,7 +1926,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(opencode.quality, "partial");
-        assert_eq!(opencode.quality_label, "部分覆盖");
+        assert_eq!(opencode.quality_label, "数据不完整");
         assert!(opencode.detail.contains("SQLite"));
         assert!(opencode.detail.contains("尚不支持读取"));
     }
