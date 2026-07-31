@@ -15,7 +15,6 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 anyhow = "1"
-base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
 dirs = "6"
 hex = "0.4"
@@ -48,18 +47,14 @@ libc = "0.2"
 tauri-nspanel = { git = "https://github.com/ahkohd/tauri-nspanel", branch = "v2" }
 
 [target.'cfg(windows)'.dependencies]
+# 只剩任务栏进度按钮用得到。WinRT 合成那几个 feature 和 windows-numerics 是
+# HostBackdrop 留下的，随它一起删了。
 windows = { version = "0.61.3", features = [
-  "System",
-  "UI_Composition",
-  "UI_Composition_Desktop",
   "Win32_Foundation",
   "Win32_System_Com",
-  "Win32_System_WinRT",
-  "Win32_System_WinRT_Composition",
   "Win32_UI_Shell",
   "Win32_UI_WindowsAndMessaging",
 ] }
-windows-numerics = "0.2"
 
 [profile.release]
 codegen-units = 1

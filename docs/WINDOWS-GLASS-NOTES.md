@@ -1,14 +1,13 @@
 # Windows 玻璃材质：判别实验与稳定管线
 
-> **实验状态（`codex/windows-true-alpha-glass`）**
+> **适用状态：随主线发布**
 >
-> 本文记录的是测试分支已经复现并验证的 Windows 方案，还没有替代
-> `docs/PRODUCT-CONSTRAINTS.md` 中的正式产品约束。合并采用前需要由维护者确认，
-> 然后同步更新正式约束；如果实验被放弃，则以 `PRODUCT-CONSTRAINTS.md` 为准。
+> 本文记录的是已经复现并验证、随主线发布的 Windows 方案；
+> `docs/PRODUCT-CONSTRAINTS.md` 已同步为正式产品约束。
 
 这份记录覆盖 Metrik 在 Windows 11 上对卡片、横向胶囊和纵向胶囊的玻璃实验。
 2026-07-31 的冷启动对照实验推翻了昨天“WebView2 天生不透明，只能贴壁纸图”
-的结论。旧壁纸取景实现仍暂存在后端，方便实验分支回退，但当前前端不再调用。
+的结论。旧壁纸取景实现已从后端删除，前端也不再调用。
 
 当前代码的完整分层、状态机、CSS 配方、流光实现和验收矩阵见
 [`WINDOWS-GLASS-IMPLEMENTATION.md`](./WINDOWS-GLASS-IMPLEMENTATION.md)。
@@ -40,10 +39,10 @@ Windows 小组件在整个窗口生命周期中只使用一条合成管线：
 2. 运行期不调用 WebView 背景重置，不启用或关闭 HostBackdrop、Acrylic、Mica。
 3. `#root` 是唯一的大面积玻璃层，负责一个冷白/深色 tint 以及
    `backdrop-filter: blur(...) saturate(...)`。
-4. 卡片和胶囊沿用 DWM 默认小圆角，不使用自定义 HWND region；Windows 桌面端
-   `#root` 不再画第二套圆角或静态边框。浏览器没有原生窗口，只在
-   `html[data-runtime="browser"]` 下用 `#root` 模拟外框；shell 始终透明且不画
-   第二层边框。
+4. 不使用自定义 HWND region。外轮廓由 `#root` 画：无边框弹出窗口拿不到 DWM 的
+   系统圆角，所以圆角一直是 CSS 的事，半径按 `devicePixelRatio` 折算成物理像素
+   （否则会被各形态的 WebView 原生 zoom 放大，见第 6 节）。静态描边只在浏览器
+   补，桌面端不画，避免同心双框；shell 始终透明且不画第二层边框。
 5. 大面积子面板不再重复铺半透明白底，只保留分隔线、选中态和 hover。
 6. clear / light / dark / off 仅改变 CSS，卡片与胶囊变形也不触碰 HWND 合成策略。
 
@@ -87,8 +86,7 @@ Coffee-CLI 的结构更接近本次成功实验：窗口从创建时透明，根
 - 窗口移动、DPI、多显示器、幻灯片换图都需要额外同步和缓存失效逻辑。
 - 多层 tint 很容易叠成乳白板，恰好掩盖真实 Alpha 是否成功。
 
-它仍可作为极老系统或透明合成失效时的独立降级方案研究，但不应再作为 Windows 11
-主路径。
+它已经从代码库中删除，不再保留作降级方案。
 
 ## 6. 透明之后暴露出来的两件事
 

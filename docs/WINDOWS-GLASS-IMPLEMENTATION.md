@@ -1,14 +1,13 @@
 # Windows 真透明玻璃实现方案
 
-> **适用状态：Windows shell 实验实现**
+> **适用状态：Windows shell 正式实现**
 >
-> 本文描述 `codex/windows-true-alpha-glass` 分支上已经通过 Windows 11
-> 原生验证的实现。它是实现规范，不是产品约束的替代品；
-> `docs/PRODUCT-CONSTRAINTS.md` 已同步为真实窗口 Alpha 方案。
+> 本文描述已经通过 Windows 11 原生验证、随主线发布的实现。它是实现规范，
+> 不是产品约束的替代品；`docs/PRODUCT-CONSTRAINTS.md` 已同步为真实窗口
+> Alpha 方案。
 >
 > 调查过程、失败对照和参考项目分析见
-> [`WINDOWS-GLASS-NOTES.md`](./WINDOWS-GLASS-NOTES.md)，视觉验收记录见
-> [`design-qa.md`](../design-qa.md)。
+> [`WINDOWS-GLASS-NOTES.md`](./WINDOWS-GLASS-NOTES.md)。
 
 ## 1. 目标与结论
 
@@ -481,7 +480,6 @@ strip 的普通 `1px border` 会改变测量尺寸，造成 ResizeObserver 与�
 | `src/App.jsx` | 用户状态、持久化、三态循环、旧 off 迁移、浓度映射、圆角物理像素折算、指针变量 |
 | `src/styles.css` | 模糊、tint、圆角、层次、流光和辅助功能回落 |
 | `docs/WINDOWS-GLASS-NOTES.md` | 调查记录、参考项目和失败对照 |
-| `design-qa.md` | 当前实验分支的视觉与原生验收证据 |
 
 ## 12. 自动化防回归
 
