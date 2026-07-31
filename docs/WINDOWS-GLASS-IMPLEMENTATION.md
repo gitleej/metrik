@@ -3,9 +3,8 @@
 > **适用状态：Windows shell 实验实现**
 >
 > 本文描述 `codex/windows-true-alpha-glass` 分支上已经通过 Windows 11
-> 原生验证的实现。它是实现规范，不是产品约束的替代品。合并前需要把
-> `docs/PRODUCT-CONSTRAINTS.md` 中“透明档使用壁纸取景”的旧描述同步更新为
-> 本文的真实窗口 Alpha 方案。
+> 原生验证的实现。它是实现规范，不是产品约束的替代品；
+> `docs/PRODUCT-CONSTRAINTS.md` 已同步为真实窗口 Alpha 方案。
 >
 > 调查过程、失败对照和参考项目分析见
 > [`WINDOWS-GLASS-NOTES.md`](./WINDOWS-GLASS-NOTES.md)，视觉验收记录见
@@ -66,12 +65,11 @@ Windows 桌面 / 后方窗口
           │
           ├─ dark：深色 shell tint
           ├─ light：浅色 shell tint
-          └─ clear：#root 冷白轻霜 tint
+          └─ clear：#root 白霜（深色字）或薄暗罩（白色字）
           │
           ▼
-桌面端 HWND 外框：Windows DWM 默认小圆角
-桌面端 #root：零圆角、零静态描边，避免第二套轮廓
-浏览器 #root：CSS 模拟圆角与静态描边
+两端 #root：圆角按物理像素折算（--glass-radius），不随缩放变大
+浏览器 #root：额外补一层模拟静态描边；桌面端不画
 两端 #root::after：边缘流光
           │
           ▼
@@ -129,6 +127,7 @@ HWND。它属于 expanded/能力回落的内部状态，不再作为第四种组
 | 状态 | localStorage | 含义 |
 |---|---|---|
 | 组件外观 | `metrik:glassTint` | `dark`、`light` 或 `clear` |
+| 透明档文字 | `metrik:glassInk` | `dark` 或 `light`，只在 clear 下生效 |
 | 玻璃浓度 | `metrik:glassAlpha` | `0.05–0.96`，默认 `0.82` |
 
 卡片标题栏按钮按下面顺序循环：
@@ -163,12 +162,15 @@ Windows 的 `dark`、`light`、`clear` 全部解析为 `alpha`，不能把 tint 
 |---|---|
 | dark alpha | `--transparent` |
 | light alpha | `--transparent --glass-light` |
-| clear alpha | `--transparent --glass-clear` |
+| clear alpha（深色字） | `--transparent --glass-light --glass-clear` |
+| clear alpha（白色字） | `--transparent --glass-clear --glass-ink-light` |
 | CSS fallback | 在对应组合上再加 `--glass-css` |
 | macOS | 加 `--mac`，忽略 Windows 的 light/clear 存储值 |
 
-clear 不再复用 `--glass-light`。它继承透明 HUD 的白色前景体系，再由
-`--glass-clear` 覆盖材质层、局部面板和文字阴影。
+clear 只覆盖材质层：shell 自身完全透明，白霜/暗罩和模糊都画在 `#root` 上。
+前景整套沿用另外两档——深色字复用 `--glass-light` 那套规则，白色字复用透明 HUD
+的白色体系（即不挂 `--glass-light`）。这两组文字色与罩层的配对不能拆开，
+理由见 §6.3。
 
 只有 Windows clear 且模式为 `alpha` 时，shell 才带：
 
@@ -264,30 +266,39 @@ clear 卡片中的 compact 周期控件明确设置 `backdrop-filter: none`，�
 
 #### clear
 
-clear 最接近 Pogget 参考效果：
+clear 的文字颜色由用户选（`metrik:glassInk`），**罩层跟着文字走**：
 
-- shell 本身保持 `background: transparent`；
-- `#root` 绘制单层冷白 tint；
-- 白色前景带轻微深蓝灰文字阴影，在亮色壁纸上仍可辨认；
-- tint 颜色为 `rgb(229 237 246 / alpha)`；
-- alpha 使用：
+| 文字 | 罩层 | 浓度区间 |
+|---|---|---|
+| 深色字（默认） | 白霜 `rgb(229 237 246 / a)` | `clamp(0.38, 0.3 + a * 0.36, 0.72)`，胶囊 `clamp(0.34, 0.26 + a * 0.32, 0.62)` |
+| 白色字 | 暗罩 `rgb(18 24 36 / a)` | `clamp(0.14, 0.1 + a * 0.34, 0.44)` |
 
-```css
-clamp(0.1, calc(0.08 + var(--shell-glass-alpha) * 0.38), 0.46)
-```
+**白字配白霜是唯一必坏的组合，不提供。** 往白底上再加白不会拉开对比度：实测
+浅色壁纸上白字对比度 1.10:1，把霜从 0.28 加到 0.44 也只到 1.12:1。同一组测量里
+深色字配 0.44 白霜在亮壁纸上是 14.4:1、在暗背景上 4.0:1。所以
+`glassAppearance.js` 把文字色和罩层绑成一对，`glassAppearance.test.js` 有断言
+守着，改一边必须改另一边。
 
+两档共同的部分：
+
+- shell 本身 `background: transparent`，白霜/暗罩和唯一的 `backdrop-filter`
+  都在 `#root` 上；
 - 大面积子面板改为透明，仅保留 inset 分隔边；
 - hover、selected 和按钮只使用小面积半透明反馈；
-- Windows 桌面端由 DWM 负责唯一外轮廓，`#root` 只承载背景和动态流光；
-- 浏览器没有 HWND，在 browser runtime 下用 `#root` 补圆角和静态外框；
-- shell 不再绘制第二层边框或圆角，避免同心双框。
-
-这个结构让背景仍然可辨认，同时把文字附近的局部对比维持在可读范围。
+- 文字带一层与自身相反的阴影拉开局部对比（深色字配浅色光晕，白色字配深色
+  阴影）。**Blink 的 UA 样式给 `input`/`button` 硬写了 `text-shadow: none`**，
+  外壳那层阴影传不进按钮，周期签/额度卡/刷新/统计说明都要单独补一条；坐在
+  实心药丸上的选中态则要显式关掉阴影，并保持与药丸相反的字色；
+- 次级文字比另外两档更重（`0.82` / 字重 500）：薄罩下壁纸的明暗直接透上来，
+  浅色档那套 `0.58` 的次级色局部对比会塌到 1.8:1；
+- 浏览器没有真实 Alpha，clear 让位给浅色档的近实心回落，不假装透明。
 
 ### 6.4 浓度映射
 
-clear 直接使用用户的 `0.05–0.96` 原始值。dark/light 为了避免低浓度下文字失去
-对比度，先线性映射到 `0.55–0.96`：
+clear 直接使用用户的 `0.05–0.96` 原始值，由 CSS 各自映射到白霜或暗罩的区间
+（见 §6.3）。dark/light 先线性映射到 `0.55–0.96`——**0.55 是白色文字的可读下限，
+不是历史补偿**：白字压在 0.55 深底上、透出亮壁纸时对比度 4.2:1，降到 0.22 只剩
+1.9:1。
 
 ```js
 t = (glassAlpha - 0.05) / (0.96 - 0.05)
@@ -303,19 +314,30 @@ shellGlassAlpha = 0.55 + clamp(t, 0, 1) * (0.96 - 0.55)
 
 ## 7. 圆角、裁剪与尺寸稳定
 
-Windows 悬浮形态使用 DWM 默认小圆角，不再通过 `SetWindowRgn` 裁切 HWND。自定义
-region 在卡片与胶囊变形、缩放和内容测量并发时可能短暂沿用旧区域，实际表现就是
-标题栏残片、左右白条或底部被错误切圆；它不适合作为当前窗口结构的稳定边界。
+不再通过 `SetWindowRgn` 裁切 HWND。自定义 region 在卡片与胶囊变形、缩放和内容
+测量并发时可能短暂沿用旧区域，实际表现就是标题栏残片、左右白条或底部被错误
+切圆；它不适合作为当前窗口结构的稳定边界。
 
-圆角所有权按运行环境分开：
+**圆角由 `#root` 画，两端同一条规则，写成物理像素。** 无边框弹出窗口拿不到 DWM
+的系统圆角，所以外轮廓实际上一直是 CSS 在画——文档此前写"桌面端由 DWM 拥有
+外框、`#root` 保持零圆角"是错的：那条 `border-radius: 0` 的选择器
+（`html:has(…--glass-clear) #root`，特指度 1,1,1）一直被更靠前也更具体的
+`html:has(…--transparent:not(--mac):not(--glass-css)) #root`（1,3,1）压着，
+从未生效。
 
-- Windows 桌面端由 DWM 绘制唯一外轮廓；clear `#root` 保持 `border-radius: 0`、
-  `box-shadow: none`，shell 也保持零 border/radius/shadow；
-- 浏览器没有原生窗口，仅在 `html[data-runtime="browser"]` 下给 `#root` 补模拟外框：
-  compact `18px`、horizontal strip `20px`、vertical strip `16px`；
-- 尺寸切换、内容测量和 DPI 重断言只负责窗口尺寸，不再同步第二套裁剪状态。
+CSS px 会被卡片和胶囊各自的 WebView 原生 zoom 放大，所以同样写 `8px`：
 
-该方案保留此前克制的小系统圆角，也避免原生硬裁剪与 WebView 表面不同步。
+| 形态 | zoom | dpr | 实际画出 |
+|---|---|---|---|
+| 卡片（缩放 0.95） | 0.95 | 1.1875 | 9.5 物理像素 |
+| 竖胶囊（缩放 1.75） | 1.75 | 2.1875 | **17.5 物理像素**——即被否掉的"大圆头" |
+
+`App.jsx` 按 `devicePixelRatio` 把 `GLASS_RADIUS_PX`（10 物理像素）折算成
+`--glass-radius`，`resize` 时重算。两种形态、任何缩放档都是同一个视觉半径。
+
+静态外框只在浏览器补（`html[data-runtime="browser"]`）；桌面端不画，避免与
+窗口自身的轮廓形成同心双框。尺寸切换、内容测量和 DPI 重断言只负责窗口尺寸，
+不再同步第二套裁剪状态。
 
 静态外框不使用普通 `border`，而使用 inset `box-shadow`：
 
@@ -366,18 +388,22 @@ mask 只保留 `1px` 边环：
 
 - 增加 `--glass-css`；
 - dark/light 使用约 `0.95–0.96` 的近实心背景；
-- clear 保留布局、配色和边缘交互预览；
+- clear 的材质规则整条带 `:not(--glass-css)`，于是让位给浅色档的近实心回落，
+  不假装透明；边缘交互仍可预览；
 - 不设置 `data-glass-surface="true-alpha"`。
 
-浏览器预览适合检查 class、圆角、尺寸和交互，不可作为 Windows 真透明验收证据。
+浏览器预览适合检查 class、尺寸和交互，**不能用来验收圆角**：桌面端 `#root`
+的半径按物理像素折算（§7），浏览器补的是另一套模拟外框，两边量到的值本就
+不同。真透明同样只能在 Windows 桌面窗口上验收。
 
 ### 9.2 减少透明度
 
 `prefers-reduced-transparency: reduce` 下：
 
 - 关闭 `#root` backdrop-filter；
-- clear/light 回落为约 `0.98` 的霜白实色；
-- dark 回落为约 `0.98` 的深色；
+- clear（深色字）与 light 回落为约 `0.98` 的霜白实色；
+- clear（白色字）与 dark 回落为约 `0.98` 的深色——文字色决定回落到哪一侧，
+  靠的是 clear 深色字挂着 `--glass-light`、白色字不挂；
 - 关闭边缘流光。
 
 ### 9.3 减少动画
@@ -452,7 +478,7 @@ strip 的普通 `1px border` 会改变测量尺寸，造成 ResizeObserver 与�
 | `src/glassAppearance.js` | 模式解析、class 组合、Windows 不可变合成决策 |
 | `src/glassAppearance.test.js` | 状态转换与 class 防回归测试 |
 | `src/windowClient.js` | 平台分流；Windows 不执行运行期合成变更 |
-| `src/App.jsx` | 用户状态、持久化、三态循环、旧 off 迁移、浓度映射、指针变量 |
+| `src/App.jsx` | 用户状态、持久化、三态循环、旧 off 迁移、浓度映射、圆角物理像素折算、指针变量 |
 | `src/styles.css` | 模糊、tint、圆角、层次、流光和辅助功能回落 |
 | `docs/WINDOWS-GLASS-NOTES.md` | 调查记录、参考项目和失败对照 |
 | `design-qa.md` | 当前实验分支的视觉与原生验收证据 |
@@ -466,11 +492,13 @@ strip 的普通 `1px border` 会改变测量尺寸，造成 ResizeObserver 与�
 3. 内部 `alpha → off → alpha` 转换不重置 WebView；
 4. 同一转换不修改 native backdrop；
 5. Windows alpha class 不误挂 `--glass-css`；
-6. clear 不误挂浅色外观 class，保持白色前景；
-7. compact 与 strip 共用 true-alpha 外观；
-8. clear 不再生成任何 `--wall-*` 壁纸变量；
-9. 浏览器 clear 保留交互但不声称 true alpha；
-10. macOS 忽略 Windows 持久化的 clear tint。
+6. clear 的两种文字色各自绑定能承载它的罩层：深色字必须挂 `--glass-light`，
+   白色字必须不挂——这条守着 §6.3 那个必坏组合；
+7. 文字选项只作用于 clear，dark/light 不受影响；
+8. compact 与 strip 共用 true-alpha 外观；
+9. clear 不再生成任何 `--wall-*` 壁纸变量；
+10. 浏览器 clear 保留交互但不声称 true alpha；
+11. macOS 忽略 Windows 持久化的 clear tint。
 
 基础检查：
 
@@ -491,8 +519,10 @@ cargo test
 |---|---|
 | 冷启动 clear compact | 桌面、图标和后方窗口可见，无白板 |
 | dark → light → clear → dark | 三种外观依次切换，无第四种“不透明” |
+| clear 的深色字 ↔ 白色字 | 罩层跟着翻面；选中的周期签始终与药丸反色 |
 | compact → horizontal strip → compact | 无闪白、无尺寸振荡 |
 | compact → vertical strip → compact | 圆角和裁剪正确 |
+| 卡片缩放 75%、胶囊缩放 175% | 两种形态的圆角物理半径一致，不随缩放变大 |
 | clear → expanded → clear | expanded 不透明，返回后透明恢复 |
 | 调整浓度 5% → 96% | 连续变化，无原生材质重建 |
 | 指针靠近各边 | 高光跟随且只在边环内 |

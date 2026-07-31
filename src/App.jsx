@@ -38,6 +38,7 @@ import qoderAppIcon from "./assets/qoder-app-icon.png";
 import workbuddyAppIcon from "./assets/workbuddy-app-icon.svg";
 import zcodeAppIcon from "./assets/zcode-app-icon.png";
 import { glassShellAppearance, nextGlassTint, resolveGlassMode } from "./glassAppearance.js";
+import { QUOTA_LOW_REMAINING, bindingWindow } from "./quotaWindows.js";
 import { horizontalStripTargetWidth } from "./windowGeometry";
 import {
   configureQoderCookie,
@@ -190,10 +191,12 @@ function normalizeVisibleAgentList(agentIds) {
 // 这些常量只用于进入 strip 的第一帧，之后的窗口尺寸由 StripBar 里的
 // 内容测量观察器按真实渲染结果收敛——不同字体/DPI/缩放比例、有无更新点
 // 都不会再裁掉内容（曾因常量与 CSS 脱钩裁掉竖条最后一个按钮）。
-const STRIP_CELL_WIDTH = 68;
+const STRIP_CELL_WIDTH = 58;
 const STRIP_CHROME_WIDTH = IS_MAC ? 76 : 158;
 const STRIP_BAR_HEIGHT = 40;
-const STRIP_VERTICAL_WIDTH = 52;
+// 竖条宽度由 26px 控件槽 + 外壳 padding 定死下限（32px）；42 留 10px 呼吸，
+// 再宽图标和百分比周围就空得发肥。
+const STRIP_VERTICAL_WIDTH = 42;
 const STRIP_VCELL_HEIGHT = 54;
 const STRIP_VCHROME_HEIGHT = IS_MAC ? 84 : 160;
 
@@ -388,11 +391,12 @@ function modelDisplayName(model) {
   return model;
 }
 
-// 小插件每行 Agent 最多展示两个配额窗口：按来源排序取前两个可用窗口
-// （已过期窗口也算有来源，单独走"已重置，等待刷新"样式）；一个都没有时
-// 由调用方渲染 "-- / 暂无可靠来源"，绝不编造数字。
+// 每行 Agent 的 tooltip 列出全部有来源的窗口（已过期窗口也算有来源，单独走
+// "已重置，等待刷新"文案）；一个都没有时由调用方渲染 "-- / 暂无可靠来源"，
+// 绝不编造数字。不能截断：行上显示的是 bindingWindow 挑出来的那个，它可能排在
+// 第三位（Kimi 的月度窗口就是），截断会出现"行上写着月度、tooltip 里没有月度"。
 function compactDisplayWindows(entry) {
-  return (entry.windows || []).filter((window) => window.view.available).slice(0, 2);
+  return (entry.windows || []).filter((window) => window.view.available);
 }
 
 // 原生 title tooltip：逐窗口列出剩余与重置倒计时，并标注官方/快照/演示来源，
@@ -411,15 +415,13 @@ function compactQuotaTooltip(agentId, windows) {
   return [AGENT_META[agentId].label, ...lines].join("\n");
 }
 
-// 胶囊条一格优先展示 5 小时窗口；该 Agent 没有 5h 窗口时，取后端排好序的
-// 第一个可用窗口（后端按 five_hour → seven_day → 模型/月度排序）。
+// 胶囊条一格展示当前真正约束用量的窗口，规则见 quotaWindows.js。
 function stripCellData(entry) {
   const windows = (entry.windows || []).filter(
     (window) => window.view.available && !window.view.resetExpired,
   );
   if (!windows.length) return null;
-  const fiveHour = windows.find((window) => String(window.key || "").includes("five_hour"));
-  return { tightest: fiveHour || windows[0], windows };
+  return { tightest: bindingWindow(windows) || windows[0], windows };
 }
 
 // 原生 title tooltip：列出全部窗口的剩余与重置倒计时；快照数据标注更新时间。
@@ -454,7 +456,8 @@ function quotaSeverity(view) {
   if (!view.available || view.resetExpired) return "";
   const used = quotaUsedPercent(view);
   if (used >= 95) return "critical";
-  if (used >= 85) return "warn";
+  // 与 bindingWindow 的"告急"同一条线：越过它，这个窗口才会顶到行首。
+  if (used >= 100 - QUOTA_LOW_REMAINING) return "warn";
   return "";
 }
 
@@ -508,13 +511,16 @@ function QuotaBarRow({ label, view, windowKey, accent }) {
   );
 }
 
-/// 数据来源状态的三段文案：标题一行、提示一行、完整说明进 title。
+/// 数据来源状态的文案。完整说明一律进 title。
+/// title + hint 给紧凑卡片底栏；state 给侧栏——那里主标题恒为「数据统计」，
+/// 状态由灯和 state 这一行承担，不把"数据不完整"顶成入口的名字。
 /// "部分覆盖" 这种自造词读者看不懂，直接说清楚哪里不全。
 function sourceStatusCopy(snapshot, loading, partial) {
   if (snapshot.pending) {
     return {
       title: "正在读取",
       hint: "首次扫描",
+      state: "正在读取",
       detail: "正在读取本机日志，日志库较大时首次扫描需要几分钟。",
     };
   }
@@ -522,6 +528,7 @@ function sourceStatusCopy(snapshot, loading, partial) {
     return {
       title: "读取失败",
       hint: "点此排查",
+      state: "读取失败",
       detail: "本机日志读取失败。界面不会用演示数字顶替，点此查看数据来源。",
     };
   }
@@ -529,15 +536,22 @@ function sourceStatusCopy(snapshot, loading, partial) {
     return {
       title: "数据不完整",
       hint: "点此查看",
+      state: "数据不完整",
       detail: "部分日志未能解析，统计数字少于真实用量。点此查看涉及哪些来源。",
     };
   }
   if (snapshot.isDemo) {
-    return { title: "演示数据", hint: "非真实用量", detail: "当前显示的是演示数据，不是本机真实用量。" };
+    return {
+      title: "演示数据",
+      hint: "非真实用量",
+      state: "演示数据",
+      detail: "当前显示的是演示数据，不是本机真实用量。",
+    };
   }
   return {
     title: "数据可追溯",
     hint: loading ? "更新中" : formatClock(snapshot.generatedAt),
+    state: loading ? "更新中" : `更新于 ${formatClock(snapshot.generatedAt)}`,
     detail: `每个数字都能追到来源日志。更新于 ${formatClock(snapshot.generatedAt)}。`,
   };
 }
@@ -566,8 +580,9 @@ function Sidebar({ activeNav, onNavChange, snapshot, loading }) {
         ))}
       </nav>
 
-      {/* 两行都不换行、高度固定：这块贴在侧栏底部，文案随状态变长会把整条
-          导航顶得上下跳。完整说明放 title，点进去是数据来源页。 */}
+      {/* 这块是数据来源页的入口，主标题恒为「数据统计」；状态由上方的灯和下面
+          那行承担。两行都不换行、高度固定：文案随状态变长会把整条导航顶得上下
+          跳。完整说明放 title。 */}
       <button
         className="source-status"
         type="button"
@@ -575,8 +590,8 @@ function Sidebar({ activeNav, onNavChange, snapshot, loading }) {
         title={sourceStatus.detail}
       >
         <span className={`status-dot ${loading ? "status-dot--loading" : ""} ${snapshot.loadError ? "status-dot--error" : ""} ${partial ? "status-dot--warning" : ""}`} />
-        <span>{sourceStatus.title}</span>
-        <small>{sourceStatus.hint}</small>
+        <span>数据统计</span>
+        <small>{sourceStatus.state}</small>
       </button>
     </aside>
   );
@@ -1087,6 +1102,7 @@ function StripBar({
   glassAlpha = 0.82,
   glassMode = "css",
   glassTint = "dark",
+  glassInk = "dark",
   orientation,
   onToggleOrientation,
   onTogglePinned,
@@ -1110,6 +1126,7 @@ function StripBar({
     transparent,
     glassMode,
     glassTint,
+    glassInk,
     glassAlpha,
     isMac: IS_MAC,
     vertical,
@@ -1315,6 +1332,7 @@ function CompactWidget({
   transparent,
   glassMode = "css",
   glassTint = "dark",
+  glassInk = "dark",
   onPeriodChange,
   onOpenSources,
   onTogglePinned,
@@ -1435,6 +1453,7 @@ function CompactWidget({
     transparent,
     glassMode,
     glassTint,
+    glassInk,
     glassAlpha,
     isMac: IS_MAC,
     loading,
@@ -1579,9 +1598,9 @@ function CompactWidget({
               if (!meta) return null;
               const entry = agentQuotaFor(snapshot, agentId);
               const windows = compactDisplayWindows(entry);
-              // 行内头条窗口与胶囊条同规则：后端排序 five_hour 优先的第一个可用窗口；
+              // 行内头条窗口与胶囊条同规则，见 quotaWindows.js；
               // 完整窗口明细在该行的原生 tooltip 与焦点卡中。
-              const headline = windows[0] || null;
+              const headline = bindingWindow(entry.windows) || windows[0] || null;
               const headlineView = headline?.view || null;
               const current = Boolean(headlineView && headlineView.available && !headlineView.resetExpired);
               const severity = headlineView ? quotaSeverity(headlineView) : "";
@@ -2158,6 +2177,10 @@ const THEME_OPTIONS = [
   { id: "dark", label: "暗色" },
 ];
 
+// 悬浮形态的窗口圆角，物理像素。取值对齐卡片此前的观感：8 CSS px 在当时的
+// dpr 1.1875（系统 125% × 卡片缩放 95%）下正好画出 9.5 物理像素。
+const GLASS_RADIUS_PX = 10;
+
 const GLASS_TINT_OPTIONS = [
   { id: "dark", label: "深色" },
   { id: "light", label: "浅色" },
@@ -2166,6 +2189,18 @@ const GLASS_TINT_OPTIONS = [
 
 function normalizeGlassTint(value) {
   return GLASS_TINT_OPTIONS.some((option) => option.id === value) ? value : "dark";
+}
+
+// 透明档的文字颜色。桌面挂件常见的两种风格：深色字配白霜（Pogget 一路），
+// 或白色字直接压在壁纸上（Rainmeter 一路）。两者需要的底完全相反，所以
+// 选文字颜色实际上也在选罩层，见 glassAppearance.js。
+const GLASS_INK_OPTIONS = [
+  { id: "dark", label: "深色字" },
+  { id: "light", label: "白色字" },
+];
+
+function normalizeGlassInk(value) {
+  return GLASS_INK_OPTIONS.some((option) => option.id === value) ? value : "dark";
 }
 
 function SliderRow({ label, hint, min, max, step, percent, ariaLabel, onChange }) {
@@ -2189,7 +2224,7 @@ function SliderRow({ label, hint, min, max, step, percent, ariaLabel, onChange }
   );
 }
 
-function AppearanceCard({ theme, onThemeChange, glassAlpha, onGlassAlpha, glassTint, onGlassTint, uiScale, onUiScale, stripScale, onStripScale }) {
+function AppearanceCard({ theme, onThemeChange, glassAlpha, onGlassAlpha, glassTint, onGlassTint, glassInk, onGlassInk, uiScale, onUiScale, stripScale, onStripScale }) {
   return (
     <div className="settings-card">
       <h2>外观与缩放</h2>
@@ -2225,6 +2260,27 @@ function AppearanceCard({ theme, onThemeChange, glassAlpha, onGlassAlpha, glassT
                 className={glassTint === option.id ? "is-selected" : ""}
                 aria-pressed={glassTint === option.id}
                 onClick={() => onGlassTint(option.id)}
+              >
+                {option.label}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+      {!IS_MAC && glassTint === "clear" && (
+        <div className="settings-subsection">
+          <h3>透明档文字</h3>
+          <p className="settings-muted">
+            深色字配白霜，浅色壁纸上最清楚；白色字配一层薄暗罩，接近桌面挂件常见的风格。
+          </p>
+          <div className="theme-toggle" role="group" aria-label="透明档文字">
+            {GLASS_INK_OPTIONS.map((option) => (
+              <button
+                key={option.id}
+                type="button"
+                className={glassInk === option.id ? "is-selected" : ""}
+                aria-pressed={glassInk === option.id}
+                onClick={() => onGlassInk(option.id)}
               >
                 {option.label}
               </button>
@@ -2491,7 +2547,7 @@ const SETTINGS_TABS = [
   },
 ];
 
-function SettingsSection({ onSnapshotRefresh, widgetAgents, onToggleWidgetAgent, onMoveWidgetAgent, stripAgents, onToggleStripAgent, onMoveStripAgent, glassAlpha, onGlassAlpha, glassTint, onGlassTint, uiScale, onUiScale, stripScale, onStripScale, theme, onThemeChange, autoUpdateCheck, onAutoUpdateCheck, availableUpdate }) {
+function SettingsSection({ onSnapshotRefresh, widgetAgents, onToggleWidgetAgent, onMoveWidgetAgent, stripAgents, onToggleStripAgent, onMoveStripAgent, glassAlpha, onGlassAlpha, glassTint, onGlassTint, glassInk, onGlassInk, uiScale, onUiScale, stripScale, onStripScale, theme, onThemeChange, autoUpdateCheck, onAutoUpdateCheck, availableUpdate }) {
   const [settings, setSettings] = useState(null);
   const [directoryInput, setDirectoryInput] = useState("");
   const [busy, setBusy] = useState(false);
@@ -2588,6 +2644,8 @@ function SettingsSection({ onSnapshotRefresh, widgetAgents, onToggleWidgetAgent,
             onGlassAlpha={onGlassAlpha}
             glassTint={glassTint}
             onGlassTint={onGlassTint}
+            glassInk={glassInk}
+            onGlassInk={onGlassInk}
             uiScale={uiScale}
             onUiScale={onUiScale}
             stripScale={stripScale}
@@ -3510,6 +3568,15 @@ export function App() {
     setGlassTint(value);
     localStorage.setItem("metrik:glassTint", value);
   }, []);
+  // 透明档的文字颜色，只在透明档生效；其它两档的前景由配色本身决定。
+  const [glassInk, setGlassInk] = useState(() =>
+    normalizeGlassInk(localStorage.getItem("metrik:glassInk")),
+  );
+  const handleGlassInk = useCallback((next) => {
+    const value = normalizeGlassInk(next);
+    setGlassInk(value);
+    localStorage.setItem("metrik:glassInk", value);
+  }, []);
   // 轮转按钮要读当前配色但不该因它重建回调，用 ref 取值。
   const glassTintRef = useRef(glassTint);
   glassTintRef.current = glassTint;
@@ -3730,8 +3797,9 @@ export function App() {
     };
   }, [transparent, viewMode, glassTint]);
 
-  // 深色/浅色仍映射到较高 tint 以保证文字对比；clear 直接把滑杆值交给
-  // 单层 Alpha 表面，由 CSS 将它映射到轻霜浓度，不再读取或定位壁纸图片。
+  // 深色档的 0.55 下限是白色文字的可读下限，不是历史补偿：白字压在 0.55 深底
+  // 上、透出亮壁纸时对比度 4.2:1，降到 0.22 就只剩 1.9:1。浅色档同理。
+  // clear 走深色文字，下限交给 CSS 里那条白霜曲线（0.38 起）。
   const shellGlassAlpha = useMemo(() => {
     if (glassTint === "clear") return glassAlpha;
     const t = (glassAlpha - 0.05) / (0.96 - 0.05);
@@ -3746,6 +3814,25 @@ export function App() {
       document.documentElement.style.removeProperty("--shell-glass-alpha");
     };
   }, [shellGlassAlpha]);
+
+  // 圆角写成 CSS px 会被卡片和胶囊各自的 WebView 原生 zoom 放大：同样 8px，
+  // 卡片(zoom 0.95)画出 9.5 物理像素，竖胶囊(zoom 1.75)画出 17.5，成了大圆头。
+  // 折成物理像素让两种形态、任何缩放档都是同一个视觉半径。
+  useLayoutEffect(() => {
+    const apply = () => {
+      const dpr = window.devicePixelRatio || 1;
+      document.documentElement.style.setProperty(
+        "--glass-radius",
+        `${(GLASS_RADIUS_PX / dpr).toFixed(2)}px`,
+      );
+    };
+    apply();
+    window.addEventListener("resize", apply);
+    return () => {
+      window.removeEventListener("resize", apply);
+      document.documentElement.style.removeProperty("--glass-radius");
+    };
+  }, []);
 
   // mac 的设置页开在独立的完整视图窗口里，面板是另一个 webview 实例，
   // 拖滑杆时面板自己的 React 状态不会变。WKWebView 的 storage 事件不跨
@@ -4112,6 +4199,7 @@ export function App() {
         glassAlpha={shellGlassAlpha}
         glassMode={glassMode}
         glassTint={glassTint}
+        glassInk={glassInk}
         orientation={stripOrientation}
         onToggleOrientation={handleToggleStripOrientation}
         onTogglePinned={handleTogglePinned}
@@ -4136,6 +4224,7 @@ export function App() {
           transparent={transparent}
           glassMode={glassMode}
           glassTint={glassTint}
+          glassInk={glassInk}
           onPeriodChange={setPeriod}
           onOpenSources={() => setDrawerOpen(true)}
           onTogglePinned={handleTogglePinned}
@@ -4283,6 +4372,8 @@ export function App() {
             onGlassAlpha={handleGlassAlpha}
             glassTint={glassTint}
             onGlassTint={handleGlassTint}
+            glassInk={glassInk}
+            onGlassInk={handleGlassInk}
             uiScale={uiScale}
             onUiScale={handleUiScale}
             stripScale={stripScale}

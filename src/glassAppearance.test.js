@@ -76,7 +76,8 @@ test("compact and strip clear glass share one true-alpha appearance", () => {
     assert.equal(appearance.edgeInteractive, true);
     assert.match(appearance.className, new RegExp(`${prefix}--transparent`));
     assert.match(appearance.className, new RegExp(`${prefix}--glass-clear`));
-    assert.doesNotMatch(appearance.className, new RegExp(`${prefix}--glass-light`));
+    // 透明档共用浅色档的深色前景，只有材质层不同。
+    assert.match(appearance.className, new RegExp(`${prefix}--glass-light`));
     assert.doesNotMatch(appearance.className, /--glass-css/);
     assert.deepEqual(appearance.style, {
       "--glass-alpha": 0.82,
@@ -85,6 +86,36 @@ test("compact and strip clear glass share one true-alpha appearance", () => {
       Object.keys(appearance.style).some((key) => key.startsWith("--wall-")),
       false,
     );
+  }
+});
+
+test("the clear tint pairs each ink colour with the backdrop that can carry it", () => {
+  for (const kind of ["widget", "strip"]) {
+    const prefix = kind === "widget" ? "widget-shell" : "strip-shell";
+    const base = { transparent: true, glassMode: GLASS_MODES.alpha, glassTint: "clear" };
+
+    // 深色字 → 白霜，沿用浅色档整套前景。
+    const ink = glassShellAppearance(kind, { ...base, glassInk: "dark" });
+    assert.match(ink.className, new RegExp(`${prefix}--glass-light`));
+    assert.doesNotMatch(ink.className, new RegExp(`${prefix}--glass-ink-light`));
+
+    // 白色字 → 深色薄罩，绝不能同时挂浅色档（白字压白霜读不出来）。
+    const white = glassShellAppearance(kind, { ...base, glassInk: "light" });
+    assert.match(white.className, new RegExp(`${prefix}--glass-ink-light`));
+    assert.doesNotMatch(white.className, new RegExp(`${prefix}--glass-light`));
+    assert.equal(white.trueAlpha, true);
+  }
+});
+
+test("the ink choice only applies to the clear tint", () => {
+  for (const glassTint of ["dark", "light"]) {
+    const appearance = glassShellAppearance("widget", {
+      transparent: true,
+      glassMode: GLASS_MODES.alpha,
+      glassTint,
+      glassInk: "light",
+    });
+    assert.doesNotMatch(appearance.className, /--glass-ink-light/);
   }
 });
 
@@ -98,7 +129,7 @@ test("browser clear fallback keeps the edge interaction without claiming true al
   assert.equal(appearance.edgeInteractive, true);
   assert.equal(appearance.trueAlpha, false);
   assert.match(appearance.className, /widget-shell--glass-css/);
-  assert.doesNotMatch(appearance.className, /widget-shell--glass-light/);
+  assert.match(appearance.className, /widget-shell--glass-light/);
 });
 
 test("macOS ignores a stored Windows clear tint", () => {

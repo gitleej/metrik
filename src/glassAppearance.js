@@ -45,6 +45,7 @@ export function glassShellAppearance(
     transparent = false,
     glassMode = GLASS_MODES.css,
     glassTint = "dark",
+    glassInk = "dark",
     glassAlpha = 0.82,
     isMac = false,
     vertical = false,
@@ -61,8 +62,18 @@ export function glassShellAppearance(
   if (transparent) {
     classes.push(`${prefix}--transparent`);
     if (glassMode === GLASS_MODES.css) classes.push(`${prefix}--glass-css`);
-    if (!isMac && glassTint === "light") classes.push(`${prefix}--glass-light`);
-    if (!isMac && glassTint === "clear") classes.push(`${prefix}--glass-clear`);
+    // 透明档的文字颜色用户可选，两种颜色各自要配一种底：
+    //   深色字 → 白霜（沿用浅色档那整套前景规则）
+    //   白色字 → 深色薄 scrim（沿用深色档那套白色前景）
+    // 不能混搭：白字压在白霜上实测 1.10:1，把霜从 0.28 加到 0.44 也只到 1.12:1。
+    const clearInkLight = glassTint === "clear" && glassInk === "light";
+    if (!isMac && (glassTint === "light" || (glassTint === "clear" && !clearInkLight))) {
+      classes.push(`${prefix}--glass-light`);
+    }
+    if (!isMac && glassTint === "clear") {
+      classes.push(`${prefix}--glass-clear`);
+      if (clearInkLight) classes.push(`${prefix}--glass-ink-light`);
+    }
   }
   if (isMac) classes.push(`${prefix}--mac`);
   if (kind === "widget" && loading) classes.push("is-loading");
