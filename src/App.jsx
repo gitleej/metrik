@@ -37,6 +37,7 @@ import opencodeAppIcon from "./assets/opencode-app-icon.png";
 import qoderAppIcon from "./assets/qoder-app-icon.png";
 import workbuddyAppIcon from "./assets/workbuddy-app-icon.svg";
 import zcodeAppIcon from "./assets/zcode-app-icon.png";
+import { glassShellAppearance, nextGlassTint, resolveGlassMode } from "./glassAppearance.js";
 import { horizontalStripTargetWidth } from "./windowGeometry";
 import {
   configureQoderCookie,
@@ -62,15 +63,13 @@ import {
   checkForUpdate,
   closeWindow,
   getAutostart,
-  getGlassWallpaper,
-  getGlassWallpaperSignature,
   installUpdate,
   isDesktop,
   isMacPlatform,
+  isWindowsPlatform,
   minimizeWindow,
   onMacAppearance,
   onScaleFactorChanged,
-  onWindowMoved,
   onTrayShowExpanded,
   openExpandedWindow,
   readStripScale,
@@ -951,13 +950,10 @@ function ThemeQuickToggle({ theme, darkTheme, onThemeChange }) {
 }
 
 function WindowActions({ mode, pinned, transparent = false, glassTint = "dark", macMinimal = false, theme, darkTheme, onThemeChange, onToggleMode, onTogglePinned, onToggleTransparent }) {
-  // 四态轮转按钮：标签同时给出"现在是什么"和"再点一下变成什么"，
-  // 否则从透明点过去先落到不透明，会被当成切换失灵。
-  const glassOrder = ["off", ...GLASS_TINT_OPTIONS.map((option) => option.id)];
   const glassName = (id) =>
-    id === "off" ? "不透明" : GLASS_TINT_OPTIONS.find((option) => option.id === id)?.label || "玻璃";
-  const glassCurrent = transparent ? glassTint : "off";
-  const glassNext = glassOrder[(glassOrder.indexOf(glassCurrent) + 1) % glassOrder.length];
+    GLASS_TINT_OPTIONS.find((option) => option.id === id)?.label || "深色";
+  const glassCurrent = normalizeGlassTint(glassTint);
+  const glassNext = nextGlassTint(glassCurrent);
   const glassLabel = `${glassName(glassCurrent)} · 点击切为${glassName(glassNext)}`;
   return (
     <div className={`window-actions window-actions--${mode}`} aria-label="窗口操作">
@@ -1055,6 +1051,33 @@ function WindowActions({ mode, pinned, transparent = false, glassTint = "dark", 
   );
 }
 
+function handleGlassPointerMove(event) {
+  const shell = event.currentTarget;
+  const bounds = shell.getBoundingClientRect();
+  if (!bounds.width || !bounds.height) return;
+  const frame = shell.parentElement?.id === "root" ? shell.parentElement : shell;
+  const x = Math.max(0, Math.min(100, ((event.clientX - bounds.left) / bounds.width) * 100));
+  const y = Math.max(0, Math.min(100, ((event.clientY - bounds.top) / bounds.height) * 100));
+  frame.style.setProperty("--glass-pointer-x", `${x}%`);
+  frame.style.setProperty("--glass-pointer-y", `${y}%`);
+  frame.style.setProperty("--glass-edge-opacity", "1");
+}
+
+function handleGlassPointerLeave(event) {
+  const shell = event.currentTarget;
+  const frame = shell.parentElement?.id === "root" ? shell.parentElement : shell;
+  frame.style.setProperty("--glass-edge-opacity", "0");
+}
+
+function glassPointerProps(enabled) {
+  return enabled
+    ? {
+        onPointerMove: handleGlassPointerMove,
+        onPointerLeave: handleGlassPointerLeave,
+      }
+    : {};
+}
+
 function StripBar({
   snapshot,
   agents,
@@ -1064,7 +1087,6 @@ function StripBar({
   glassAlpha = 0.82,
   glassMode = "css",
   glassTint = "dark",
-  glassWallStyle = null,
   orientation,
   onToggleOrientation,
   onTogglePinned,
@@ -1081,9 +1103,17 @@ function StripBar({
   const dragProps = pinned || IS_MAC ? {} : { "data-tauri-drag-region": true };
   const vertical = orientation === "vertical";
   const OrientationIcon = vertical ? ArrowsLeftRight : ArrowsDownUp;
-  // 透明档的磨砂底上细线图标看不清，控制按钮换白色加粗（CSS 配深色底托）。
+  // 透明档的真实桌面背景变化很大，控制图标加粗以稳定识别。
   const buttonWeight = transparent && glassTint === "clear" ? "bold" : "light";
   const shellRef = useRef(null);
+  const shellAppearance = glassShellAppearance("strip", {
+    transparent,
+    glassMode,
+    glassTint,
+    glassAlpha,
+    isMac: IS_MAC,
+    vertical,
+  });
   // 窗口尺寸跟随真实内容（通用方案，替代手写常量）：每次渲染后与视口变化时
   // 复核目标尺寸，差 ≥1px 才调窗；量的是 CSS px，resizeStripWindow 内部统一
   // 乘缩放系数与 DPI。任何字体/DPI/缩放/更新点组合都收敛，不再裁按钮。
@@ -1146,11 +1176,12 @@ function StripBar({
   return (
     <main
       ref={shellRef}
-      className={`strip-shell ${vertical ? "strip-shell--vertical" : ""} ${transparent ? "strip-shell--transparent" : ""} ${transparent && glassMode === "css" ? "strip-shell--glass-css" : ""} ${transparent && (glassTint === "light" || glassTint === "clear") ? "strip-shell--glass-light" : ""} ${transparent && glassTint === "clear" ? "strip-shell--glass-clear" : ""} ${IS_MAC ? "strip-shell--mac" : ""}`}
+      className={shellAppearance.className}
+      data-glass-surface={shellAppearance.trueAlpha ? "true-alpha" : undefined}
       {...dragProps}
+      {...glassPointerProps(shellAppearance.edgeInteractive)}
       style={{
-        ...(transparent ? { "--glass-alpha": glassAlpha } : {}),
-        ...(glassWallStyle || {}),
+        ...shellAppearance.style,
         ...(pinned ? { cursor: "default" } : {}),
       }}
     >
@@ -1284,7 +1315,6 @@ function CompactWidget({
   transparent,
   glassMode = "css",
   glassTint = "dark",
-  glassWallStyle = null,
   onPeriodChange,
   onOpenSources,
   onTogglePinned,
@@ -1401,15 +1431,22 @@ function CompactWidget({
   const quotaView = quotaWindows.find((window) => window.view.available)?.view || UNAVAILABLE_QUOTA;
   const partial = snapshotIsPartial(snapshot);
   const sourceStatus = sourceStatusCopy(snapshot, loading, partial);
+  const shellAppearance = glassShellAppearance("widget", {
+    transparent,
+    glassMode,
+    glassTint,
+    glassAlpha,
+    isMac: IS_MAC,
+    loading,
+  });
 
   return (
     <main
       ref={shellRef}
-      className={`widget-shell ${transparent ? "widget-shell--transparent" : ""} ${transparent && glassMode === "css" ? "widget-shell--glass-css" : ""} ${transparent && (glassTint === "light" || glassTint === "clear") ? "widget-shell--glass-light" : ""} ${transparent && glassTint === "clear" ? "widget-shell--glass-clear" : ""} ${IS_MAC ? "widget-shell--mac" : ""} ${loading ? "is-loading" : ""}`}
-      style={{
-        ...(transparent ? { "--glass-alpha": glassAlpha } : {}),
-        ...(glassWallStyle || {}),
-      }}
+      className={shellAppearance.className}
+      data-glass-surface={shellAppearance.trueAlpha ? "true-alpha" : undefined}
+      {...glassPointerProps(shellAppearance.edgeInteractive)}
+      style={shellAppearance.style}
     >
       <h1 className="sr-only">Metrik Agent 用量桌面小插件</h1>
       <header
@@ -2172,15 +2209,15 @@ function AppearanceCard({ theme, onThemeChange, glassAlpha, onGlassAlpha, glassT
           </button>
         ))}
       </div>
-      {/* macOS 面板材质跟随系统 vibrancy，不提供玻璃配色选项；
+      {/* macOS 面板材质跟随系统 vibrancy，不提供组件外观选项；
           深/浅配色只针对 Windows 的卡片与胶囊。 */}
       {!IS_MAC && (
         <div className="settings-subsection">
-          <h3>玻璃配色</h3>
+          <h3>组件外观</h3>
           <p className="settings-muted">
-            深色是 HUD 玻璃；浅色是透亮白磨砂，配深色文字；透明是壁纸磨砂，随窗口位置取景。
+            深色是 HUD 玻璃；浅色是透亮白磨砂；透明会直接透出桌面与后方窗口，并叠加轻霜和边缘高光。
           </p>
-          <div className="theme-toggle" role="group" aria-label="玻璃配色">
+          <div className="theme-toggle" role="group" aria-label="组件外观">
             {GLASS_TINT_OPTIONS.map((option) => (
               <button
                 key={option.id}
@@ -2196,8 +2233,8 @@ function AppearanceCard({ theme, onThemeChange, glassAlpha, onGlassAlpha, glassT
         </div>
       )}
       <SliderRow
-        label="小组件玻璃浓度"
-        hint="越低越透、越高越实；拖到最低时透明配色只剩磨砂壁纸本身。"
+        label="玻璃浓度"
+        hint="同时作用于卡片和胶囊；越低越通透，越高越厚实。"
         min={5}
         max={96}
         step={2}
@@ -2209,25 +2246,25 @@ function AppearanceCard({ theme, onThemeChange, glassAlpha, onGlassAlpha, glassT
           缩放只针对 Windows 的桌面小插件与胶囊条。 */}
       {!IS_MAC && (
         <SliderRow
-          label="小组件缩放"
-          hint="等比缩放桌面小插件；滑杆改动下次进入时生效。"
+          label="卡片缩放"
+          hint="仅调整卡片尺寸；滑杆改动下次进入时生效。"
           min={UI_SCALE_RANGE.min * 100}
           max={UI_SCALE_RANGE.max * 100}
           step={5}
           percent={Math.round(uiScale * 100)}
-          ariaLabel="小组件缩放百分比"
+          ariaLabel="卡片缩放百分比"
           onChange={onUiScale}
         />
       )}
       {!IS_MAC && (
         <SliderRow
-          label="胶囊条缩放"
-          hint="等比缩放胶囊条，与小组件互不影响；下次进入时生效。"
+          label="胶囊缩放"
+          hint="仅调整胶囊尺寸，与卡片互不影响；下次进入时生效。"
           min={UI_SCALE_RANGE.min * 100}
           max={UI_SCALE_RANGE.max * 100}
           step={5}
           percent={Math.round(stripScale * 100)}
-          ariaLabel="胶囊条缩放百分比"
+          ariaLabel="胶囊缩放百分比"
           onChange={onStripScale}
         />
       )}
@@ -2432,7 +2469,7 @@ const SETTINGS_TABS = [
     id: "appearance",
     label: "外观与缩放",
     title: "外观与缩放",
-    blurb: "完整视图的明暗主题、小组件与胶囊条的玻璃配色与浓度，以及各形态的等比缩放。",
+    blurb: "完整视图的明暗主题，卡片与胶囊的组件外观、玻璃浓度及独立缩放。",
   },
   {
     id: "display",
@@ -3380,11 +3417,9 @@ export function App() {
   const [activeNav, setActiveNav] = useState(initialNav);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [pinned, setPinned] = useState(() => localStorage.getItem("metrik:pinned") === "true");
-  // 玻璃材质默认开启；用户关闭后记住选择。
-  // macOS 上材质由系统 vibrancy 承担，恒开，没有开关按钮。
-  const [transparent, setTransparent] = useState(
-    () => IS_MAC || (localStorage.getItem("metrik:transparent") ?? "true") === "true",
-  );
+  // 卡片与胶囊固定使用玻璃材质，用户只在深色、浅色和透明三种外观间选择。
+  // expanded 仍通过 viewMode 单独关闭玻璃绘制。
+  const transparent = true;
   // 胶囊条方向：横条 / 竖条，用户手动选，记住选择。
   const [stripOrientation, setStripOrientation] = useState(() =>
     localStorage.getItem("metrik:stripOrientation") === "vertical" ? "vertical" : "horizontal",
@@ -3457,12 +3492,19 @@ export function App() {
     localStorage.setItem("metrik:glassAlpha", String(next));
     if (IS_MAC) runWindowAction(() => broadcastMacAppearance({ glassAlpha: next }));
   }, []);
-  // 玻璃配色：深色 HUD / 透亮白（苹果式白 tint + 深色文字）/ 透明（不铺材质，
+  // 组件外观：深色 HUD / 透亮白（苹果式白 tint + 深色文字）/ 透明（不铺材质，
   // 直接透出桌面）。用户可选，记住选择。只作用于 Windows 的卡片与胶囊；
   // macOS 面板材质跟随系统 vibrancy，不提供此项。
-  const [glassTint, setGlassTint] = useState(() =>
-    normalizeGlassTint(localStorage.getItem("metrik:glassTint")),
-  );
+  const [glassTint, setGlassTint] = useState(() => {
+    const legacyDisabled = localStorage.getItem("metrik:transparent") === "false";
+    const value = legacyDisabled
+      ? "dark"
+      : normalizeGlassTint(localStorage.getItem("metrik:glassTint"));
+    // 旧版本把“不透明”作为第四种状态；新版迁移到默认深色，并移除旧开关。
+    if (legacyDisabled) localStorage.setItem("metrik:glassTint", value);
+    localStorage.removeItem("metrik:transparent");
+    return value;
+  });
   const handleGlassTint = useCallback((next) => {
     const value = normalizeGlassTint(next);
     setGlassTint(value);
@@ -3646,9 +3688,16 @@ export function App() {
     };
   }, []);
 
-  // 玻璃只作用于小插件形态；系统明暗主题切换时重发对应 tint。
-  // 原生材质不可用（或非桌面环境）时回落到 CSS 玻璃拟态承担外观。
-  const [glassMode, setGlassMode] = useState("css");
+  // Windows 小组件终身保持创建期透明窗口，不在运行时切换 DWM backdrop。
+  // 桌面端初始直接选 alpha，避免 WebView 背景确认前闪一帧 CSS fallback。
+  const [glassMode, setGlassMode] = useState(() =>
+    resolveGlassMode({
+      enabled: transparent && viewMode !== "expanded",
+      tintStyle: glassTint,
+      nativeAvailable: false,
+      trueAlphaAvailable: isDesktop() && isWindowsPlatform(),
+    }),
+  );
   useEffect(() => {
     let cancelled = false;
     const apply = () => {
@@ -3662,7 +3711,14 @@ export function App() {
         })
         .catch((error) => {
           console.warn("Unable to update the desktop window.", error);
-          if (!cancelled) setGlassMode(transparent ? "css" : "off");
+          if (!cancelled) {
+            setGlassMode(resolveGlassMode({
+              enabled: transparent && viewMode !== "expanded",
+              tintStyle: glassTint,
+              nativeAvailable: false,
+              trueAlphaAvailable: isDesktop() && isWindowsPlatform(),
+            }));
+          }
         });
     };
     apply();
@@ -3674,85 +3730,22 @@ export function App() {
     };
   }, [transparent, viewMode, glassTint]);
 
-  // 透明配色的磨砂底图（Pogget 管线）：后端把当前壁纸按显示器裁剪并高斯
-  // 模糊，前端按窗口物理坐标负偏移贴在卡片/胶囊背景上，拖动时实时跟随。
-  // 只透壁纸、不透窗口，和 Pogget 行为一致。
-  const [glassWall, setGlassWall] = useState(null);
-  const [glassWallPos, setGlassWallPos] = useState(null);
-  // 浓度滑杆同时驱动模糊：最低档几乎不糊（壁纸清晰＝最透），最高档浓霜。
-  // 量化成 4 的倍数，拖动时只落在少数几档上，命中后端缓存。
-  const glassBlur = Math.round((2 + glassAlpha * 22) / 4) * 4;
-  // 滑杆行程按配色映射到各自可用的浓度区间。透明档铺的是磨砂壁纸，罩层可以
-  // 归零；深色/浅色档铺的是半透明色板，低于 0.55 就压不住底下那层不透明白，
-  // 会出现白底白字。同一根滑杆，两条曲线。
+  // 深色/浅色仍映射到较高 tint 以保证文字对比；clear 直接把滑杆值交给
+  // 单层 Alpha 表面，由 CSS 将它映射到轻霜浓度，不再读取或定位壁纸图片。
   const shellGlassAlpha = useMemo(() => {
     if (glassTint === "clear") return glassAlpha;
     const t = (glassAlpha - 0.05) / (0.96 - 0.05);
     return 0.55 + Math.min(1, Math.max(0, t)) * (0.96 - 0.55);
   }, [glassAlpha, glassTint]);
-  useEffect(() => {
-    const active =
-      !IS_MAC && transparent && glassTint === "clear" && viewMode !== "expanded";
-    if (!active) {
-      setGlassWall(null);
-      setGlassWallPos(null);
-      return undefined;
-    }
-    let cancelled = false;
-    let unlisten = null;
-    let signature = null;
-    const load = () => {
-      getGlassWallpaper(glassBlur)
-        .then((info) => {
-          if (!cancelled && info) setGlassWall(info);
-        })
-        .catch((error) => console.warn("Unable to build the glass wallpaper.", error));
-    };
-    // 拖动滑杆时连着变档，等手停下来再算，避免一路重算大图。
-    const timer = window.setTimeout(load, 120);
-    // 壁纸幻灯片会定时换图，换了不重取的话取景就和真实桌面错位。
-    // 轮询的是廉价指纹（路径 + mtime），底图只有真变了才重算。
-    const poll = window.setInterval(() => {
-      getGlassWallpaperSignature().then((next) => {
-        if (cancelled || !next) return;
-        if (signature === null) {
-          signature = next;
-          return;
-        }
-        if (next !== signature) {
-          signature = next;
-          load();
-        }
-      });
-    }, 15000);
-    getGlassWallpaperSignature().then((next) => {
-      if (!cancelled && next) signature = next;
-    });
-    onWindowMoved((position) => {
-      if (!cancelled) setGlassWallPos(position);
-    }).then((stop) => {
-      if (cancelled) stop?.();
-      else unlisten = stop;
-    });
+  useLayoutEffect(() => {
+    document.documentElement.style.setProperty(
+      "--shell-glass-alpha",
+      String(shellGlassAlpha),
+    );
     return () => {
-      cancelled = true;
-      window.clearTimeout(timer);
-      window.clearInterval(poll);
-      unlisten?.();
+      document.documentElement.style.removeProperty("--shell-glass-alpha");
     };
-  }, [transparent, viewMode, glassTint, glassBlur]);
-  const glassWallStyle = useMemo(() => {
-    if (!glassWall || !glassWallPos) return null;
-    // 全部换算进本窗口的 CSS 像素；dpr 已含系统缩放与 WebView 原生 zoom。
-    const dpr = window.devicePixelRatio || 1;
-    const offsetX = (glassWallPos.x - glassWall.monitorX) / dpr;
-    const offsetY = (glassWallPos.y - glassWall.monitorY) / dpr;
-    return {
-      "--wall-image": `url(${glassWall.dataUrl})`,
-      "--wall-size": `${glassWall.width / dpr}px ${glassWall.height / dpr}px`,
-      "--wall-pos": `${-offsetX}px ${-offsetY}px`,
-    };
-  }, [glassWall, glassWallPos]);
+  }, [shellGlassAlpha]);
 
   // mac 的设置页开在独立的完整视图窗口里，面板是另一个 webview 实例，
   // 拖滑杆时面板自己的 React 状态不会变。WKWebView 的 storage 事件不跨
@@ -4060,18 +4053,11 @@ export function App() {
     });
   }, []);
 
-  // 标题栏的 ◐ 按钮在四个外观之间轮转：不透明 → 深色玻璃 → 浅色玻璃 →
-  // 透明玻璃 → 不透明。原来它只开关玻璃，配色停在设置页选的那档，
-  // 于是从卡片上永远切不到另外两种配色。
+  // 标题栏的 ◐ 按钮与设置页保持同一模型，只循环深色、浅色、透明三种组件外观。
+  // 技术层的 off 只属于 expanded/回落状态，不作为第四种配色暴露。
   const handleToggleTransparent = useCallback(() => {
-    const order = ["off", ...GLASS_TINT_OPTIONS.map((option) => option.id)];
-    const current = transparent ? normalizeGlassTint(glassTintRef.current) : "off";
-    const next = order[(order.indexOf(current) + 1) % order.length];
-    const nextTransparent = next !== "off";
-    setTransparent(nextTransparent);
-    localStorage.setItem("metrik:transparent", String(nextTransparent));
-    if (nextTransparent) handleGlassTint(next);
-  }, [transparent, handleGlassTint]);
+    handleGlassTint(nextGlassTint(normalizeGlassTint(glassTintRef.current)));
+  }, [handleGlassTint]);
 
   const handleRebuildLedger = useCallback(async () => {
     if (rebuildInFlight.current) return;
@@ -4126,7 +4112,6 @@ export function App() {
         glassAlpha={shellGlassAlpha}
         glassMode={glassMode}
         glassTint={glassTint}
-        glassWallStyle={glassWallStyle}
         orientation={stripOrientation}
         onToggleOrientation={handleToggleStripOrientation}
         onTogglePinned={handleTogglePinned}
@@ -4151,7 +4136,6 @@ export function App() {
           transparent={transparent}
           glassMode={glassMode}
           glassTint={glassTint}
-          glassWallStyle={glassWallStyle}
           onPeriodChange={setPeriod}
           onOpenSources={() => setDrawerOpen(true)}
           onTogglePinned={handleTogglePinned}

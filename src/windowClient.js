@@ -1,5 +1,9 @@
 import { invoke } from "@tauri-apps/api/core";
 import { platform as tauriPlatform } from "@tauri-apps/plugin-os";
+import {
+  resolveGlassMode,
+  resolveWindowsGlassComposition,
+} from "./glassAppearance.js";
 import { detectRuntimePlatform } from "./platformDetection";
 import {
   monitorForWindowPosition,
@@ -1005,84 +1009,26 @@ async function onScaleFactorChanged(handler) {
   };
 }
 
-function glassOptions(tintStyle = "dark") {
-  // 玻璃有深色 HUD、透亮白、透明三种配色，都不随系统主题。
-  // 深色/浅色铺系统材质（HostBackdrop 优先，tint 给降级到 Acrylic/BlurBehind
-  // 时用），浓淡由 CSS 罩层（--glass-alpha）承担。
-  // 透明档不铺任何系统材质：这台机器上 WebView2 表面不透明，材质垫在后面看
-  // 不见，观感全部由前端的壁纸磨砂底图承担（docs/WINDOWS-GLASS-NOTES.md）。
-  if (tintStyle === "clear") {
-    return {
-      dark: false,
-      tint: [0, 0, 0, 0],
-      clear: true,
-    };
-  }
-  if (tintStyle === "light") {
-    return {
-      dark: false,
-      tint: [250, 251, 253, 80],
-      clear: false,
-    };
-  }
-  return {
-    dark: true,
-    tint: [18, 20, 25, 64],
-    clear: false,
-  };
-}
-
-/// 透明配色的磨砂底图（Pogget 管线：壁纸 → 裁剪 → 高斯模糊 → 缓存）。
-/// 返回 { dataUrl, width, height, monitorX, monitorY }，均为物理像素；
-/// 非 Windows 桌面返回 null。
-async function getGlassWallpaper(blur = 6) {
-  if (!isDesktop() || !isWindowsPlatform()) return null;
-  return invoke("get_glass_wallpaper", { blur });
-}
-
-/// 壁纸指纹（路径 + 修改时间）。壁纸幻灯片换图后底图必须重取，
-/// 否则卡片里的取景和真实桌面对不上。
-async function getGlassWallpaperSignature() {
-  if (!isDesktop() || !isWindowsPlatform()) return null;
-  return invoke("glass_wallpaper_signature").catch(() => null);
-}
-
-/// 订阅本窗口移动，回报**客户区**左上角的物理坐标，返回取消函数。
-/// 磨砂底图靠它跟随窗口位置：必须用 innerPosition，窗口外框比 webview
-/// 视口大（实测竖条 90 逻辑 px 的窗口里只有 76px 是网页），用 outerPosition
-/// 会让取景整体偏移几像素。onMoved 的 payload 是外框坐标，所以每次重查。
-async function onWindowMoved(handler) {
-  const api = await windowApi();
-  if (!api) return () => {};
-  const win = api.getCurrentWindow();
-  const report = async () => {
-    const position = await win.innerPosition().catch(() => null);
-    if (position) handler({ x: position.x, y: position.y });
-  };
-  await report();
-  return win.onMoved(report);
-}
-
-/// 返回实际生效的材质："native"（系统模糊已启用）、"css"（原生不可用，
-/// 由 CSS 近实心玻璃承担外观）或 "off"。调用方据此切换样式层。
+/// 返回实际生效的材质："native"（系统模糊已启用）、"alpha"（真实窗口
+/// Alpha）、"css"（原生不可用，由 CSS 近实心玻璃承担外观）或 "off"。
 async function setWindowGlass(enabled, radius = 12, tintStyle = "dark") {
-  if (!isDesktop()) return enabled ? "css" : "off";
+  if (!isDesktop()) {
+    return resolveGlassMode({
+      enabled,
+      tintStyle,
+      nativeAvailable: false,
+      trueAlphaAvailable: false,
+    });
+  }
   if (isWindowsPlatform()) {
-    // WebView2 has its own composition surface. Make that surface transparent
-    // before applying the HWND backdrop, otherwise it masks the native material.
-    await makeWebviewTransparent();
-    const options = glassOptions(tintStyle);
-    if (!enabled) {
-      await invoke("set_glass_backdrop", { enabled, ...options });
-      return "off";
-    }
-    try {
-      await invoke("set_glass_backdrop", { enabled, ...options });
-      return "native";
-    } catch (error) {
-      console.warn("Native glass backdrop unavailable, using CSS glass.", error);
-      return "css";
-    }
+    // Keep one immutable composition strategy for the entire lifetime of the
+    // Windows widget. Switching the HWND between HostBackdrop/Acrylic and clear
+    // alpha leaves WebView2 on a white redirection surface on current Win11.
+    // Coffee CLI avoids that failure by relying on the creation-time
+    // `transparent: true` WebView and drawing every material as a single CSS
+    // surface. Do not reset WebView2's background at runtime: that also turns
+    // external backdrop-filter sampling into an opaque white capture surface.
+    return resolveWindowsGlassComposition({ enabled, tintStyle }).mode;
   }
   const api = await windowApi();
   if (!api) return enabled ? "css" : "off";
@@ -1357,16 +1303,14 @@ export {
   checkForUpdate,
   closeWindow,
   getAutostart,
-  getGlassWallpaper,
-  getGlassWallpaperSignature,
   installUpdate,
   isDesktop,
   isMacPlatform,
+  isWindowsPlatform,
   minimizeWindow,
   normalizeUiScale,
   onMacAppearance,
   onScaleFactorChanged,
-  onWindowMoved,
   onTrayShowExpanded,
   openExpandedWindow,
   readStripScale,
