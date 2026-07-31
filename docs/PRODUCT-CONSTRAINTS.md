@@ -18,8 +18,13 @@ change.
 - The compact widget prioritizes per-agent official quota windows, including
   remaining percentage and reset countdown. Token analytics belong in the
   expanded view.
-- The strip prefers the five-hour quota window and falls back to the first
-  available ranked window.
+- Compact rows and strip cells have room for one number, and it answers "can I
+  use this agent right now". Normally that is the shortest window (five-hour, or
+  the first ranked window for agents that have no five-hour limit). When any
+  window drops to the low-quota threshold, that window takes over the row,
+  because an exhausted weekly budget blocks the agent no matter how full the
+  session window looks. A reading whose reset moment has already passed
+  describes a finished cycle and is never used as the current value.
 
 ## Agent and adapter behavior
 
@@ -50,8 +55,19 @@ change.
 
 ### Windows
 
-- Compact transparency comes from a native whole-window system backdrop. Do not
-  simulate glass by lowering only Metrik's own background opacity.
+- Compact transparency comes from the window's creation-time per-pixel alpha, so
+  the real desktop, its icons, and any window behind Metrik show through. Do not
+  simulate glass by lowering only Metrik's own background opacity, and do not
+  switch DWM materials at runtime. See `WINDOWS-GLASS-IMPLEMENTATION.md`.
+- The compact and strip glass offers three user-selectable tints: a dark HUD
+  tint (default), a bright white frost with dark content, and a clear tint that
+  is as see-through as its foreground allows. The clear tint additionally lets
+  the user pick the text colour, because the two colours need opposite
+  backdrops: dark text rides on a white frost, white text on a thin dark scrim.
+  Pairing white text with a white frost is not offered — it cannot reach a
+  readable contrast on light wallpapers at any density.
+  All tints honor the glass-density slider; the choice is a Windows-only setting
+  because the macOS panel material follows the system.
 - Expanded mode remains opaque and owns its light/dark theme independently.
 - Compact, strip, and expanded forms are reachable from one another in one
   click. Each form remembers its own position and never overwrites another

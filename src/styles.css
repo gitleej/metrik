@@ -191,18 +191,19 @@ button:focus-visible {
   transition-timing-function: var(--motion);
 }
 
-/* ============ 玻璃材质：始终为深色 HUD 玻璃 ============
-   浅色玻璃在浅壁纸上"透了等于没透"且洗平层次（多轮迭代验证失败），
-   故玻璃模式不跟随系统主题：深色半透在任何壁纸上对比度都成立。
-   原生模糊可用时叠在模糊之上（0.62 深色 tint 透出壁纸），
-   不可用时由下方 --glass-css 回落层加深到近实心。 */
+/* ============ 玻璃材质：默认深色 HUD，可选透亮白 ============
+   浅色玻璃曾在浅壁纸上"透了等于没透"且洗平层次（多轮迭代验证失败），
+   故默认不跟随系统主题：深色半透在任何壁纸上对比度都成立。
+   后来按用户明确要求补了透亮白变体（--glass-light，见下方"浅色玻璃变体"
+   一节）：白 tint + 深色文字，浓度滑杆对两种配色同样生效。
+   Windows 桌面包在创建期透明窗口上叠 CSS tint + backdrop-filter；
+   浏览器或透明窗口不可用时由下方 --glass-css 回落层加深到近实心。 */
 .widget-shell--transparent {
-  /* 原生材质填满方形窗口，窗口本身由 DWM 加系统圆角（约 8px）；
-     CSS 圆角收小与之贴合，避免四角露出方形材质。 */
+  /* 默认深/浅色沿用紧凑圆角；透明 clear 档在专属规则里放大到 18px。 */
   border-radius: 8px;
-  /* 配方对标 ModernFlyouts：半透明深色板 + 系统模糊 + 浓度可调
+  /* 配方对标 ModernFlyouts：半透明深色板 + 外部背景模糊 + 浓度可调
      （--glass-alpha 由设置页滑杆写入，默认 0.82）；
-     冷色偏置找回清冽感（Windows 原生模糊无饱和度增强）。 */
+     冷色偏置找回清冽感。 */
   --glass-alpha: 0.82;
   background:
     radial-gradient(130% 100% at 14% 0%, rgba(178, 200, 255, 0.1), transparent 48%),
@@ -229,11 +230,11 @@ button:focus-visible {
 }
 
 /* ============ 玻璃拟态回落层 ============
-   原生 Acrylic/HostBackdrop 不可用时（含浏览器预览与 release 失效场景），
+   真实窗口 Alpha 不可用时（含浏览器预览与 release 失效场景），
    同一套深色 HUD 加深到近实心（0.94），外观不塌。
    参数对标 Win-CodexBar（同为 Tauri/WebView2，已验证零渲染故障）。 */
 .widget-shell--glass-css {
-  /* 无原生模糊可依赖时忽略用户浓度，锁定近实心（FallbackColor 思路）。 */
+  /* 无外部背景采样可依赖时忽略用户浓度，锁定近实心（FallbackColor 思路）。 */
   background:
     radial-gradient(120% 90% at 12% 0%, rgba(255, 255, 255, 0.09), transparent 46%),
     linear-gradient(160deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0) 55%),
@@ -299,9 +300,11 @@ button:focus-visible {
   display: grid;
   min-height: 0;
   flex: 1;
-  /* 列表行吃掉窗口的额外高度：行数少时 104px 起步与原 320 设计一致，
-     行数多时窗口加高、列表随之舒展。 */
-  grid-template-rows: 34px 86px minmax(104px, 1fr) 30px;
+  /* 列表行吃掉窗口的额外高度。最小值必须等于一行（52px，= App.jsx 的
+     COMPACT_LIST_MIN_HEIGHT）：这里写 104px（两行）时，只有一个 Agent 的窗口
+     高度测量按 52px 收敛，CSS 却按 104px 排版，差出来的一行把底栏挤到可视区
+     外，且列表下方留一块空白。两边的下限必须是同一个数。 */
+  grid-template-rows: 34px 86px minmax(52px, 1fr) 30px;
   gap: 4px;
   padding: 2px 10px 6px;
   transition-property: opacity;
@@ -452,8 +455,6 @@ button:focus-visible {
 }
 
 /* 陈旧快照：用透明度编码新鲜度，颜色语义（品牌色/警示色）保持不变。 */
-.widget-quota--stale .widget-quota-window em { opacity: 0.62; }
-.widget-quota--stale .widget-quota-track i { opacity: 0.55; }
 
 .widget-quota-window--warn .widget-quota-track i { background: var(--warn); }
 .widget-quota-window--warn em { color: #8f681f; }
@@ -560,7 +561,6 @@ button:focus-visible {
   letter-spacing: -0.01em;
 }
 
-.widget-agent--stale em { opacity: 0.62; }
 .widget-agent--warn em { color: #8f681f; }
 .widget-agent--critical em { color: #a1402e; }
 
@@ -782,8 +782,7 @@ button:focus-visible {
 }
 .widget-shell--transparent .widget-quota-window small { color: rgba(255, 255, 255, 0.55); }
 .widget-shell--transparent .widget-quota-window em { color: rgba(255, 255, 255, 0.94); }
-.widget-shell--transparent .widget-quota--stale .widget-quota-track i { opacity: 0.55; }
-.widget-shell--transparent .widget-quota-window--warn .widget-quota-track i { background: #e8b04a; filter: none; }
+.widget-shell--transparent .widget-shell--transparent .widget-quota-window--warn .widget-quota-track i { background: #e8b04a; filter: none; }
 .widget-shell--transparent .widget-quota-window--warn em { color: #e8b04a; }
 .widget-shell--transparent .widget-quota-window--critical .widget-quota-track i { background: #ec7a63; filter: none; }
 .widget-shell--transparent .widget-quota-window--critical em { color: #ec7a63; }
@@ -833,7 +832,7 @@ html:has(.strip-shell) #root {
   width: 100vw;
   height: 100dvh;
   padding: 0 5px 0 6px;
-  gap: 4px;
+  gap: 2px;
   overflow: hidden;
   color: var(--ink);
   background:
@@ -851,8 +850,7 @@ html:has(.strip-shell) #root {
   gap: 4px;
 }
 
-/* 玻璃模式与小卡片同一条管线：原生材质填满方形窗口，窗口由 DWM 加
-   系统圆角（约 8px），CSS 圆角收小贴合，避免四角露出方形材质或白底。 */
+/* 玻璃模式与小卡片同一条稳定 Alpha 管线；不在条带变形时切换 DWM 材质。 */
 .strip-shell--transparent {
   --glass-alpha: 0.82;
   border-radius: 8px;
@@ -879,9 +877,9 @@ html:has(.strip-shell) #root {
   display: flex;
   flex: 1;
   align-items: center;
-  gap: 6px;
+  gap: 5px;
   min-width: 0;
-  padding: 4px 6px;
+  padding: 4px 4px;
   border-radius: 9px;
   transition: background-color 240ms var(--motion);
 }
@@ -903,8 +901,6 @@ html:has(.strip-shell) #root {
   flex: none;
   width: 100%;
 }
-
-.strip-shell--vertical .strip-cell-body em { text-align: center; }
 
 .strip-cell > * { pointer-events: none; }
 
@@ -933,6 +929,9 @@ html:has(.strip-shell) #root {
 }
 
 .strip-cell-body em {
+  /* 百分比压在自己那根进度条正上方：左对齐时数字宽度一变（9% / 100%）
+     就和条错开，一排格子看着参差。 */
+  text-align: center;
   color: rgba(31, 33, 36, 0.92);
   font-style: normal;
   font-size: 11px;
@@ -972,7 +971,6 @@ html:has(.strip-shell) #root {
 
 /* 陈旧快照只淡化进度条（与小卡片一致），文字保持全亮；
    接近耗尽换警示色（沿用 85/95 分级）。 */
-.strip-cell--stale .strip-cell-track i { opacity: 0.55; }
 .strip-cell--warn em { color: #8f681f; }
 .strip-cell--warn .strip-cell-track i { background: var(--warn); }
 .strip-cell--critical em { color: #a1402e; }
@@ -1200,6 +1198,567 @@ html:has(.strip-shell) #root {
   }
 }
 
+/* ============ 浅色玻璃变体（透亮白磨砂，Windows 卡片与胶囊） ============
+   用户在设置页把"组件外观"切到浅色时追加 --glass-light 类。配方与 macOS
+   浅色外观的 vibrancy 罩层同族：白色半透明渐变叠在原生模糊之上，描边
+   外亮内暗分层，文字改回深色系。浓度滑杆（--glass-alpha）照常生效。 */
+.widget-shell--transparent.widget-shell--glass-light {
+  background:
+    radial-gradient(130% 100% at 14% 0%, rgba(255, 255, 255, 0.5), transparent 48%),
+    linear-gradient(168deg, rgb(252 253 255 / calc(var(--glass-alpha) + 0.06)), rgb(236 240 247 / calc(var(--glass-alpha) - 0.05)));
+  border: 1px solid rgba(255, 255, 255, 0.55);
+  box-shadow:
+    inset 0 0 0 1px rgba(31, 33, 36, 0.08),
+    inset 0 1px rgba(255, 255, 255, 0.6),
+    0 8px 16px rgba(0, 0, 0, 0.18),
+    0 2px 4px rgba(0, 0, 0, 0.12);
+}
+
+/* 浅色玻璃的 CSS 回落层：无原生模糊时锁定近实心霜白。 */
+.widget-shell--glass-css.widget-shell--glass-light {
+  background:
+    radial-gradient(120% 90% at 12% 0%, rgba(255, 255, 255, 0.6), transparent 46%),
+    linear-gradient(160deg, rgba(255, 255, 255, 0.4), rgba(255, 255, 255, 0) 55%),
+    rgba(247, 249, 252, 0.96);
+}
+
+.widget-shell--transparent.widget-shell--glass-light .widget-titlebar {
+  background: rgba(255, 255, 255, 0.22);
+  box-shadow: 0 1px rgba(31, 33, 36, 0.08);
+}
+
+.widget-shell--transparent.widget-shell--glass-light .widget-metric {
+  background: rgba(255, 255, 255, 0.4);
+  box-shadow: inset 0 0 0 1px rgba(31, 33, 36, 0.08);
+}
+
+.widget-shell--transparent.widget-shell--glass-light .widget-brand,
+.widget-shell--transparent.widget-shell--glass-light .widget-metric strong,
+.widget-shell--transparent.widget-shell--glass-light .widget-quota,
+.widget-shell--transparent.widget-shell--glass-light .widget-agent,
+.widget-shell--transparent.widget-shell--glass-light .widget-agent em,
+.widget-shell--transparent.widget-shell--glass-light .widget-quota-window em {
+  color: rgba(24, 26, 30, 0.94);
+}
+
+.widget-shell--transparent.widget-shell--glass-light .window-action {
+  color: rgba(31, 33, 36, 0.58);
+}
+
+.widget-shell--transparent.widget-shell--glass-light .window-action:hover {
+  color: rgba(24, 26, 30, 0.94);
+  background: rgba(31, 33, 36, 0.08);
+}
+
+.widget-shell--transparent.widget-shell--glass-light .window-action--active {
+  color: var(--blue);
+}
+
+.widget-shell--transparent.widget-shell--glass-light .period-control--compact {
+  background: rgba(31, 33, 36, 0.07);
+}
+
+.widget-shell--transparent.widget-shell--glass-light .period-control--compact button {
+  color: rgba(31, 33, 36, 0.58);
+}
+
+.widget-shell--transparent.widget-shell--glass-light .period-control--compact button.is-selected {
+  color: rgba(24, 26, 30, 0.94);
+  background: rgba(255, 255, 255, 0.82);
+  box-shadow: 0 1px 3px rgba(31, 33, 36, 0.12);
+}
+
+.widget-shell--transparent.widget-shell--glass-light .widget-agent-list {
+  background: rgba(255, 255, 255, 0.36);
+  box-shadow:
+    0 0 0 1px rgba(31, 33, 36, 0.08),
+    inset 0 1px rgba(255, 255, 255, 0.52);
+  scrollbar-color: rgba(127, 130, 136, 0.4) transparent;
+}
+
+.widget-shell--transparent.widget-shell--glass-light .widget-agent-list::-webkit-scrollbar-thumb {
+  background: rgba(127, 130, 136, 0.4);
+}
+
+.widget-shell--transparent.widget-shell--glass-light .widget-quota {
+  background: rgba(255, 255, 255, 0.36);
+  box-shadow:
+    0 0 0 1px rgba(31, 33, 36, 0.08),
+    inset 0 1px rgba(255, 255, 255, 0.52);
+}
+
+.widget-shell--transparent.widget-shell--glass-light .widget-quota:hover {
+  background: rgba(255, 255, 255, 0.52);
+  box-shadow:
+    0 0 0 1px rgba(31, 33, 36, 0.1),
+    inset 0 1px rgba(255, 255, 255, 0.56);
+}
+
+.widget-shell--transparent.widget-shell--glass-light .widget-agent {
+  box-shadow: 0 1px rgba(31, 33, 36, 0.07);
+}
+
+.widget-shell--transparent.widget-shell--glass-light .widget-agent:last-child {
+  box-shadow: none;
+}
+
+.widget-shell--transparent.widget-shell--glass-light .widget-quota-track {
+  background: color-mix(in srgb, var(--quota-accent, var(--blue)) 18%, rgba(31, 33, 36, 0.08));
+}
+
+.widget-shell--transparent.widget-shell--glass-light .widget-quota-track i {
+  background: var(--quota-accent, var(--blue));
+  filter: none;
+}
+
+.widget-shell--transparent.widget-shell--glass-light .widget-quota-window small {
+  color: rgba(31, 33, 36, 0.55);
+}
+
+.widget-shell--transparent.widget-shell--glass-light .widget-quota-window--warn .widget-quota-track i {
+  background: var(--warn);
+  filter: none;
+}
+
+.widget-shell--transparent.widget-shell--glass-light .widget-quota-window--warn em,
+.widget-shell--transparent.widget-shell--glass-light .widget-agent--warn em {
+  color: #8f681f;
+}
+
+.widget-shell--transparent.widget-shell--glass-light .widget-quota-window--critical .widget-quota-track i {
+  background: var(--critical);
+  filter: none;
+}
+
+.widget-shell--transparent.widget-shell--glass-light .widget-quota-window--critical em,
+.widget-shell--transparent.widget-shell--glass-light .widget-agent--critical em {
+  color: #a1402e;
+}
+
+.widget-shell--transparent.widget-shell--glass-light .widget-metric > span,
+.widget-shell--transparent.widget-shell--glass-light .widget-quota > span,
+.widget-shell--transparent.widget-shell--glass-light .widget-metric small,
+.widget-shell--transparent.widget-shell--glass-light .widget-comparison,
+.widget-shell--transparent.widget-shell--glass-light .widget-quota > small,
+.widget-shell--transparent.widget-shell--glass-light .widget-agent > span > small,
+.widget-shell--transparent.widget-shell--glass-light .widget-source,
+.widget-shell--transparent.widget-shell--glass-light .widget-source small {
+  color: rgba(31, 33, 36, 0.58);
+}
+
+.widget-shell--transparent.widget-shell--glass-light .widget-source:hover {
+  color: rgba(24, 26, 30, 0.9);
+}
+
+.widget-shell--transparent.widget-shell--glass-light .widget-refresh {
+  color: rgba(31, 33, 36, 0.58);
+}
+
+.widget-shell--transparent.widget-shell--glass-light .widget-refresh:hover {
+  color: rgba(24, 26, 30, 0.9);
+  background: rgba(31, 33, 36, 0.08);
+}
+
+.widget-shell--transparent.widget-shell--glass-light .widget-refresh:disabled:hover {
+  color: rgba(31, 33, 36, 0.58);
+  background: transparent;
+}
+
+/* 展开按钮回到非玻璃卡片的深色胶囊：霜白底上深色实体最稳。 */
+.widget-shell--transparent.widget-shell--glass-light .widget-expand {
+  color: #fff;
+  background: #242529;
+  box-shadow: 0 6px 14px rgba(31, 33, 36, 0.12);
+}
+
+.widget-shell--transparent.widget-shell--glass-light .widget-expand:hover {
+  background: #111214;
+}
+
+/* 胶囊条的浅色玻璃：同一条 --glass-alpha 管线，白底深字。 */
+.strip-shell--transparent.strip-shell--glass-light {
+  color: rgba(24, 26, 30, 0.92);
+  background:
+    radial-gradient(120% 160% at 12% 0%, rgba(255, 255, 255, 0.42), transparent 55%),
+    linear-gradient(168deg, rgb(252 253 255 / calc(var(--glass-alpha) + 0.06)), rgb(236 240 247 / calc(var(--glass-alpha) - 0.02)));
+  box-shadow:
+    inset 0 0 0 1px rgba(31, 33, 36, 0.1),
+    inset 0 1px rgba(255, 255, 255, 0.68);
+}
+
+.strip-shell--transparent.strip-shell--glass-light .strip-cell:hover {
+  background: rgba(31, 33, 36, 0.06);
+}
+
+.strip-shell--transparent.strip-shell--glass-light .strip-cell-body em {
+  color: rgba(31, 33, 36, 0.92);
+}
+
+.strip-shell--transparent.strip-shell--glass-light .strip-cell-track {
+  background: color-mix(in srgb, var(--quota-accent, var(--blue)) 16%, rgba(31, 33, 36, 0.05));
+}
+
+.strip-shell--transparent.strip-shell--glass-light .strip-cell-track i {
+  filter: none;
+}
+
+.strip-shell--transparent.strip-shell--glass-light .strip-cell--warn em {
+  color: #8f681f;
+}
+
+.strip-shell--transparent.strip-shell--glass-light .strip-cell--warn .strip-cell-track i {
+  background: var(--warn);
+  filter: none;
+}
+
+.strip-shell--transparent.strip-shell--glass-light .strip-cell--critical em {
+  color: #a1402e;
+}
+
+.strip-shell--transparent.strip-shell--glass-light .strip-cell--critical .strip-cell-track i {
+  background: var(--critical);
+  filter: none;
+}
+
+.strip-shell--transparent.strip-shell--glass-light .strip-cell--unavailable em {
+  color: var(--muted);
+}
+
+.strip-shell--transparent.strip-shell--glass-light .strip-empty {
+  color: var(--muted);
+}
+
+.strip-shell--transparent.strip-shell--glass-light .strip-button {
+  color: #4f5257;
+  background: rgba(31, 33, 36, 0.06);
+}
+
+.strip-shell--transparent.strip-shell--glass-light .strip-button:hover {
+  color: #1f2124;
+  background: rgba(31, 33, 36, 0.12);
+}
+
+.strip-shell--transparent.strip-shell--glass-light .strip-button--active {
+  color: var(--blue);
+}
+
+/* ============ 透明配色（--glass-clear，Windows 卡片与胶囊） ============
+   Coffee 式单合成管线：透明 HWND/WebView2 始终不切换 DWM 材质，只承载一层
+   罩层 + backdrop-filter，因此桌面、图标和后方窗口都是真实取样，卡片/胶囊
+   之间也不会因更换原生重定向策略闪成白板。
+
+   文字颜色由用户选，罩层跟着文字走——白字压在白霜上实测只有 1.10:1，把霜加浓
+   也纹丝不动，所以两者绑成一对（见 glassAppearance.js）：
+     深色字（默认，同时挂 --glass-light）→ 白霜，本段
+     白色字（--glass-ink-light）        → 薄暗罩，见下方专门一段
+   这里只负责材质：shell 本身完全透明，罩层和模糊都画在 #root 上。
+   浏览器没有真实 Alpha，clear 让位给浅色档的近实心回落，不假装透明。 */
+.widget-shell--transparent.widget-shell--glass-clear:not(.widget-shell--glass-css),
+.strip-shell--transparent.strip-shell--glass-clear:not(.strip-shell--glass-css) {
+  position: relative;
+  background: transparent;
+  background-image: none;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  /* 浅色光晕把深色字和背后的深色细节隔开，霜层才敢开到更低。 */
+  text-shadow: 0 1px 2px rgba(255, 255, 255, 0.62);
+}
+
+.widget-shell--transparent.widget-shell--glass-clear:not(.widget-shell--glass-css) svg,
+.strip-shell--transparent.strip-shell--glass-clear:not(.strip-shell--glass-css) svg {
+  filter: drop-shadow(0 1px 1px rgba(255, 255, 255, 0.55));
+}
+
+/* Blink 的 UA 样式给 input/button 硬写了 text-shadow: none，外壳那层光晕传不
+   进去。周期签、额度卡、刷新和"统计说明"都是 button，透明档最需要光晕的恰好
+   是它们，所以补一条；坐在实心药丸上的选中态不需要。 */
+.widget-shell--transparent.widget-shell--glass-clear:not(.widget-shell--glass-css) button:not(.is-selected),
+.strip-shell--transparent.strip-shell--glass-clear:not(.strip-shell--glass-css) button:not(.is-selected) {
+  text-shadow: 0 1px 2px rgba(255, 255, 255, 0.62);
+}
+
+/* 圆角按物理像素给。CSS px 会被卡片/胶囊各自的原生 zoom 放大，同样写 8px，
+   卡片（zoom 0.95）画出 9.5 物理像素，竖胶囊（zoom 1.75）画出 17.5——就是
+   之前被否掉的"大圆头"。--glass-radius 由 App 按 devicePixelRatio 折算。 */
+html:has(.widget-shell--transparent:not(.widget-shell--mac):not(.widget-shell--glass-css)) #root,
+html:has(.strip-shell--transparent:not(.strip-shell--mac):not(.strip-shell--glass-css)) #root {
+  -webkit-backdrop-filter: blur(24px) saturate(160%);
+  backdrop-filter: blur(24px) saturate(160%);
+  overflow: hidden;
+  border-radius: var(--glass-radius, 8px);
+}
+
+html:has(.widget-shell--glass-clear) #root,
+html:has(.strip-shell--glass-clear) #root {
+  --glass-pointer-x: 50%;
+  --glass-pointer-y: 0%;
+  --glass-edge-opacity: 0;
+  position: relative;
+  isolation: isolate;
+  /* 白霜的下限压着可读性：深色字在暗色背景上要有霜才读得出，实测 0.38 时
+     对比度 3.6:1，配上浅色光晕够用。上限留给"想更实"的用户。 */
+  background: rgb(
+    229 237 246 /
+      clamp(0.38, calc(0.3 + var(--shell-glass-alpha, 0.82) * 0.36), 0.72)
+  );
+  overflow: hidden;
+  box-shadow: none;
+}
+
+/* 胶囊面积小、多数时候压在深色内容上，卡片那条曲线搬过来就是一块灰白板。
+   单独压低上限，并且减轻模糊：模糊半径同样按 CSS px 写，会被胶囊缩放整体
+   放大，1.75 档下 24px 实际糊到 52 物理像素。 */
+html:has(.strip-shell--glass-clear) #root {
+  background: rgb(
+    229 237 246 /
+      clamp(0.34, calc(0.26 + var(--shell-glass-alpha, 0.82) * 0.32), 0.62)
+  );
+}
+
+html:has(.strip-shell--transparent:not(.strip-shell--mac):not(.strip-shell--glass-css)) #root {
+  -webkit-backdrop-filter: blur(14px) saturate(150%);
+  backdrop-filter: blur(14px) saturate(150%);
+}
+
+/* 浏览器没有原生窗口，补一层模拟外框；圆角两端共用 --glass-radius。 */
+html[data-runtime="browser"]:has(.widget-shell--glass-clear) #root,
+html[data-runtime="browser"]:has(.strip-shell--glass-clear) #root {
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.72),
+    inset 0 1px rgba(255, 255, 255, 0.86),
+    inset 1px 0 rgba(255, 255, 255, 0.3);
+}
+
+/* 只在 1px 边环内显示跟随鼠标的径向高光，模拟 VinaUI 的动态光区。
+   边环挂在最外层 #root，不参与布局、不接收命中，因此不会干扰 strip 测量、
+   按钮或原生拖动区；圆角用 border-radius: inherit 跟随 --glass-radius。 */
+html:has(.widget-shell--glass-clear) #root::after,
+html:has(.strip-shell--glass-clear) #root::after {
+  content: "";
+  position: absolute;
+  z-index: 20;
+  inset: 0;
+  padding: 1px;
+  border-radius: inherit;
+  pointer-events: none;
+  opacity: var(--glass-edge-opacity);
+  background: radial-gradient(
+    96px circle at var(--glass-pointer-x) var(--glass-pointer-y),
+    rgba(255, 255, 255, 0.98),
+    rgba(155, 199, 255, 0.66) 38%,
+    transparent 72%
+  );
+  -webkit-mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  mask-composite: exclude;
+  transition: opacity 180ms var(--motion);
+}
+
+/* 大面积子面板不再各自铺一层半透明底，只保留边界、选中和 hover，
+   避免多层 tint 叠成乳白板。 */
+.widget-shell--transparent.widget-shell--glass-clear:not(.widget-shell--glass-ink-light) .widget-titlebar,
+.widget-shell--transparent.widget-shell--glass-clear:not(.widget-shell--glass-ink-light) .widget-metric,
+.widget-shell--transparent.widget-shell--glass-clear:not(.widget-shell--glass-ink-light) .widget-quota,
+.widget-shell--transparent.widget-shell--glass-clear:not(.widget-shell--glass-ink-light) .widget-agent-list {
+  background: transparent;
+  box-shadow: inset 0 0 0 1px rgba(31, 33, 36, 0.1);
+}
+
+.widget-shell--transparent.widget-shell--glass-clear:not(.widget-shell--glass-ink-light) .widget-titlebar {
+  box-shadow: 0 1px rgba(31, 33, 36, 0.08);
+}
+
+.widget-shell--transparent.widget-shell--glass-clear:not(.widget-shell--glass-ink-light) .period-control--compact {
+  background: rgba(255, 255, 255, 0.22);
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+
+.widget-shell--transparent.widget-shell--glass-clear:not(.widget-shell--glass-ink-light) .widget-quota:hover {
+  background: rgba(255, 255, 255, 0.24);
+  box-shadow: inset 0 0 0 1px rgba(31, 33, 36, 0.13);
+}
+
+.widget-shell--transparent.widget-shell--glass-clear:not(.widget-shell--glass-ink-light) .period-control--compact button.is-selected {
+  background: rgba(255, 255, 255, 0.7);
+}
+
+/* 胶囊控制按钮：常驻底托在竖条上排成一列方块，比图标本身还抢眼，
+   静止态改为无底，只保留 hover 和选中的小面积反馈。 */
+.strip-shell--transparent.strip-shell--glass-clear:not(.strip-shell--glass-ink-light) .strip-button {
+  color: rgba(31, 33, 36, 0.62);
+  background: transparent;
+}
+
+.strip-shell--transparent.strip-shell--glass-clear:not(.strip-shell--glass-ink-light) .strip-button:hover {
+  color: rgba(31, 33, 36, 0.9);
+  background: rgba(31, 33, 36, 0.1);
+}
+
+.strip-shell--transparent.strip-shell--glass-clear:not(.strip-shell--glass-ink-light) .strip-button--active {
+  color: #fff;
+  background: var(--blue);
+}
+
+/* ---- 透明档的次级文字 ----
+   浅色档的次级色是 rgba(31,33,36,0.58)，那是配近实心白面板调的。透明档只有
+   一层薄霜，壁纸的明暗细节直接透上来，局部对比度会塌：同一段 0.58 的字压在
+   透出的暗处时只剩 1.8:1。这里加深并给 9–11px 的小字补一档字重。 */
+.widget-shell--transparent.widget-shell--glass-clear:not(.widget-shell--glass-ink-light) .widget-metric > span,
+.widget-shell--transparent.widget-shell--glass-clear:not(.widget-shell--glass-ink-light) .widget-quota > span,
+.widget-shell--transparent.widget-shell--glass-clear:not(.widget-shell--glass-ink-light) .widget-metric small,
+.widget-shell--transparent.widget-shell--glass-clear:not(.widget-shell--glass-ink-light) .widget-comparison,
+.widget-shell--transparent.widget-shell--glass-clear:not(.widget-shell--glass-ink-light) .widget-quota > small,
+.widget-shell--transparent.widget-shell--glass-clear:not(.widget-shell--glass-ink-light) .widget-agent > span > small,
+.widget-shell--transparent.widget-shell--glass-clear:not(.widget-shell--glass-ink-light) .widget-source,
+.widget-shell--transparent.widget-shell--glass-clear:not(.widget-shell--glass-ink-light) .widget-source small,
+.widget-shell--transparent.widget-shell--glass-clear:not(.widget-shell--glass-ink-light) .widget-refresh,
+.widget-shell--transparent.widget-shell--glass-clear:not(.widget-shell--glass-ink-light) .quota-bar-row small,
+.widget-shell--transparent.widget-shell--glass-clear:not(.widget-shell--glass-ink-light) .quota-bar-row > span,
+.widget-shell--transparent.widget-shell--glass-clear:not(.widget-shell--glass-ink-light) .period-control--compact button:not(.is-selected) {
+  color: rgba(26, 28, 32, 0.82);
+  font-weight: 500;
+}
+
+/* ---- 透明档的前景减重 ----
+   透明底本身已经到顶（tint 可以归零），观感上"还是不够透"来自前景：实心
+   图标、粗体数字、饱和进度条压在同一块面积上。这里只降视觉重量，不改字号、
+   不改布局，也不动深色/浅色两档。 */
+.strip-shell--transparent.strip-shell--glass-clear .strip-cell-icon,
+.widget-shell--transparent.widget-shell--glass-clear .agent-icon {
+  opacity: 0.92;
+  box-shadow: none;
+}
+
+.strip-shell--transparent.strip-shell--glass-clear .strip-cell-body em,
+.widget-shell--transparent.widget-shell--glass-clear .quota-bar-row em {
+  font-weight: 500;
+}
+
+.strip-shell--transparent.strip-shell--glass-clear .strip-cell-track {
+  height: 3px;
+  background: rgba(31, 33, 36, 0.12);
+}
+
+.strip-shell--transparent.strip-shell--glass-clear .strip-cell-track i,
+.widget-shell--transparent.widget-shell--glass-clear .quota-bar-track i {
+  filter: saturate(0.86);
+  opacity: 0.84;
+}
+
+.widget-shell--transparent.widget-shell--glass-clear .quota-bar-track {
+  height: 4px;
+}
+
+/* ---- 透明档：白色字（--glass-ink-light） ----
+   桌面挂件常见的另一种风格：白字直接压在壁纸上，靠深色阴影而不是面板拉开
+   层次。白字不能配白霜（往白底加白不改对比度），所以这一档把罩层换成一层
+   薄暗 scrim；前景直接沿用深色档那套白字，不挂 --glass-light。 */
+html:has(.widget-shell--glass-ink-light) #root,
+html:has(.strip-shell--glass-ink-light) #root {
+  background: rgb(
+    18 24 36 / clamp(0.14, calc(0.1 + var(--shell-glass-alpha, 0.82) * 0.34), 0.44)
+  );
+}
+
+.widget-shell--transparent.widget-shell--glass-ink-light:not(.widget-shell--glass-css),
+.strip-shell--transparent.strip-shell--glass-ink-light:not(.strip-shell--glass-css) {
+  text-shadow:
+    0 1px 3px rgba(6, 12, 22, 0.78),
+    0 0 2px rgba(6, 12, 22, 0.52);
+}
+
+.widget-shell--transparent.widget-shell--glass-ink-light:not(.widget-shell--glass-css) svg,
+.strip-shell--transparent.strip-shell--glass-ink-light:not(.strip-shell--glass-css) svg {
+  filter: drop-shadow(0 1px 2px rgba(6, 12, 22, 0.6));
+}
+
+.widget-shell--transparent.widget-shell--glass-ink-light:not(.widget-shell--glass-css) button:not(.is-selected),
+.strip-shell--transparent.strip-shell--glass-ink-light:not(.strip-shell--glass-css) button:not(.is-selected) {
+  text-shadow:
+    0 1px 3px rgba(6, 12, 22, 0.78),
+    0 0 2px rgba(6, 12, 22, 0.52);
+}
+
+/* 子面板同样不铺底，只留发丝分隔——白字这档分隔线要浅色。 */
+.widget-shell--transparent.widget-shell--glass-ink-light .widget-titlebar,
+.widget-shell--transparent.widget-shell--glass-ink-light .widget-metric,
+.widget-shell--transparent.widget-shell--glass-ink-light .widget-quota,
+.widget-shell--transparent.widget-shell--glass-ink-light .widget-agent-list {
+  background: transparent;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.14);
+}
+
+.widget-shell--transparent.widget-shell--glass-ink-light .widget-titlebar {
+  box-shadow: 0 1px rgba(255, 255, 255, 0.16);
+}
+
+.widget-shell--transparent.widget-shell--glass-ink-light .period-control--compact {
+  background: rgba(255, 255, 255, 0.1);
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+
+.widget-shell--transparent.widget-shell--glass-ink-light .widget-quota:hover {
+  background: rgba(255, 255, 255, 0.12);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.2);
+}
+
+/* 次级文字同样要比深色档亮一档：薄 scrim 下壁纸的亮处会顶上来。 */
+.widget-shell--transparent.widget-shell--glass-ink-light .widget-metric > span,
+.widget-shell--transparent.widget-shell--glass-ink-light .widget-quota > span,
+.widget-shell--transparent.widget-shell--glass-ink-light .widget-metric small,
+.widget-shell--transparent.widget-shell--glass-ink-light .widget-comparison,
+.widget-shell--transparent.widget-shell--glass-ink-light .widget-quota > small,
+.widget-shell--transparent.widget-shell--glass-ink-light .widget-agent > span > small,
+.widget-shell--transparent.widget-shell--glass-ink-light .widget-source,
+.widget-shell--transparent.widget-shell--glass-ink-light .widget-source small,
+.widget-shell--transparent.widget-shell--glass-ink-light .widget-refresh,
+.widget-shell--transparent.widget-shell--glass-ink-light .quota-bar-row small,
+.widget-shell--transparent.widget-shell--glass-ink-light .quota-bar-row > span,
+.widget-shell--transparent.widget-shell--glass-ink-light .period-control--compact button:not(.is-selected) {
+  color: rgba(255, 255, 255, 0.82);
+  font-weight: 500;
+}
+
+/* 选中的周期签是块近白色药丸，白字压上去就没了；它跟深色档一样保持深色字。
+   上面那条和基础的 .is-selected 同为 (0,3,1)，靠源码顺序会盖过去，所以必须
+   显式 :not 排除，不能指望顺序。 */
+.widget-shell--transparent.widget-shell--glass-ink-light .period-control--compact button.is-selected {
+  color: rgba(18, 20, 24, 0.94);
+  background: rgba(255, 255, 255, 0.92);
+  font-weight: 600;
+  text-shadow: none;
+}
+
+.strip-shell--transparent.strip-shell--glass-ink-light .strip-button {
+  color: rgba(255, 255, 255, 0.8);
+  background: transparent;
+}
+
+.strip-shell--transparent.strip-shell--glass-ink-light .strip-button:hover {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.16);
+}
+
+.strip-shell--transparent.strip-shell--glass-ink-light .strip-cell-track {
+  height: 3px;
+  background: rgba(255, 255, 255, 0.22);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html:has(.widget-shell--glass-clear) #root::after,
+  html:has(.strip-shell--glass-clear) #root::after {
+    transition: none;
+  }
+}
+
 .sr-only {
   position: absolute;
   width: 1px;
@@ -1328,16 +1887,18 @@ html:has(.strip-shell) #root {
   transform: translateX(0);
 }
 
+/* 状态灯居中压在文字正上方：灯是这块唯一的状态编码，摆在行首会被当成项目符号。 */
 .source-status {
   display: grid;
-  grid-template-columns: 9px 1fr;
-  gap: 5px 7px;
+  grid-template-columns: 1fr;
+  justify-items: center;
+  gap: 5px;
   width: 100%;
   min-height: 86px;
   margin-top: auto;
   padding: 13px 15px 24px;
   color: #6d6f73;
-  text-align: left;
+  text-align: center;
   background: transparent;
   border: 0;
   cursor: pointer;
@@ -1347,13 +1908,27 @@ html:has(.strip-shell) #root {
 }
 
 .source-status:hover { color: #34363a; }
-.source-status span:not(.status-dot) { font-size: 12px; }
+
+/* 基础 .status-dot 的 margin-top 是行内对齐补偿；这里灯自己占一行，要归零。 */
+.source-status .status-dot { margin: 2px 0 1px; }
+
+/* 两行都锁死单行：文案随状态变长时不能把侧栏顶得上下跳。 */
+.source-status span:not(.status-dot) {
+  max-width: 100%;
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 
 .source-status small {
-  grid-column: 2;
+  max-width: 100%;
   color: #8d8f93;
   font-size: 11px;
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .status-dot {
@@ -1800,12 +2375,12 @@ html:has(.strip-shell) #root {
 }
 
 /* Newsreader 的 $ 是带贯穿竖线的老式字形，34px 下像多画了一竖；
-   货币符号改用界面无衬线并降一号，数字保持衬线大字。 */
+   货币符号改用界面无衬线并略降一号，数字保持衬线大字。 */
 .cost-total strong .cost-currency {
   font-family: "Geist Variable", "Segoe UI Variable", sans-serif;
-  font-size: 21px;
-  font-weight: 500;
-  margin-right: 2px;
+  font-size: 27px;
+  font-weight: 550;
+  margin-right: 1px;
 }
 
 .cost-total span { color: #74767a; font-size: 11px; }
@@ -1960,8 +2535,6 @@ html:has(.strip-shell) #root {
 }
 
 /* 陈旧快照：透明度编码新鲜度，不改颜色语义。 */
-.quota-bar-row--stale .quota-bar-track i { opacity: 0.55; }
-.quota-bar-row--stale em { opacity: 0.62; }
 
 .quota-bar-row--warn .quota-bar-track i { background: var(--warn); }
 .quota-bar-row--warn em { color: #8f681f; }
@@ -2125,15 +2698,14 @@ html:has(.strip-shell) #root {
   animation: drawer-in 480ms var(--motion) both;
 }
 
-.source-drawer header { display: flex; align-items: flex-start; justify-content: space-between; }
+.source-drawer header { display: flex; align-items: center; justify-content: space-between; }
 
 .source-drawer h2 {
-  margin: 10px 0 0;
+  margin: 0;
   color: #202124;
-  font-size: 27px;
+  font-size: 19px;
   font-weight: 580;
-  letter-spacing: -0.04em;
-  text-wrap: balance;
+  letter-spacing: -0.02em;
 }
 
 .icon-button {
@@ -2158,12 +2730,13 @@ html:has(.strip-shell) #root {
   box-shadow: 0 -1px rgba(31, 33, 36, 0.09), 0 1px rgba(31, 33, 36, 0.09);
 }
 
+/* 列表式：图标小一号、行距收紧，标题与说明左边缘对齐同一条竖线。 */
 .source-item {
   display: grid;
-  grid-template-columns: 46px minmax(0, 1fr) auto;
-  gap: 15px;
-  align-items: start;
-  padding: 22px 0;
+  grid-template-columns: 30px minmax(0, 1fr) auto;
+  gap: 4px 11px;
+  align-items: center;
+  padding: 13px 0;
   box-shadow: 0 1px rgba(31, 33, 36, 0.08);
 }
 
@@ -2171,21 +2744,25 @@ html:has(.strip-shell) #root {
 
 .source-item-icon {
   display: grid;
-  width: 42px;
-  height: 42px;
+  width: 28px;
+  height: 28px;
   place-items: center;
   color: var(--blue);
   background: rgba(36, 107, 219, 0.07);
-  border-radius: 13px;
+  border-radius: 9px;
 }
 
-.source-item strong { display: block; font-size: 14px; font-weight: 570; }
+.source-item-icon svg { width: 16px; height: 16px; }
 
+.source-item strong { display: block; font-size: 13px; font-weight: 570; }
+
+/* 说明文字与标题同列，不再缩在图标右侧留一大片空白。 */
 .source-item p {
-  margin: 7px 0 0;
+  grid-column: 2 / -1;
+  margin: 0;
   color: #787a7e;
   font-size: 12px;
-  line-height: 1.55;
+  line-height: 1.5;
   text-wrap: pretty;
 }
 
@@ -3100,6 +3677,15 @@ html:has(.strip-shell) #root {
   .dashboard { padding-left: 34px; }
   .metric-line h1 { font-size: clamp(80px, 10vw, 105px); }
   .inspector { padding-inline: 24px; }
+
+  /* 窄侧栏：缩字号，保证整词放得下，不再截成"数据不…"。完整说明仍在 title 里。 */
+  .source-status {
+    gap: 4px;
+    padding-inline: 10px;
+  }
+
+  .source-status span:not(.status-dot) { font-size: 11px; }
+  .source-status small { font-size: 10px; }
 }
 
 @media (max-height: 820px) and (min-width: 881px) {
@@ -3206,10 +3792,41 @@ html:has(.strip-shell) #root {
 }
 
 @media (prefers-reduced-transparency: reduce) {
-  .widget-shell--transparent {
+  html:has(.widget-shell--transparent:not(.widget-shell--mac):not(.widget-shell--glass-css)) #root,
+  html:has(.strip-shell--transparent:not(.strip-shell--mac):not(.strip-shell--glass-css)) #root {
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
+
+  html:has(.widget-shell--glass-clear) #root,
+  html:has(.strip-shell--glass-clear) #root {
+    background: rgba(244, 247, 251, 0.98);
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
+
+  .widget-shell--transparent.widget-shell--glass-clear,
+  .strip-shell--transparent.strip-shell--glass-clear {
+    background: rgba(244, 247, 251, 0.98);
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
+
+  html:has(.widget-shell--glass-clear) #root::after,
+  html:has(.strip-shell--glass-clear) #root::after {
+    display: none;
+  }
+
+  .widget-shell--transparent:not(.widget-shell--glass-light),
+  .strip-shell--transparent:not(.strip-shell--glass-light) {
     background:
       linear-gradient(158deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0) 55%),
       rgba(24, 27, 33, 0.98);
+  }
+
+  .widget-shell--transparent.widget-shell--glass-light:not(.widget-shell--glass-clear),
+  .strip-shell--transparent.strip-shell--glass-light:not(.strip-shell--glass-clear) {
+    background: rgba(244, 247, 251, 0.98);
   }
 
   /* mac 的薄 tint 依赖系统模糊；用户关掉透明度后必须自己变成近实心。 */
@@ -3235,8 +3852,28 @@ html:has(.strip-shell) #root {
 }
 
 @media (forced-colors: active) {
+  html:has(.widget-shell--transparent:not(.widget-shell--mac):not(.widget-shell--glass-css)) #root,
+  html:has(.strip-shell--transparent:not(.strip-shell--mac):not(.strip-shell--glass-css)) #root,
+  html:has(.widget-shell--glass-clear) #root,
+  html:has(.strip-shell--glass-clear) #root {
+    background: Canvas;
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
+
+  html:has(.widget-shell--glass-clear) #root::after,
+  html:has(.strip-shell--glass-clear) #root::after {
+    display: none;
+  }
+
   .widget-shell,
   .widget-shell--transparent,
+  .widget-shell--transparent.widget-shell--glass-light,
+  .widget-shell--transparent.widget-shell--glass-clear,
+  .strip-shell,
+  .strip-shell--transparent,
+  .strip-shell--transparent.strip-shell--glass-light,
+  .strip-shell--transparent.strip-shell--glass-clear,
   .widget-shell .period-control--compact,
   .widget-shell .widget-agent-list,
   .widget-shell .widget-quota {
@@ -3246,6 +3883,11 @@ html:has(.strip-shell) #root {
   }
 
   .widget-shell { border: 1px solid CanvasText; }
+  .strip-shell {
+    border: 0;
+    outline: 1px solid CanvasText;
+    outline-offset: -1px;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {

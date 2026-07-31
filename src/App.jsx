@@ -37,6 +37,8 @@ import opencodeAppIcon from "./assets/opencode-app-icon.png";
 import qoderAppIcon from "./assets/qoder-app-icon.png";
 import workbuddyAppIcon from "./assets/workbuddy-app-icon.svg";
 import zcodeAppIcon from "./assets/zcode-app-icon.png";
+import { glassShellAppearance, nextGlassTint, resolveGlassMode } from "./glassAppearance.js";
+import { QUOTA_LOW_REMAINING, bindingWindow } from "./quotaWindows.js";
 import { horizontalStripTargetWidth } from "./windowGeometry";
 import {
   configureQoderCookie,
@@ -65,6 +67,7 @@ import {
   installUpdate,
   isDesktop,
   isMacPlatform,
+  isWindowsPlatform,
   minimizeWindow,
   onMacAppearance,
   onScaleFactorChanged,
@@ -188,10 +191,12 @@ function normalizeVisibleAgentList(agentIds) {
 // 这些常量只用于进入 strip 的第一帧，之后的窗口尺寸由 StripBar 里的
 // 内容测量观察器按真实渲染结果收敛——不同字体/DPI/缩放比例、有无更新点
 // 都不会再裁掉内容（曾因常量与 CSS 脱钩裁掉竖条最后一个按钮）。
-const STRIP_CELL_WIDTH = 68;
+const STRIP_CELL_WIDTH = 58;
 const STRIP_CHROME_WIDTH = IS_MAC ? 76 : 158;
 const STRIP_BAR_HEIGHT = 40;
-const STRIP_VERTICAL_WIDTH = 52;
+// 竖条宽度由 26px 控件槽 + 外壳 padding 定死下限（32px）；42 留 10px 呼吸，
+// 再宽图标和百分比周围就空得发肥。
+const STRIP_VERTICAL_WIDTH = 42;
 const STRIP_VCELL_HEIGHT = 54;
 const STRIP_VCHROME_HEIGHT = IS_MAC ? 84 : 160;
 
@@ -386,11 +391,12 @@ function modelDisplayName(model) {
   return model;
 }
 
-// 小插件每行 Agent 最多展示两个配额窗口：按来源排序取前两个可用窗口
-// （已过期窗口也算有来源，单独走"已重置，等待刷新"样式）；一个都没有时
-// 由调用方渲染 "-- / 暂无可靠来源"，绝不编造数字。
+// 每行 Agent 的 tooltip 列出全部有来源的窗口（已过期窗口也算有来源，单独走
+// "已重置，等待刷新"文案）；一个都没有时由调用方渲染 "-- / 暂无可靠来源"，
+// 绝不编造数字。不能截断：行上显示的是 bindingWindow 挑出来的那个，它可能排在
+// 第三位（Kimi 的月度窗口就是），截断会出现"行上写着月度、tooltip 里没有月度"。
 function compactDisplayWindows(entry) {
-  return (entry.windows || []).filter((window) => window.view.available).slice(0, 2);
+  return (entry.windows || []).filter((window) => window.view.available);
 }
 
 // 原生 title tooltip：逐窗口列出剩余与重置倒计时，并标注官方/快照/演示来源，
@@ -409,15 +415,13 @@ function compactQuotaTooltip(agentId, windows) {
   return [AGENT_META[agentId].label, ...lines].join("\n");
 }
 
-// 胶囊条一格优先展示 5 小时窗口；该 Agent 没有 5h 窗口时，取后端排好序的
-// 第一个可用窗口（后端按 five_hour → seven_day → 模型/月度排序）。
+// 胶囊条一格展示当前真正约束用量的窗口，规则见 quotaWindows.js。
 function stripCellData(entry) {
   const windows = (entry.windows || []).filter(
     (window) => window.view.available && !window.view.resetExpired,
   );
   if (!windows.length) return null;
-  const fiveHour = windows.find((window) => String(window.key || "").includes("five_hour"));
-  return { tightest: fiveHour || windows[0], windows };
+  return { tightest: bindingWindow(windows) || windows[0], windows };
 }
 
 // 原生 title tooltip：列出全部窗口的剩余与重置倒计时；快照数据标注更新时间。
@@ -452,7 +456,8 @@ function quotaSeverity(view) {
   if (!view.available || view.resetExpired) return "";
   const used = quotaUsedPercent(view);
   if (used >= 95) return "critical";
-  if (used >= 85) return "warn";
+  // 与 bindingWindow 的"告急"同一条线：越过它，这个窗口才会顶到行首。
+  if (used >= 100 - QUOTA_LOW_REMAINING) return "warn";
   return "";
 }
 
@@ -471,13 +476,12 @@ function quotaPace(view, key) {
 }
 
 function QuotaBarRow({ label, view, windowKey, accent }) {
-  const isSnapshot = view.stale || view.quality === "official_snapshot";
   const severity = quotaSeverity(view);
   const pace = quotaPace(view, windowKey);
   return (
     <>
       <div
-        className={`quota-bar-row ${isSnapshot ? "quota-bar-row--stale" : ""} ${severity ? `quota-bar-row--${severity}` : ""}`}
+        className={`quota-bar-row ${severity ? `quota-bar-row--${severity}` : ""}`}
         style={accent ? { "--quota-accent": accent } : undefined}
       >
         <small>{label}</small>
@@ -507,8 +511,54 @@ function QuotaBarRow({ label, view, windowKey, accent }) {
   );
 }
 
+/// 数据来源状态的文案。完整说明一律进 title。
+/// title + hint 给紧凑卡片底栏；state 给侧栏——那里主标题恒为「数据统计」，
+/// 状态由灯和 state 这一行承担，不把"数据不完整"顶成入口的名字。
+/// "部分覆盖" 这种自造词读者看不懂，直接说清楚哪里不全。
+function sourceStatusCopy(snapshot, loading, partial) {
+  if (snapshot.pending) {
+    return {
+      title: "正在读取",
+      hint: "首次扫描",
+      state: "正在读取",
+      detail: "正在读取本机日志，日志库较大时首次扫描需要几分钟。",
+    };
+  }
+  if (snapshot.loadError) {
+    return {
+      title: "读取失败",
+      hint: "点此排查",
+      state: "读取失败",
+      detail: "本机日志读取失败。界面不会用演示数字顶替，点此查看数据来源。",
+    };
+  }
+  if (partial) {
+    return {
+      title: "数据不完整",
+      hint: "点此查看",
+      state: "数据不完整",
+      detail: "部分日志未能解析，统计数字少于真实用量。点此查看涉及哪些来源。",
+    };
+  }
+  if (snapshot.isDemo) {
+    return {
+      title: "演示数据",
+      hint: "非真实用量",
+      state: "演示数据",
+      detail: "当前显示的是演示数据，不是本机真实用量。",
+    };
+  }
+  return {
+    title: "数据可追溯",
+    hint: loading ? "更新中" : formatClock(snapshot.generatedAt),
+    state: loading ? "更新中" : `更新于 ${formatClock(snapshot.generatedAt)}`,
+    detail: `每个数字都能追到来源日志。更新于 ${formatClock(snapshot.generatedAt)}。`,
+  };
+}
+
 function Sidebar({ activeNav, onNavChange, snapshot, loading }) {
   const partial = snapshotIsPartial(snapshot);
+  const sourceStatus = sourceStatusCopy(snapshot, loading, partial);
   return (
     <aside className="sidebar" aria-label="主导航">
       <div className="wordmark">Metrik</div>
@@ -530,14 +580,18 @@ function Sidebar({ activeNav, onNavChange, snapshot, loading }) {
         ))}
       </nav>
 
+      {/* 这块是数据来源页的入口，主标题恒为「数据统计」；状态由上方的灯和下面
+          那行承担。两行都不换行、高度固定：文案随状态变长会把整条导航顶得上下
+          跳。完整说明放 title。 */}
       <button
         className="source-status"
         type="button"
         onClick={() => onNavChange("sources")}
+        title={sourceStatus.detail}
       >
         <span className={`status-dot ${loading ? "status-dot--loading" : ""} ${snapshot.loadError ? "status-dot--error" : ""} ${partial ? "status-dot--warning" : ""}`} />
-        <span>{snapshot.pending ? "正在读取本机数据" : snapshot.loadError ? "数据暂不可用" : partial ? "部分覆盖" : snapshot.isDemo ? "演示数据" : "数据可追溯"}</span>
-        <small>{snapshot.pending ? "大型日志库可能需要几分钟" : loading ? "正在更新" : snapshot.loadError ? "未使用演示数字" : partial ? "部分记录未解析，点此查看" : `更新于 ${formatClock(snapshot.generatedAt)}`}</small>
+        <span>数据统计</span>
+        <small>{sourceStatus.state}</small>
       </button>
     </aside>
   );
@@ -910,7 +964,12 @@ function ThemeQuickToggle({ theme, darkTheme, onThemeChange }) {
   );
 }
 
-function WindowActions({ mode, pinned, transparent = false, macMinimal = false, theme, darkTheme, onThemeChange, onToggleMode, onTogglePinned, onToggleTransparent }) {
+function WindowActions({ mode, pinned, transparent = false, glassTint = "dark", macMinimal = false, theme, darkTheme, onThemeChange, onToggleMode, onTogglePinned, onToggleTransparent }) {
+  const glassName = (id) =>
+    GLASS_TINT_OPTIONS.find((option) => option.id === id)?.label || "深色";
+  const glassCurrent = normalizeGlassTint(glassTint);
+  const glassNext = nextGlassTint(glassCurrent);
+  const glassLabel = `${glassName(glassCurrent)} · 点击切为${glassName(glassNext)}`;
   return (
     <div className={`window-actions window-actions--${mode}`} aria-label="窗口操作">
       {mode === "expanded" && (
@@ -952,9 +1011,8 @@ function WindowActions({ mode, pinned, transparent = false, macMinimal = false, 
           type="button"
           className={`window-action ${transparent ? "window-action--active" : ""}`}
           onClick={onToggleTransparent}
-          aria-label={transparent ? "关闭玻璃材质" : "使用玻璃材质"}
-          aria-pressed={transparent}
-          title={transparent ? "关闭玻璃材质" : "玻璃材质"}
+          aria-label={`外观：${glassLabel}`}
+          title={`外观：${glassLabel}`}
         >
           <CircleHalfTilt size={16} weight={transparent ? "fill" : "light"} aria-hidden="true" />
         </button>
@@ -1008,6 +1066,33 @@ function WindowActions({ mode, pinned, transparent = false, macMinimal = false, 
   );
 }
 
+function handleGlassPointerMove(event) {
+  const shell = event.currentTarget;
+  const bounds = shell.getBoundingClientRect();
+  if (!bounds.width || !bounds.height) return;
+  const frame = shell.parentElement?.id === "root" ? shell.parentElement : shell;
+  const x = Math.max(0, Math.min(100, ((event.clientX - bounds.left) / bounds.width) * 100));
+  const y = Math.max(0, Math.min(100, ((event.clientY - bounds.top) / bounds.height) * 100));
+  frame.style.setProperty("--glass-pointer-x", `${x}%`);
+  frame.style.setProperty("--glass-pointer-y", `${y}%`);
+  frame.style.setProperty("--glass-edge-opacity", "1");
+}
+
+function handleGlassPointerLeave(event) {
+  const shell = event.currentTarget;
+  const frame = shell.parentElement?.id === "root" ? shell.parentElement : shell;
+  frame.style.setProperty("--glass-edge-opacity", "0");
+}
+
+function glassPointerProps(enabled) {
+  return enabled
+    ? {
+        onPointerMove: handleGlassPointerMove,
+        onPointerLeave: handleGlassPointerLeave,
+      }
+    : {};
+}
+
 function StripBar({
   snapshot,
   agents,
@@ -1016,6 +1101,8 @@ function StripBar({
   transparent,
   glassAlpha = 0.82,
   glassMode = "css",
+  glassTint = "dark",
+  glassInk = "dark",
   orientation,
   onToggleOrientation,
   onTogglePinned,
@@ -1032,7 +1119,18 @@ function StripBar({
   const dragProps = pinned || IS_MAC ? {} : { "data-tauri-drag-region": true };
   const vertical = orientation === "vertical";
   const OrientationIcon = vertical ? ArrowsLeftRight : ArrowsDownUp;
+  // 透明档的真实桌面背景变化很大，控制图标加粗以稳定识别。
+  const buttonWeight = transparent && glassTint === "clear" ? "bold" : "light";
   const shellRef = useRef(null);
+  const shellAppearance = glassShellAppearance("strip", {
+    transparent,
+    glassMode,
+    glassTint,
+    glassInk,
+    glassAlpha,
+    isMac: IS_MAC,
+    vertical,
+  });
   // 窗口尺寸跟随真实内容（通用方案，替代手写常量）：每次渲染后与视口变化时
   // 复核目标尺寸，差 ≥1px 才调窗；量的是 CSS px，resizeStripWindow 内部统一
   // 乘缩放系数与 DPI。任何字体/DPI/缩放/更新点组合都收敛，不再裁按钮。
@@ -1095,10 +1193,12 @@ function StripBar({
   return (
     <main
       ref={shellRef}
-      className={`strip-shell ${vertical ? "strip-shell--vertical" : ""} ${transparent ? "strip-shell--transparent" : ""} ${transparent && glassMode === "css" ? "strip-shell--glass-css" : ""} ${IS_MAC ? "strip-shell--mac" : ""}`}
+      className={shellAppearance.className}
+      data-glass-surface={shellAppearance.trueAlpha ? "true-alpha" : undefined}
       {...dragProps}
+      {...glassPointerProps(shellAppearance.edgeInteractive)}
       style={{
-        ...(transparent ? { "--glass-alpha": glassAlpha } : {}),
+        ...shellAppearance.style,
         ...(pinned ? { cursor: "default" } : {}),
       }}
     >
@@ -1128,11 +1228,10 @@ function StripBar({
           }
           const view = cell.tightest.view;
           const severity = quotaSeverity(view);
-          const isSnapshot = view.stale || view.quality === "official_snapshot";
           return (
             <div
               key={agentId}
-              className={`strip-cell ${isSnapshot ? "strip-cell--stale" : ""} ${severity ? `strip-cell--${severity}` : ""}`}
+              className={`strip-cell ${severity ? `strip-cell--${severity}` : ""}`}
               style={{ "--quota-accent": meta.accent }}
               title={stripTooltip(agentId, cell.windows)}
               {...dragProps}
@@ -1188,7 +1287,7 @@ function StripBar({
             aria-pressed={pinned}
             title={pinned ? "取消固定，恢复拖动" : "固定在当前位置并置顶"}
           >
-            <PushPinSimple size={15} weight={pinned ? "fill" : "light"} aria-hidden="true" />
+            <PushPinSimple size={15} weight={pinned ? "fill" : buttonWeight} aria-hidden="true" />
           </button>
         )}
         <button
@@ -1198,7 +1297,7 @@ function StripBar({
           aria-label={vertical ? "切换为横条" : "切换为竖条"}
           title={vertical ? "切换为横条" : "切换为竖条"}
         >
-          <OrientationIcon size={15} weight="light" aria-hidden="true" />
+          <OrientationIcon size={15} weight={buttonWeight} aria-hidden="true" />
         </button>
         <button
           type="button"
@@ -1207,7 +1306,7 @@ function StripBar({
           aria-label="展开为桌面小插件"
           title="展开为桌面小插件"
         >
-          <ArrowsOutSimple size={15} weight="light" aria-hidden="true" />
+          <ArrowsOutSimple size={15} weight={buttonWeight} aria-hidden="true" />
         </button>
         <button
           type="button"
@@ -1216,7 +1315,7 @@ function StripBar({
           aria-label="打开完整视图"
           title="完整视图"
         >
-          <CornersOut size={15} weight="light" aria-hidden="true" />
+          <CornersOut size={15} weight={buttonWeight} aria-hidden="true" />
         </button>
       </div>
     </main>
@@ -1232,6 +1331,8 @@ function CompactWidget({
   pinned,
   transparent,
   glassMode = "css",
+  glassTint = "dark",
+  glassInk = "dark",
   onPeriodChange,
   onOpenSources,
   onTogglePinned,
@@ -1305,7 +1406,10 @@ function CompactWidget({
         natural = Math.max(COMPACT_LIST_MIN_HEIGHT, Math.ceil(lastRow.bottom - firstRow.top));
       }
       // 非列表部分实测 + 列表自然高 + 4px 余量（1fr 分配与取整的抖动）。
-      const chrome = shell.clientHeight - list.clientHeight;
+      // 用 scrollHeight 兜底：只有一个 Agent 时窗口会收到比内容还矮，底栏被
+      // 裁在可视区外，clientHeight 就量不到它，于是"目标高度"一直等于当前
+      // 高度，卡在底栏永远不显示的稳定错误态。
+      const chrome = Math.max(shell.scrollHeight, shell.clientHeight) - list.clientHeight;
       const target = Math.max(COMPACT_MIN_WINDOW_HEIGHT, Math.round(chrome + natural + 4));
       if (IS_MAC) {
         // macOS 面板顶部锚定菜单栏图标：高度跟随内容（屏幕可用高 - 80 封顶），
@@ -1343,14 +1447,25 @@ function CompactWidget({
   const quotaEntry = agentQuotaFor(snapshot, quotaAgent);
   const quotaWindows = compactQuotaWindows(quotaEntry);
   const quotaView = quotaWindows.find((window) => window.view.available)?.view || UNAVAILABLE_QUOTA;
-  const quotaIsSnapshot = quotaView.stale || quotaView.quality === "official_snapshot";
   const partial = snapshotIsPartial(snapshot);
+  const sourceStatus = sourceStatusCopy(snapshot, loading, partial);
+  const shellAppearance = glassShellAppearance("widget", {
+    transparent,
+    glassMode,
+    glassTint,
+    glassInk,
+    glassAlpha,
+    isMac: IS_MAC,
+    loading,
+  });
 
   return (
     <main
       ref={shellRef}
-      className={`widget-shell ${transparent ? "widget-shell--transparent" : ""} ${transparent && glassMode === "css" ? "widget-shell--glass-css" : ""} ${IS_MAC ? "widget-shell--mac" : ""} ${loading ? "is-loading" : ""}`}
-      style={transparent ? { "--glass-alpha": glassAlpha } : undefined}
+      className={shellAppearance.className}
+      data-glass-surface={shellAppearance.trueAlpha ? "true-alpha" : undefined}
+      {...glassPointerProps(shellAppearance.edgeInteractive)}
+      style={shellAppearance.style}
     >
       <h1 className="sr-only">Metrik Agent 用量桌面小插件</h1>
       <header
@@ -1384,6 +1499,7 @@ function CompactWidget({
           mode="compact"
           pinned={pinned}
           transparent={transparent}
+          glassTint={glassTint}
           macMinimal={IS_MAC}
           onToggleMode={onExpand}
           onTogglePinned={onTogglePinned}
@@ -1434,7 +1550,7 @@ function CompactWidget({
           </div>
 
           <button
-            className={`widget-quota ${quotaIsSnapshot ? "widget-quota--stale" : ""}`}
+            className="widget-quota"
             style={{ "--quota-accent": AGENT_META[quotaAgent].accent }}
             type="button"
             onClick={onCycleQuotaAgent}
@@ -1482,19 +1598,16 @@ function CompactWidget({
               if (!meta) return null;
               const entry = agentQuotaFor(snapshot, agentId);
               const windows = compactDisplayWindows(entry);
-              // 行内头条窗口与胶囊条同规则：后端排序 five_hour 优先的第一个可用窗口；
+              // 行内头条窗口与胶囊条同规则，见 quotaWindows.js；
               // 完整窗口明细在该行的原生 tooltip 与焦点卡中。
-              const headline = windows[0] || null;
+              const headline = bindingWindow(entry.windows) || windows[0] || null;
               const headlineView = headline?.view || null;
               const current = Boolean(headlineView && headlineView.available && !headlineView.resetExpired);
-              const stale = Boolean(
-                headlineView && (headlineView.stale || headlineView.quality === "official_snapshot"),
-              );
               const severity = headlineView ? quotaSeverity(headlineView) : "";
               const remaining = headlineView ? Math.min(100, Math.max(0, headlineView.remainingPercent)) : 0;
               return (
                 <div
-                  className={`widget-agent ${severity ? `widget-agent--${severity}` : ""} ${stale ? "widget-agent--stale" : ""}`}
+                  className={`widget-agent ${severity ? `widget-agent--${severity}` : ""}`}
                   key={agentId}
                   style={{ "--quota-accent": meta.accent }}
                   title={compactQuotaTooltip(agentId, windows)}
@@ -1516,8 +1629,11 @@ function CompactWidget({
                               : "· 暂无可靠来源"}
                     </small>
                   </span>
-                  {/* 展示剩余额度（用户关心的是还能用多少），陈旧快照带 ~ 前缀。 */}
-                  <em>{current ? `${stale ? "~" : ""}${Math.round(remaining)}%` : "--"}</em>
+                  {/* 展示剩余额度（用户关心的是还能用多少）。快照新鲜度不再
+                      影响数字的写法与颜色：那一格已经写着窗口或"已重置，等待
+                      刷新"，再加 ~ 前缀和灰化是重复信息，只会让人以为数字是
+                      估算出来的。 */}
+                  <em>{current ? `${Math.round(remaining)}%` : "--"}</em>
                 </div>
               );
             });
@@ -1525,10 +1641,15 @@ function CompactWidget({
         </section>
 
         <footer className="widget-footer">
-          <button type="button" className={`widget-source ${snapshot.loadError ? "widget-source--error" : ""} ${partial ? "widget-source--warning" : ""}`} onClick={onOpenSources} aria-live="polite">
+          <button
+            type="button"
+            className={`widget-source ${snapshot.loadError ? "widget-source--error" : ""} ${partial ? "widget-source--warning" : ""}`}
+            onClick={onOpenSources}
+            title={sourceStatus.detail}
+          >
             <ShieldCheck size={15} weight="fill" aria-hidden="true" />
-            <span>{snapshot.pending ? "正在读取" : snapshot.loadError ? "数据暂不可用" : partial ? "部分覆盖" : snapshot.isDemo ? "演示数据" : "数据可追溯"}</span>
-            <small>{snapshot.pending ? "请稍候" : loading ? "更新中" : snapshot.loadError ? "未替换" : partial ? "查看说明" : formatClock(snapshot.generatedAt)}</small>
+            <span>{sourceStatus.title}</span>
+            <small>{sourceStatus.hint}</small>
           </button>
           <button
             type="button"
@@ -1607,10 +1728,7 @@ function SourceDrawer({ snapshot, onClose, onRebuildLedger, rebuildState }) {
         onMouseDown={(event) => event.stopPropagation()}
       >
         <header>
-          <div>
-            <span className="eyebrow">统计说明</span>
-            <h2 id="source-title">每个数字都有出处</h2>
-          </div>
+          <h2 id="source-title">统计说明</h2>
           <button ref={closeButtonRef} type="button" className="icon-button" onClick={onClose} aria-label="关闭">
             <X size={21} weight="light" />
           </button>
@@ -2059,6 +2177,32 @@ const THEME_OPTIONS = [
   { id: "dark", label: "暗色" },
 ];
 
+// 悬浮形态的窗口圆角，物理像素。取值对齐卡片此前的观感：8 CSS px 在当时的
+// dpr 1.1875（系统 125% × 卡片缩放 95%）下正好画出 9.5 物理像素。
+const GLASS_RADIUS_PX = 10;
+
+const GLASS_TINT_OPTIONS = [
+  { id: "dark", label: "深色" },
+  { id: "light", label: "浅色" },
+  { id: "clear", label: "透明" },
+];
+
+function normalizeGlassTint(value) {
+  return GLASS_TINT_OPTIONS.some((option) => option.id === value) ? value : "dark";
+}
+
+// 透明档的文字颜色。桌面挂件常见的两种风格：深色字配白霜（Pogget 一路），
+// 或白色字直接压在壁纸上（Rainmeter 一路）。两者需要的底完全相反，所以
+// 选文字颜色实际上也在选罩层，见 glassAppearance.js。
+const GLASS_INK_OPTIONS = [
+  { id: "dark", label: "深色字" },
+  { id: "light", label: "白色字" },
+];
+
+function normalizeGlassInk(value) {
+  return GLASS_INK_OPTIONS.some((option) => option.id === value) ? value : "dark";
+}
+
 function SliderRow({ label, hint, min, max, step, percent, ariaLabel, onChange }) {
   return (
     <div className="settings-subsection">
@@ -2080,7 +2224,7 @@ function SliderRow({ label, hint, min, max, step, percent, ariaLabel, onChange }
   );
 }
 
-function AppearanceCard({ theme, onThemeChange, glassAlpha, onGlassAlpha, uiScale, onUiScale, stripScale, onStripScale }) {
+function AppearanceCard({ theme, onThemeChange, glassAlpha, onGlassAlpha, glassTint, onGlassTint, glassInk, onGlassInk, uiScale, onUiScale, stripScale, onStripScale }) {
   return (
     <div className="settings-card">
       <h2>外观与缩放</h2>
@@ -2100,10 +2244,54 @@ function AppearanceCard({ theme, onThemeChange, glassAlpha, onGlassAlpha, uiScal
           </button>
         ))}
       </div>
+      {/* macOS 面板材质跟随系统 vibrancy，不提供组件外观选项；
+          深/浅配色只针对 Windows 的卡片与胶囊。 */}
+      {!IS_MAC && (
+        <div className="settings-subsection">
+          <h3>组件外观</h3>
+          <p className="settings-muted">
+            深色是 HUD 玻璃；浅色是透亮白磨砂；透明会直接透出桌面与后方窗口，并叠加轻霜和边缘高光。
+          </p>
+          <div className="theme-toggle" role="group" aria-label="组件外观">
+            {GLASS_TINT_OPTIONS.map((option) => (
+              <button
+                key={option.id}
+                type="button"
+                className={glassTint === option.id ? "is-selected" : ""}
+                aria-pressed={glassTint === option.id}
+                onClick={() => onGlassTint(option.id)}
+              >
+                {option.label}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+      {!IS_MAC && glassTint === "clear" && (
+        <div className="settings-subsection">
+          <h3>透明档文字</h3>
+          <p className="settings-muted">
+            深色字配白霜，浅色壁纸上最清楚；白色字配一层薄暗罩，接近桌面挂件常见的风格。
+          </p>
+          <div className="theme-toggle" role="group" aria-label="透明档文字">
+            {GLASS_INK_OPTIONS.map((option) => (
+              <button
+                key={option.id}
+                type="button"
+                className={glassInk === option.id ? "is-selected" : ""}
+                aria-pressed={glassInk === option.id}
+                onClick={() => onGlassInk(option.id)}
+              >
+                {option.label}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
       <SliderRow
-        label="小组件玻璃浓度"
-        hint="越低越透、越高越实；系统模糊不可用时自动锁定近实心。"
-        min={60}
+        label="玻璃浓度"
+        hint="同时作用于卡片和胶囊；越低越通透，越高越厚实。"
+        min={5}
         max={96}
         step={2}
         percent={Math.round(glassAlpha * 100)}
@@ -2114,25 +2302,25 @@ function AppearanceCard({ theme, onThemeChange, glassAlpha, onGlassAlpha, uiScal
           缩放只针对 Windows 的桌面小插件与胶囊条。 */}
       {!IS_MAC && (
         <SliderRow
-          label="小组件缩放"
-          hint="等比缩放桌面小插件；滑杆改动下次进入时生效。"
+          label="卡片缩放"
+          hint="仅调整卡片尺寸；滑杆改动下次进入时生效。"
           min={UI_SCALE_RANGE.min * 100}
           max={UI_SCALE_RANGE.max * 100}
           step={5}
           percent={Math.round(uiScale * 100)}
-          ariaLabel="小组件缩放百分比"
+          ariaLabel="卡片缩放百分比"
           onChange={onUiScale}
         />
       )}
       {!IS_MAC && (
         <SliderRow
-          label="胶囊条缩放"
-          hint="等比缩放胶囊条，与小组件互不影响；下次进入时生效。"
+          label="胶囊缩放"
+          hint="仅调整胶囊尺寸，与卡片互不影响；下次进入时生效。"
           min={UI_SCALE_RANGE.min * 100}
           max={UI_SCALE_RANGE.max * 100}
           step={5}
           percent={Math.round(stripScale * 100)}
-          ariaLabel="胶囊条缩放百分比"
+          ariaLabel="胶囊缩放百分比"
           onChange={onStripScale}
         />
       )}
@@ -2334,10 +2522,16 @@ function QoderQuotaCard({ onSnapshotRefresh }) {
 // 变高，与短卡混排时会把整排撑出大片空白——分页正是为了让它只影响自己那一页。
 const SETTINGS_TABS = [
   {
+    id: "appearance",
+    label: "外观与缩放",
+    title: "外观与缩放",
+    blurb: "完整视图的明暗主题，卡片与胶囊的组件外观、玻璃浓度及独立缩放。",
+  },
+  {
     id: "display",
-    label: "显示",
-    title: "显示与外观",
-    blurb: "选择小组件与胶囊条展示哪些 Agent、以什么顺序，以及完整视图的明暗与各形态的缩放。",
+    label: "Agent 选择",
+    title: "小组件展示的 Agent",
+    blurb: "选择小组件与胶囊条展示哪些 Agent、以什么顺序。",
   },
   {
     id: "sources",
@@ -2353,7 +2547,7 @@ const SETTINGS_TABS = [
   },
 ];
 
-function SettingsSection({ onSnapshotRefresh, widgetAgents, onToggleWidgetAgent, onMoveWidgetAgent, stripAgents, onToggleStripAgent, onMoveStripAgent, glassAlpha, onGlassAlpha, uiScale, onUiScale, stripScale, onStripScale, theme, onThemeChange, autoUpdateCheck, onAutoUpdateCheck, availableUpdate }) {
+function SettingsSection({ onSnapshotRefresh, widgetAgents, onToggleWidgetAgent, onMoveWidgetAgent, stripAgents, onToggleStripAgent, onMoveStripAgent, glassAlpha, onGlassAlpha, glassTint, onGlassTint, glassInk, onGlassInk, uiScale, onUiScale, stripScale, onStripScale, theme, onThemeChange, autoUpdateCheck, onAutoUpdateCheck, availableUpdate }) {
   const [settings, setSettings] = useState(null);
   const [directoryInput, setDirectoryInput] = useState("");
   const [busy, setBusy] = useState(false);
@@ -2411,7 +2605,7 @@ function SettingsSection({ onSnapshotRefresh, widgetAgents, onToggleWidgetAgent,
     }
   };
 
-  const [tab, setTab] = useState("display");
+  const [tab, setTab] = useState("appearance");
   const activeTab = SETTINGS_TABS.find((item) => item.id === tab) || SETTINGS_TABS[0];
 
   return (
@@ -2442,27 +2636,32 @@ function SettingsSection({ onSnapshotRefresh, widgetAgents, onToggleWidgetAgent,
       )}
 
       <div className="settings-grid">
+        {activeTab.id === "appearance" && (
+          <AppearanceCard
+            theme={theme}
+            onThemeChange={onThemeChange}
+            glassAlpha={glassAlpha}
+            onGlassAlpha={onGlassAlpha}
+            glassTint={glassTint}
+            onGlassTint={onGlassTint}
+            glassInk={glassInk}
+            onGlassInk={onGlassInk}
+            uiScale={uiScale}
+            onUiScale={onUiScale}
+            stripScale={stripScale}
+            onStripScale={onStripScale}
+          />
+        )}
+
         {activeTab.id === "display" && (
-          <>
-            <AgentsDisplayCard
-              widgetAgents={widgetAgents}
-              onToggleWidgetAgent={onToggleWidgetAgent}
-              onMoveWidgetAgent={onMoveWidgetAgent}
-              stripAgents={stripAgents}
-              onToggleStripAgent={onToggleStripAgent}
-              onMoveStripAgent={onMoveStripAgent}
-            />
-            <AppearanceCard
-              theme={theme}
-              onThemeChange={onThemeChange}
-              glassAlpha={glassAlpha}
-              onGlassAlpha={onGlassAlpha}
-              uiScale={uiScale}
-              onUiScale={onUiScale}
-              stripScale={stripScale}
-              onStripScale={onStripScale}
-            />
-          </>
+          <AgentsDisplayCard
+            widgetAgents={widgetAgents}
+            onToggleWidgetAgent={onToggleWidgetAgent}
+            onMoveWidgetAgent={onMoveWidgetAgent}
+            stripAgents={stripAgents}
+            onToggleStripAgent={onToggleStripAgent}
+            onMoveStripAgent={onMoveStripAgent}
+          />
         )}
 
         {activeTab.id === "sources" && (
@@ -3276,11 +3475,9 @@ export function App() {
   const [activeNav, setActiveNav] = useState(initialNav);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [pinned, setPinned] = useState(() => localStorage.getItem("metrik:pinned") === "true");
-  // 玻璃材质默认开启；用户关闭后记住选择。
-  // macOS 上材质由系统 vibrancy 承担，恒开，没有开关按钮。
-  const [transparent, setTransparent] = useState(
-    () => IS_MAC || (localStorage.getItem("metrik:transparent") ?? "true") === "true",
-  );
+  // 卡片与胶囊固定使用玻璃材质，用户只在深色、浅色和透明三种外观间选择。
+  // expanded 仍通过 viewMode 单独关闭玻璃绘制。
+  const transparent = true;
   // 胶囊条方向：横条 / 竖条，用户手动选，记住选择。
   const [stripOrientation, setStripOrientation] = useState(() =>
     localStorage.getItem("metrik:stripOrientation") === "vertical" ? "vertical" : "horizontal",
@@ -3346,13 +3543,43 @@ export function App() {
   // 玻璃浓度用户可调（ModernFlyouts 的做法）；仅影响玻璃模式的 CSS tint。
   const [glassAlpha, setGlassAlpha] = useState(() => {
     const stored = Number(localStorage.getItem("metrik:glassAlpha"));
-    return Number.isFinite(stored) && stored >= 0.6 && stored <= 0.96 ? stored : 0.82;
+    return Number.isFinite(stored) && stored >= 0.05 && stored <= 0.96 ? stored : 0.82;
   });
   const handleGlassAlpha = useCallback((next) => {
     setGlassAlpha(next);
     localStorage.setItem("metrik:glassAlpha", String(next));
     if (IS_MAC) runWindowAction(() => broadcastMacAppearance({ glassAlpha: next }));
   }, []);
+  // 组件外观：深色 HUD / 透亮白（苹果式白 tint + 深色文字）/ 透明（不铺材质，
+  // 直接透出桌面）。用户可选，记住选择。只作用于 Windows 的卡片与胶囊；
+  // macOS 面板材质跟随系统 vibrancy，不提供此项。
+  const [glassTint, setGlassTint] = useState(() => {
+    const legacyDisabled = localStorage.getItem("metrik:transparent") === "false";
+    const value = legacyDisabled
+      ? "dark"
+      : normalizeGlassTint(localStorage.getItem("metrik:glassTint"));
+    // 旧版本把“不透明”作为第四种状态；新版迁移到默认深色，并移除旧开关。
+    if (legacyDisabled) localStorage.setItem("metrik:glassTint", value);
+    localStorage.removeItem("metrik:transparent");
+    return value;
+  });
+  const handleGlassTint = useCallback((next) => {
+    const value = normalizeGlassTint(next);
+    setGlassTint(value);
+    localStorage.setItem("metrik:glassTint", value);
+  }, []);
+  // 透明档的文字颜色，只在透明档生效；其它两档的前景由配色本身决定。
+  const [glassInk, setGlassInk] = useState(() =>
+    normalizeGlassInk(localStorage.getItem("metrik:glassInk")),
+  );
+  const handleGlassInk = useCallback((next) => {
+    const value = normalizeGlassInk(next);
+    setGlassInk(value);
+    localStorage.setItem("metrik:glassInk", value);
+  }, []);
+  // 轮转按钮要读当前配色但不该因它重建回调，用 ref 取值。
+  const glassTintRef = useRef(glassTint);
+  glassTintRef.current = glassTint;
   // 卡片/胶囊的整体缩放系数（连续值）：窗口尺寸与 WebView 原生 zoom 同乘一个系数，
   // 等比放大不会变形；expanded 有独立系数。生效在 windowClient 的形态切换里，
   // 设置页调整后下次回到卡片/胶囊时应用。
@@ -3528,22 +3755,37 @@ export function App() {
     };
   }, []);
 
-  // 玻璃只作用于小插件形态；系统明暗主题切换时重发对应 tint。
-  // 原生材质不可用（或非桌面环境）时回落到 CSS 玻璃拟态承担外观。
-  const [glassMode, setGlassMode] = useState("css");
+  // Windows 小组件终身保持创建期透明窗口，不在运行时切换 DWM backdrop。
+  // 桌面端初始直接选 alpha，避免 WebView 背景确认前闪一帧 CSS fallback。
+  const [glassMode, setGlassMode] = useState(() =>
+    resolveGlassMode({
+      enabled: transparent && viewMode !== "expanded",
+      tintStyle: glassTint,
+      nativeAvailable: false,
+      trueAlphaAvailable: isDesktop() && isWindowsPlatform(),
+    }),
+  );
   useEffect(() => {
     let cancelled = false;
     const apply = () => {
       setWindowGlass(
         transparent && viewMode !== "expanded",
         viewMode === "strip" ? 20 : 14,
+        glassTint,
       )
         .then((mode) => {
           if (!cancelled) setGlassMode(mode);
         })
         .catch((error) => {
           console.warn("Unable to update the desktop window.", error);
-          if (!cancelled) setGlassMode(transparent ? "css" : "off");
+          if (!cancelled) {
+            setGlassMode(resolveGlassMode({
+              enabled: transparent && viewMode !== "expanded",
+              tintStyle: glassTint,
+              nativeAvailable: false,
+              trueAlphaAvailable: isDesktop() && isWindowsPlatform(),
+            }));
+          }
         });
     };
     apply();
@@ -3553,7 +3795,44 @@ export function App() {
       cancelled = true;
       media?.removeEventListener?.("change", apply);
     };
-  }, [transparent, viewMode]);
+  }, [transparent, viewMode, glassTint]);
+
+  // 深色档的 0.55 下限是白色文字的可读下限，不是历史补偿：白字压在 0.55 深底
+  // 上、透出亮壁纸时对比度 4.2:1，降到 0.22 就只剩 1.9:1。浅色档同理。
+  // clear 走深色文字，下限交给 CSS 里那条白霜曲线（0.38 起）。
+  const shellGlassAlpha = useMemo(() => {
+    if (glassTint === "clear") return glassAlpha;
+    const t = (glassAlpha - 0.05) / (0.96 - 0.05);
+    return 0.55 + Math.min(1, Math.max(0, t)) * (0.96 - 0.55);
+  }, [glassAlpha, glassTint]);
+  useLayoutEffect(() => {
+    document.documentElement.style.setProperty(
+      "--shell-glass-alpha",
+      String(shellGlassAlpha),
+    );
+    return () => {
+      document.documentElement.style.removeProperty("--shell-glass-alpha");
+    };
+  }, [shellGlassAlpha]);
+
+  // 圆角写成 CSS px 会被卡片和胶囊各自的 WebView 原生 zoom 放大：同样 8px，
+  // 卡片(zoom 0.95)画出 9.5 物理像素，竖胶囊(zoom 1.75)画出 17.5，成了大圆头。
+  // 折成物理像素让两种形态、任何缩放档都是同一个视觉半径。
+  useLayoutEffect(() => {
+    const apply = () => {
+      const dpr = window.devicePixelRatio || 1;
+      document.documentElement.style.setProperty(
+        "--glass-radius",
+        `${(GLASS_RADIUS_PX / dpr).toFixed(2)}px`,
+      );
+    };
+    apply();
+    window.addEventListener("resize", apply);
+    return () => {
+      window.removeEventListener("resize", apply);
+      document.documentElement.style.removeProperty("--glass-radius");
+    };
+  }, []);
 
   // mac 的设置页开在独立的完整视图窗口里，面板是另一个 webview 实例，
   // 拖滑杆时面板自己的 React 状态不会变。WKWebView 的 storage 事件不跨
@@ -3564,7 +3843,7 @@ export function App() {
     if (!IS_MAC || !isDesktop()) return undefined;
     const unlistenPromise = onMacAppearance((payload) => {
       const alpha = Number(payload.glassAlpha);
-      if (Number.isFinite(alpha) && alpha >= 0.6 && alpha <= 0.96) setGlassAlpha(alpha);
+      if (Number.isFinite(alpha) && alpha >= 0.05 && alpha <= 0.96) setGlassAlpha(alpha);
     });
     return () => {
       unlistenPromise.then((unlisten) => unlisten());
@@ -3861,13 +4140,11 @@ export function App() {
     });
   }, []);
 
+  // 标题栏的 ◐ 按钮与设置页保持同一模型，只循环深色、浅色、透明三种组件外观。
+  // 技术层的 off 只属于 expanded/回落状态，不作为第四种配色暴露。
   const handleToggleTransparent = useCallback(() => {
-    setTransparent((current) => {
-      const next = !current;
-      localStorage.setItem("metrik:transparent", String(next));
-      return next;
-    });
-  }, []);
+    handleGlassTint(nextGlassTint(normalizeGlassTint(glassTintRef.current)));
+  }, [handleGlassTint]);
 
   const handleRebuildLedger = useCallback(async () => {
     if (rebuildInFlight.current) return;
@@ -3919,8 +4196,10 @@ export function App() {
         pinned={pinned}
         loading={appBusy}
         transparent={transparent}
-        glassAlpha={glassAlpha}
+        glassAlpha={shellGlassAlpha}
         glassMode={glassMode}
+        glassTint={glassTint}
+        glassInk={glassInk}
         orientation={stripOrientation}
         onToggleOrientation={handleToggleStripOrientation}
         onTogglePinned={handleTogglePinned}
@@ -3944,6 +4223,8 @@ export function App() {
           pinned={pinned}
           transparent={transparent}
           glassMode={glassMode}
+          glassTint={glassTint}
+          glassInk={glassInk}
           onPeriodChange={setPeriod}
           onOpenSources={() => setDrawerOpen(true)}
           onTogglePinned={handleTogglePinned}
@@ -3953,7 +4234,7 @@ export function App() {
           quotaAgent={activeQuotaAgent}
           onCycleQuotaAgent={handleCycleQuotaAgent}
           widgetAgents={widgetAgents}
-          glassAlpha={glassAlpha}
+          glassAlpha={shellGlassAlpha}
           availableUpdate={availableUpdate}
           onOpenUpdate={handleOpenUpdate}
         />
@@ -4089,6 +4370,10 @@ export function App() {
             onMoveStripAgent={handleMoveStripAgent}
             glassAlpha={glassAlpha}
             onGlassAlpha={handleGlassAlpha}
+            glassTint={glassTint}
+            onGlassTint={handleGlassTint}
+            glassInk={glassInk}
+            onGlassInk={handleGlassInk}
             uiScale={uiScale}
             onUiScale={handleUiScale}
             stripScale={stripScale}

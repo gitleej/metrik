@@ -1,5 +1,9 @@
 import { invoke } from "@tauri-apps/api/core";
 import { platform as tauriPlatform } from "@tauri-apps/plugin-os";
+import {
+  resolveGlassMode,
+  resolveWindowsGlassComposition,
+} from "./glassAppearance.js";
 import { detectRuntimePlatform } from "./platformDetection";
 import {
   monitorForWindowPosition,
@@ -13,7 +17,7 @@ const WINDOW_SIZES = {
   // Agent 只留一行时卡片允许收短，不再空一截（高度仍由内容自愈驱动）。
   compact: { width: 320, height: 320, minWidth: 320, minHeight: 260 },
   expanded: { width: 1120, height: 760, minWidth: 960, minHeight: 700 },
-  strip: { width: 240, height: 40, minWidth: 48, minHeight: 40 },
+  strip: { width: 240, height: 40, minWidth: 40, minHeight: 40 },
 };
 
 // 卡片/胶囊的整体缩放系数（连续值）。窗口尺寸与页面 zoom 同乘一个系数，
@@ -1005,33 +1009,26 @@ async function onScaleFactorChanged(handler) {
   };
 }
 
-function glassOptions() {
-  // 玻璃固定为深色 HUD，不随系统主题；tint 只供旧系统的 SWCA 回退使用。
-  return {
-    dark: true,
-    tint: [18, 20, 25, 96],
-  };
-}
-
-/// 返回实际生效的材质："native"（系统模糊已启用）、"css"（原生不可用，
-/// 由 CSS 近实心玻璃承担外观）或 "off"。调用方据此切换样式层。
-async function setWindowGlass(enabled, radius = 12) {
-  if (!isDesktop()) return enabled ? "css" : "off";
+/// 返回实际生效的材质："native"（系统模糊已启用）、"alpha"（真实窗口
+/// Alpha）、"css"（原生不可用，由 CSS 近实心玻璃承担外观）或 "off"。
+async function setWindowGlass(enabled, radius = 12, tintStyle = "dark") {
+  if (!isDesktop()) {
+    return resolveGlassMode({
+      enabled,
+      tintStyle,
+      nativeAvailable: false,
+      trueAlphaAvailable: false,
+    });
+  }
   if (isWindowsPlatform()) {
-    // WebView2 has its own composition surface. Make that surface transparent
-    // before applying the HWND backdrop, otherwise it masks the native material.
-    await makeWebviewTransparent();
-    if (!enabled) {
-      await invoke("set_glass_backdrop", { enabled, ...glassOptions() });
-      return "off";
-    }
-    try {
-      await invoke("set_glass_backdrop", { enabled, ...glassOptions() });
-      return "native";
-    } catch (error) {
-      console.warn("Native glass backdrop unavailable, using CSS glass.", error);
-      return "css";
-    }
+    // Keep one immutable composition strategy for the entire lifetime of the
+    // Windows widget. Switching the HWND between HostBackdrop/Acrylic and clear
+    // alpha leaves WebView2 on a white redirection surface on current Win11.
+    // Coffee CLI avoids that failure by relying on the creation-time
+    // `transparent: true` WebView and drawing every material as a single CSS
+    // surface. Do not reset WebView2's background at runtime: that also turns
+    // external backdrop-filter sampling into an opaque white capture surface.
+    return resolveWindowsGlassComposition({ enabled, tintStyle }).mode;
   }
   const api = await windowApi();
   if (!api) return enabled ? "css" : "off";
@@ -1309,6 +1306,7 @@ export {
   installUpdate,
   isDesktop,
   isMacPlatform,
+  isWindowsPlatform,
   minimizeWindow,
   normalizeUiScale,
   onMacAppearance,
