@@ -58,6 +58,8 @@
       "icons/icon.ico"
     ],
     "category": "DeveloperTool",
-    "shortDescription": "Accurate, local-first AI agent usage monitoring"
+    "shortDescription": "Accurate, local-first AI agent usage monitoring",
+    "publisher": "keros68",
+    "copyright": "Copyright © 2026 keros68"
   }
 }
