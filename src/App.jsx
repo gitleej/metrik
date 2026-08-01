@@ -2188,9 +2188,7 @@ function AboutCard() {
   return (
     <div className="settings-card settings-about">
       <h2>关于</h2>
-      <p className="settings-muted">
-        Metrik {__APP_VERSION__} · 本地优先的 AI Agent 用量监控 · AGPL-3.0-or-later
-      </p>
+      <p className="settings-muted">Metrik {__APP_VERSION__}</p>
       <p className="settings-muted">
         作者：keros68（
         <a href={`mailto:${AUTHOR_EMAIL}`} onClick={(event) => openExternal(event, `mailto:${AUTHOR_EMAIL}`)}>
@@ -2204,6 +2202,7 @@ function AboutCard() {
           github.com/keros68/metrik
         </a>
       </p>
+      <p className="settings-muted">许可证：AGPL-3.0-or-later</p>
     </div>
   );
 }
