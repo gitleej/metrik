@@ -1108,9 +1108,15 @@ html:has(.strip-shell) #root {
 
   .widget-shell--mac:not(.widget-shell--glass-css).widget-shell--transparent .widget-agent-list {
     background: rgba(255, 255, 255, 0.34);
+    /* 滚动条拇指也是白的：面板高度封顶后 Agent 多了就要滚，白压白看不见。 */
+    scrollbar-color: rgba(127, 130, 136, 0.4) transparent;
     box-shadow:
       0 0 0 1px rgba(31, 33, 36, 0.08),
       inset 0 1px rgba(255, 255, 255, 0.52);
+  }
+
+  .widget-shell--mac:not(.widget-shell--glass-css).widget-shell--transparent .widget-agent-list::-webkit-scrollbar-thumb {
+    background: rgba(127, 130, 136, 0.4);
   }
 
   .widget-shell--mac:not(.widget-shell--glass-css).widget-shell--transparent .widget-metric,
@@ -1129,8 +1135,30 @@ html:has(.strip-shell) #root {
     box-shadow: 0 1px rgba(31, 33, 36, 0.07);
   }
 
-  .widget-shell--mac:not(.widget-shell--glass-css).widget-shell--transparent .widget-quota-window em {
+  .widget-shell--mac:not(.widget-shell--glass-css).widget-shell--transparent .widget-quota-window em,
+  .widget-shell--mac:not(.widget-shell--glass-css).widget-shell--transparent .widget-agent em {
     color: rgba(24, 26, 30, 0.92);
+  }
+
+  /* 告急色沿用浅色玻璃那两档：#e8b04a 压在白霜上只有约 1.9:1，读不出来。 */
+  .widget-shell--mac:not(.widget-shell--glass-css).widget-shell--transparent .widget-quota-window--warn em,
+  .widget-shell--mac:not(.widget-shell--glass-css).widget-shell--transparent .widget-agent--warn em {
+    color: #8f681f;
+  }
+
+  .widget-shell--mac:not(.widget-shell--glass-css).widget-shell--transparent .widget-quota-window--critical em,
+  .widget-shell--mac:not(.widget-shell--glass-css).widget-shell--transparent .widget-agent--critical em {
+    color: #a1402e;
+  }
+
+  .widget-shell--mac:not(.widget-shell--glass-css).widget-shell--transparent .widget-quota-window--warn .widget-quota-track i {
+    background: var(--warn);
+    filter: none;
+  }
+
+  .widget-shell--mac:not(.widget-shell--glass-css).widget-shell--transparent .widget-quota-window--critical .widget-quota-track i {
+    background: var(--critical);
+    filter: none;
   }
 
   .widget-shell--mac:not(.widget-shell--glass-css).widget-shell--transparent .widget-metric > span,
@@ -1165,6 +1193,17 @@ html:has(.strip-shell) #root {
   .widget-shell--mac:not(.widget-shell--glass-css).widget-shell--transparent .widget-refresh:disabled:hover {
     color: rgba(31, 33, 36, 0.58);
     background: transparent;
+  }
+
+  /* 白底上的白字底片：按钮沿用面板浅色外观的半透白芯片，墨色翻成深色。 */
+  .widget-shell--mac:not(.widget-shell--glass-css).widget-shell--transparent .widget-expand {
+    color: rgba(24, 26, 30, 0.94);
+    background: rgba(255, 255, 255, 0.62);
+    box-shadow: inset 0 0 0 1px rgba(31, 33, 36, 0.1);
+  }
+
+  .widget-shell--mac:not(.widget-shell--glass-css).widget-shell--transparent .widget-expand:hover {
+    background: rgba(255, 255, 255, 0.82);
   }
 
   .strip-shell--mac:not(.strip-shell--glass-css) {
