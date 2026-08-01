@@ -10,7 +10,7 @@ Metrik 是一款桌面常驻工具，统一查看本机各个 AI 编程 Agent �
 [下载最新版](https://github.com/keros68/metrik/releases/latest)：Windows `.exe`、macOS 通用 `.dmg`。安装包未签名，首次运行需手动放行系统安全校验；Release 页附 SHA256 校验值。
 
 <p align="center">
-  <img src="design/shot-glass.png" alt="Metrik 桌面小组件与配额胶囊条 · 透明档">
+  <img src="design/shot-glass.jpg" alt="Metrik 桌面小组件与配额胶囊条 · 透明档">
 </p>
 
 <p align="center"><sub>Windows 实机截图，玻璃外观取透明档。</sub></p>
