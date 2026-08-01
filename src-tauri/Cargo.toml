@@ -1,6 +1,6 @@
 [package]
 name = "metrik"
-version = "0.13.3"
+version = "0.13.4"
 description = "Local-first AI agent usage monitor"
 authors = ["keros68 <keros68@gmail.com>"]
 edition = "2021"
@@ -52,6 +52,7 @@ tauri-nspanel = { git = "https://github.com/ahkohd/tauri-nspanel", branch = "v2"
 # HostBackdrop 留下的，随它一起删了。
 windows = { version = "0.61.3", features = [
   "Win32_Foundation",
+  "Win32_Graphics_Dwm",
   "Win32_System_Com",
   "Win32_UI_Shell",
   "Win32_UI_WindowsAndMessaging",

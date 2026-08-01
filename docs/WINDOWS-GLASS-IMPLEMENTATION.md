@@ -317,9 +317,8 @@ shellGlassAlpha = 0.55 + clamp(t, 0, 1) * (0.96 - 0.55)
 测量并发时可能短暂沿用旧区域，实际表现就是标题栏残片、左右白条或底部被错误
 切圆；它不适合作为当前窗口结构的稳定边界。
 
-**圆角由 `#root` 画，两端同一条规则，写成物理像素。** 无边框弹出窗口拿不到 DWM
-的系统圆角，所以外轮廓实际上一直是 CSS 在画——文档此前写"桌面端由 DWM 拥有
-外框、`#root` 保持零圆角"是错的：那条 `border-radius: 0` 的选择器
+**圆角由 `#root` 画，两端同一条规则，写成物理像素。** 文档此前写"桌面端由 DWM
+拥有外框、`#root` 保持零圆角"是错的：那条 `border-radius: 0` 的选择器
 （`html:has(…--glass-clear) #root`，特指度 1,1,1）一直被更靠前也更具体的
 `html:has(…--transparent:not(--mac):not(--glass-css)) #root`（1,3,1）压着，
 从未生效。
@@ -346,6 +345,35 @@ box-shadow: inset 0 0 0 1px rgba(...);
 
 原因是 strip 尺寸由渲染内容测量。普通边框会改变 `clientWidth/clientHeight`，
 可能让 ResizeObserver、原生 resize 与 WebView zoom 反复追逐 1–2 像素。
+
+### 7.1 让 CSS 真正成为唯一轮廓
+
+光靠"只有 CSS 画圆角"不够。窗口自身还有两处会画外轮廓，都要显式关掉，否则四角
+外面会浮出第二层底——暗色档尤其明显。
+
+**一、`"shadow": false`。** `decorations: false` + `shadow: true` 时，tao 走
+`undecorated_with_shadows` 路径：`WM_NCCALCSIZE` 主动把客户区往里缩，空出一圈非
+客户区给 DWM 画阴影。这圈区域不归我们画，DWM 会往里填框架色。实测 125% 缩放下：
+
+| | window | client | 缩进 |
+|---|---|---|---|
+| `shadow: true` | 98×784 | 84×776 | 14 横 / 8 竖 |
+| `shadow: false` | 380×504 | 380×504 | 0 |
+
+代价是没有落影。想补的话只能自己画：给窗口留一圈透明外边距再上 CSS `box-shadow`，
+而窗口尺寸是内容测量驱动的，改这里要连带复核 strip 的尺寸收敛（见第 9 节）。
+
+**二、`DWMWCP_DONOTROUND`。** tao 的 `to_window_styles()` 无条件加 `WS_CAPTION`
+（`decorations: false` 只在 `to_adjusted_window_styles()` 里剥，那个只用于算尺寸），
+所以无边框窗口照样被 Win11 DWM 圆角并描边，而 tao / wry / tauri 三层都没设过这个
+属性。DWM 的半径跟系统 DPI 走，`--glass-radius` 按物理像素钉死，不存在能重合的缩放
+档。`lib.rs` 的 `disable_system_corner_rounding` 在 setup 里关掉它。
+
+**不要改用 `SetWindowRgn`。** GDI region 是二值边界，压在 per-pixel alpha 上是硬
+锯齿；而且它在变形与内容测量并发时会短暂沿用旧区域（本节开头那段）。pogget 那套
+"DONOTROUND + region + 同半径 Border 描边盖锯齿"能成立，前提是它
+`AllowsTransparency = false`——不透明窗口没有 alpha 要抗锯齿。我们有 alpha，用不着
+它，也承受不起它的代价。
 
 ## 8. 指针边缘流光
 
@@ -559,10 +587,15 @@ cargo test
 
 ### 14.3 四角或边缘漏出方形色块
 
-检查 clear shell 是否仍为无边框、无圆角，以及桌面端 `#root` 是否保持零圆角、
-零静态描边。Windows 端不得重新引入 `SetWindowRgn`；浏览器模拟圆角必须继续限制在
-`html[data-runtime="browser"]`。动态流光可以画在 `#root`，静态边线不能重新加回
-桌面 shell。
+先量窗口，再查 CSS。这个现象绝大多数时候不是 CSS 画错，而是窗口自己多画了一层
+（第 7.1 节）：
+
+- `GetWindowRect` 与 `GetClientRect` 不相等 → `"shadow"` 被改回了 `true`；
+- 两者相等但角上仍有一圈弧或描边 → `disable_system_corner_rounding` 没跑到。
+
+排除这两条之后再看 CSS：静态描边不得加回桌面 shell，浏览器模拟圆角必须继续限制在
+`html[data-runtime="browser"]`；动态流光可以画在 `#root`。Windows 端不得引入
+`SetWindowRgn`。
 
 ## 15. 修改守则
 

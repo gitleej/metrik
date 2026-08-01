@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "Metrik",
-  "version": "0.13.3",
+  "version": "0.13.4",
   "identifier": "app.metrik.desktop",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -22,7 +22,7 @@
         "maximizable": false,
         "decorations": false,
         "transparent": true,
-        "shadow": true,
+        "shadow": false,
         "alwaysOnTop": false,
         "skipTaskbar": true,
         "preventOverflow": true,
