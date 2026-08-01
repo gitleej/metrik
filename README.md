@@ -98,3 +98,7 @@ cargo test live_snapshot_smoke_test -- --ignored --nocapture  # 读本机真实�
 ## 开源协议
 
 [AGPL-3.0-or-later](LICENSE)，Copyright © 2026 keros68。分发修改版，或基于修改版对外提供网络服务时，需按 AGPL-3.0 开放对应源码。v0.10.0 及更早版本适用 MIT。
+
+## 致谢
+
+感谢 [LINUX DO 社区](https://linux.do/) 提供的交流氛围与开源推广支持。
