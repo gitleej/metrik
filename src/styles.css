@@ -785,7 +785,7 @@ button:focus-visible {
 }
 .widget-shell--transparent .widget-quota-window small { color: rgba(255, 255, 255, 0.55); }
 .widget-shell--transparent .widget-quota-window em { color: rgba(255, 255, 255, 0.94); }
-.widget-shell--transparent .widget-shell--transparent .widget-quota-window--warn .widget-quota-track i { background: #e8b04a; filter: none; }
+.widget-shell--transparent .widget-quota-window--warn .widget-quota-track i { background: #e8b04a; filter: none; }
 .widget-shell--transparent .widget-quota-window--warn em { color: #e8b04a; }
 .widget-shell--transparent .widget-quota-window--critical .widget-quota-track i { background: #ec7a63; filter: none; }
 .widget-shell--transparent .widget-quota-window--critical em { color: #ec7a63; }
