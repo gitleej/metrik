@@ -918,6 +918,10 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init());
 
+    // 设置页“关于”里的仓库/邮箱链接用系统浏览器、邮件客户端打开。
+    #[cfg(desktop)]
+    let builder = builder.plugin(tauri_plugin_opener::init());
+
     builder
         .setup(|app| {
             // macOS 是一个菜单栏应用：面板 + 独立完整视图窗口 + template 图标，

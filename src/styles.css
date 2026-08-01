@@ -3135,6 +3135,8 @@ html:has(.strip-shell--glass-ink-light) #root {
 
 .settings-error-text { color: #a1573d; }
 .settings-muted { margin: 0; color: #83858a; font-size: 13px; line-height: 1.6; }
+.settings-about a { color: inherit; text-decoration: underline; text-underline-offset: 2px; }
+.settings-about a:hover { color: #5a5c61; }
 
 .settings-device-list {
   display: grid;
@@ -4205,6 +4207,7 @@ html:has(.strip-shell--glass-ink-light) #root {
 :root[data-theme="dark"] .settings-status dt { color: var(--d-faint); }
 :root[data-theme="dark"] .settings-error-text { color: #e6906f; }
 :root[data-theme="dark"] .settings-muted { color: var(--d-faint); }
+:root[data-theme="dark"] .settings-about a:hover { color: var(--d-muted); }
 :root[data-theme="dark"] .settings-guide { color: var(--d-muted); }
 :root[data-theme="dark"] .settings-guide summary { color: #7fabef; }
 :root[data-theme="dark"] .settings-device-list li {

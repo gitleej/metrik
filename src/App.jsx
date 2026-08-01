@@ -2171,6 +2171,41 @@ function UpdateBlock({ autoCheck, onAutoCheckChange, availableUpdate }) {
   );
 }
 
+const REPO_URL = "https://github.com/keros68/metrik";
+const AUTHOR_EMAIL = "keros68@gmail.com";
+
+// 桌面端交给系统浏览器/邮件客户端（opener 插件，capability 限定了这两个地址）；
+// 浏览器演示模式退化为普通链接。
+function AboutCard() {
+  const openExternal = async (event, url) => {
+    if (!isDesktop()) return;
+    event.preventDefault();
+    const { openUrl } = await import("@tauri-apps/plugin-opener");
+    await openUrl(url).catch((error) => console.warn("open external link failed:", error));
+  };
+  return (
+    <div className="settings-card settings-about">
+      <h2>关于</h2>
+      <p className="settings-muted">
+        Metrik {__APP_VERSION__} · 本地优先的 AI Agent 用量监控 · AGPL-3.0-or-later
+      </p>
+      <p className="settings-muted">
+        作者：keros68（
+        <a href={`mailto:${AUTHOR_EMAIL}`} onClick={(event) => openExternal(event, `mailto:${AUTHOR_EMAIL}`)}>
+          {AUTHOR_EMAIL}
+        </a>
+        ）
+      </p>
+      <p className="settings-muted">
+        项目仓库：
+        <a href={REPO_URL} onClick={(event) => openExternal(event, REPO_URL)}>
+          github.com/keros68/metrik
+        </a>
+      </p>
+    </div>
+  );
+}
+
 const THEME_OPTIONS = [
   { id: "auto", label: "自动" },
   { id: "light", label: "亮色" },
@@ -2796,6 +2831,7 @@ function SettingsSection({ onSnapshotRefresh, widgetAgents, onToggleWidgetAgent,
               onAutoUpdateCheck={onAutoUpdateCheck}
               availableUpdate={availableUpdate}
             />
+            <AboutCard />
           </>
         )}
       </div>
