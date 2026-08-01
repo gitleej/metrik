@@ -198,6 +198,9 @@ const STRIP_BAR_HEIGHT = 40;
 // 再宽图标和百分比周围就空得发肥。
 const STRIP_VERTICAL_WIDTH = 42;
 const STRIP_VCELL_HEIGHT = 54;
+// 横条宽度的收缩迟滞。一格 58px，所以 6px 远低于「真的少了一个 Agent」，
+// 又高于 DPI/zoom 取整带来的亚像素噪声。
+const STRIP_WIDTH_SHRINK_SLACK = 6;
 const STRIP_VCHROME_HEIGHT = IS_MAC ? 84 : 160;
 
 function stripWindowSize(orientation, count) {
@@ -1146,7 +1149,12 @@ function StripBar({
         const targetHeight = measureStripVerticalContent(shell);
         if (!targetHeight) return;
         // 交叉轴是设计常量：竖条恒为 52 宽（方向切换后窗口可能还停在横条宽度）。
-        if (Math.abs(targetHeight - shell.clientHeight) < 1 && shell.clientWidth === STRIP_VERTICAL_WIDTH) return;
+        if (
+          Math.abs(targetHeight - shell.clientHeight) < 1
+          && Math.abs(shell.clientWidth - STRIP_VERTICAL_WIDTH) <= 1
+        ) {
+          return;
+        }
         runLatestWindowCorrection(() =>
           resizeStripWindow({ width: STRIP_VERTICAL_WIDTH, height: Math.ceil(targetHeight) }),
         );
@@ -1155,7 +1163,17 @@ function StripBar({
       const targetWidth = measureStripHorizontalTarget(shell);
       if (!targetWidth) return;
       // 交叉轴是设计常量：横条恒为 40 高。
-      if (Math.abs(targetWidth - shell.clientWidth) < 1 && shell.clientHeight === STRIP_BAR_HEIGHT) return;
+      // 宽度方向做不对称迟滞：变宽立即跟进（否则格子被压到内容以下，图标和
+      // 百分比会叠在一起），变窄要超过一格的余量才动。测量噪声只会让目标略微
+      // 变小，对称的 1px 阈值会让它和调窗形成震荡（双屏用户实拍到持续闪烁）。
+      const widthDelta = targetWidth - shell.clientWidth;
+      if (
+        widthDelta < 1
+        && widthDelta > -STRIP_WIDTH_SHRINK_SLACK
+        && shell.clientHeight === STRIP_BAR_HEIGHT
+      ) {
+        return;
+      }
       runLatestWindowCorrection(() =>
         resizeStripWindow({ width: Math.ceil(targetWidth), height: STRIP_BAR_HEIGHT }),
       );
