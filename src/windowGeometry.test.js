@@ -135,3 +135,57 @@ test("runtime viewport can cancel a hidden WebView zoom layer", () => {
     0.8,
   );
 });
+
+test("短轴上的 1px 取整残差不该改变 zoom 修正", () => {
+  // 横条 400x40：视口高多出 1 物理像素。取两轴平均会得到 1.0125，
+  // 也就是凭空把内容放大 1.25%；放大后布局重排、测出的目标宽度变化，
+  // 就与调窗形成震荡（双屏用户实拍到持续闪烁）。只取长轴则不受影响。
+  assert.equal(
+    viewportCorrectedZoom({
+      contentScale: 1,
+      viewportWidth: 400,
+      viewportHeight: 41,
+      expectedWidth: 400,
+      expectedHeight: 40,
+    }),
+    1,
+  );
+});
+
+test("竖条取高度轴，横条取宽度轴", () => {
+  // 竖条 42x211：长轴是高度，视口高少 10% 时 zoom 应跟着降 10%。
+  assert.equal(
+    viewportCorrectedZoom({
+      contentScale: 1,
+      viewportWidth: 42,
+      viewportHeight: 190,
+      expectedWidth: 42,
+      expectedHeight: 200,
+    }),
+    0.95,
+  );
+  // 横条 400x40：长轴是宽度。
+  assert.equal(
+    viewportCorrectedZoom({
+      contentScale: 1,
+      viewportWidth: 380,
+      viewportHeight: 40,
+      expectedWidth: 400,
+      expectedHeight: 40,
+    }),
+    0.95,
+  );
+});
+
+test("两轴分歧过大时仍然拒绝修正，交给物理尺寸兜底", () => {
+  assert.equal(
+    viewportCorrectedZoom({
+      contentScale: 1,
+      viewportWidth: 400,
+      viewportHeight: 48,
+      expectedWidth: 400,
+      expectedHeight: 40,
+    }),
+    null,
+  );
+});

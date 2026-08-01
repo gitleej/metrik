@@ -97,7 +97,13 @@ function viewportCorrectedZoom({
   ) {
     return null;
   }
-  return contentScale * ((widthRatio + heightRatio) / 2);
+  // 只取长轴的比例，短轴仅用于上面的一致性校验。取平均会把短轴的取整残差
+  // 放大成很大的 zoom 变更：横向胶囊条高 40px，视口差 1 物理像素就是 2.5%，
+  // 平均之后 zoom 被改 1.25%；zoom 一变布局重排，测出来的目标宽度跟着变，
+  // 于是「调窗 → 重排 → 再调窗」闭环，表现为胶囊条持续闪烁。长轴上同样的
+  // 1px 只有 0.25%，落在噪声里。竖条不闪是因为它的宽度是常量，环路断开。
+  const ratio = expectedWidth >= expectedHeight ? widthRatio : heightRatio;
+  return contentScale * ratio;
 }
 
 function horizontalStripTargetWidth({
