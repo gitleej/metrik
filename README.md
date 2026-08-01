@@ -1,30 +1,29 @@
 # Metrik
 
-本地优先的 AI Agent 用量统计桌面应用。读取本机 Agent 留下的日志，把**官方配额**、**本地解析的 Token**、**估算成本**三类事实分开呈现——估算是估算，不冒充账单。
-
-Windows 上是 320 × 320 的桌面小组件，可再折叠成一根横向或竖立的**配额胶囊条**；macOS 上是菜单栏面板。两者都能一键展开为完整统计视图。
+Metrik 是一款桌面常驻工具，统一查看本机各个 AI 编程 Agent 的官方配额余量与 Token 消耗，支持 ChatGPT、Claude、GLM、Kimi 等主流 Agent。
 
 [![Download](https://img.shields.io/github/v/release/keros68/metrik?label=下载&color=success)](https://github.com/keros68/metrik/releases/latest)
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](LICENSE)
 [![Tauri](https://img.shields.io/badge/Tauri-2-24C8DB.svg)](https://tauri.app/)
-[![Platform](https://img.shields.io/badge/Windows%20%7C%20macOS-0078D6.svg)](#验收边界)
+[![Platform](https://img.shields.io/badge/Windows%20%7C%20macOS-0078D6.svg)](#已知限制)
 
-[下载最新版](https://github.com/keros68/metrik/releases/latest)：Windows `.exe` / macOS `.dmg`（通用包）。均未签名，首次运行需手动放行。
+[下载最新版](https://github.com/keros68/metrik/releases/latest)：Windows `.exe`、macOS 通用 `.dmg`。安装包未签名，首次运行需手动放行系统安全校验；Release 页附 SHA256 校验值。
 
 <p align="center">
-  <img src="design/shot-widget.png" width="320" alt="Metrik 桌面小组件">
+  <img src="design/shot-widget-glass.png" width="330" alt="Metrik 桌面小组件 · 透明档">
 </p>
 
 <p align="center">
-  <img src="design/shot-strip-vertical.png" height="240" alt="配额胶囊条 · 竖条">
-  &nbsp;&nbsp;&nbsp;
-  <img src="design/shot-strip-horizontal.png" width="440" alt="配额胶囊条 · 横条">
+  <img src="design/shot-strip-horizontal-glass.png" width="420" alt="配额胶囊条 · 横条">
+  &nbsp;&nbsp;&nbsp;&nbsp;
+  <img src="design/shot-strip-vertical-glass.png" height="230" alt="配额胶囊条 · 竖条">
 </p>
-<p align="center"><sub>小组件可折叠成配额胶囊条（Windows）：横条或竖立长条，只占一线屏幕。</sub></p>
+
+<p align="center"><sub>Windows 实机截图，玻璃外观取透明档。</sub></p>
 
 ![完整视图 · 概览](design/shot-overview.png)
 
-> 截图为浏览器演示数据，不是真实用量。
+> 完整视图截图使用浏览器演示数据，非真实用量。
 
 <details>
 <summary>更多截图（报告 / 用量 / 设置）</summary>
@@ -35,81 +34,72 @@ Windows 上是 320 × 320 的桌面小组件，可再折叠成一根横向或竖
 
 </details>
 
+## 平台支持
+
+- Windows：320 × 320 桌面小组件，可收缩为横向或纵向配额胶囊条；支持深色 / 浅色 / 透明三档玻璃材质、0.75–2.0 缩放、边缘自动隐藏与置顶常驻。
+- macOS：菜单栏面板，点击展开完整统计页面。
+
 ## 支持的 Agent
 
-| Agent | Token 来源 | 官方配额 |
+| Agent | Token 数据来源 | 官方配额 |
 | --- | --- | --- |
-| ChatGPT / Codex | `~/.codex/sessions` 的会话日志 | ✅ 本机 `codex app-server` |
-| Claude | `~/.claude/projects` 的会话日志 | ✅ statusLine 钩子或 OAuth 直连（见下） |
-| ZCode / 智谱 GLM | `~/.zcode/cli/db/db.sqlite` 的 `model_usage` 表 | — |
-| OpenCode | `~/.local/share/opencode/storage` | — |
-| Kimi | `~/.kimi-code` 与 `~/.kimi` 的 `wire.jsonl` | — |
-| Antigravity | 本机 language server 实时 RPC（IDE 需运行） | ✅ RPC 官方配额 |
+| ChatGPT / Codex | `~/.codex/sessions` | ✅ 每周 |
+| Claude | `~/.claude/projects` | ✅ 5 小时、每周（状态栏钩子 / OAuth） |
+| GLM / ZCode | `~/.zcode/cli/db/db.sqlite` | ✅ 5 小时、每周 |
+| Kimi | `~/.kimi-code`、`~/.kimi` | ✅ 5 小时、每周、月度 |
+| OpenCode | `~/.local/share/opencode/storage` | ❌ |
+| Antigravity | IDE 语言服务 RPC | ✅ |
+| WorkBuddy / CodeBuddy、Qoder | — | ✅ 官方 Credits |
 
-Gemini CLI 明确不在支持范围。Cursor 依赖云端 API 和本地凭据提取，要先设计出显式的凭据授权机制才会考虑。
+暂不支持 Gemini CLI；Cursor 待设计独立的凭据授权机制后再评估。
 
-## 功能
+## 核心功能
 
-- **配额卡片**：每个窗口三行——窗口名、进度条、已用百分比与重置倒计时，另附消耗节奏预测。数据陈旧或窗口已重置时会标注出来。
-- **配额胶囊条**（Windows）：小组件一键折叠成横向或竖立的小条，每个 Agent 一格（图标 + 剩余百分比 + 品牌色进度条）；显示哪些 Agent 及顺序可在设置里自选，材质跟随小组件。
-- **玻璃外观**（Windows）：小组件和胶囊条有深色、浅色、透明三档，浓度可调。透明档用的是窗口本身的逐像素 Alpha，透出来的是实时桌面、图标和后面的窗口，文字颜色可选深色或白色。
-- **报告**：26 周热力图 / 周趋势折线 / Agent 构成环形。
-- **用量**：按天分组的会话明细，支持筛选、CSV 导出、复制会话 ID（方便 resume）。
-- **成本估算**：静态价目表按 Token 分量计价，没有价目的模型归入"未计价"。
-- **多设备同步**：指向一个共享文件夹（坚果云 / OneDrive / Syncthing 均可），各设备导出近 30 天的统计事件并自动合并。
-- **更新检查**：设置页手动触发，不后台轮询——这是本应用唯一会主动发出的网络请求。更新包经 minisign 校验，签名不符拒绝安装。
-- 托盘常驻、可选开机启动、单实例运行。
+1. **配额卡片**：各 Agent 剩余额度、进度、重置倒计时与消耗节奏预估。主数值取余量最低的窗口，日常是 5 小时，更长周期的窗口告急时改取该窗口。
+2. **配额胶囊条（Windows）**：收缩成一根横条或竖条，每格只有图标、品牌色进度条与剩余占比；展示哪些 Agent、按什么排序可配置，卡片与胶囊条各自独立。
+3. **统计与报表**：26 周热力图、周趋势折线、Agent 占比环形图；会话明细支持筛选、CSV 导出与复制会话 ID。完整面板分概览、用量、报告、设置四页，主题可跟随系统或手动指定。
+4. **多设备同步**：指定共享文件夹（坚果云 / OneDrive / Syncthing 均可），各设备导出近 30 天统计事件并自动合并，无云端服务。
+5. **系统能力**：托盘常驻、可选开机自启、单实例运行。更新检查由设置页手动触发，是本应用唯一主动发起的网络请求；更新包经 minisign 校验，签名不符拒绝安装。
 
 ## 数据口径
 
-首页的数字是**处理量**：`未缓存输入 + 缓存读取 + 缓存写入 + 输出`。推理 token 是输出的子项，不重复叠加。**它不是账单金额。**
+1. 官方配额：Agent 官方接口给出的窗口剩余占比与重置时间。
+2. 本地 Token：解析本机日志逐事件去重后的处理量，含未缓存输入、缓存读写与输出；推理 token 属输出子项，不重复计入。解析不全时标注「数据不完整」。
+3. 估算成本：按公开 API 价目折算的参考值，不等同官方账单。无价目的模型标记「未计价」，取不到的数值显示 `--`。
 
-三类事实始终分开：**官方配额**（Agent 官方推送的窗口百分比与重置时间）、**本地 Token**（从本机日志逐事件解析、去重后的处理量）、**估算成本**（按公开 API 价目折算，不是你的账单）。
+## 隐私
 
-解析遇到坏行或读取异常时，对应来源标为"部分覆盖"。
+数据库只存时间、Agent、模型、会话标识与源文件路径，不写入提示词、回复正文、工具输出与凭据。
 
-## 设计原则
+同步仅依赖你指定的共享目录，项目不提供云端服务。查询配额时只读取各 Agent 已存于本机且为明文的凭据（环境变量、OpenCode `auth.json`、zcode `v2/config.json` 等），设备绑定加密的凭据不解密，也不为此开启本地端口。
 
-- **缺失如实标注。** 读不到的数据显示为"不可用"、"未计价"或 `--`。
-- **只存元数据。** 数据库保存时间、Agent、模型、会话标识和源文件位置，Prompt、回复正文、工具输出、凭据、原始文件都不入库。
-- **同步走你自己的网盘。** 多设备同步通过你指定的共享文件夹完成，Metrik 不提供云端服务。
-- **额度默认零凭据。** Claude 配额通过 statusLine 获取；OAuth 直连为可选功能，默认关闭。
+## Claude 配额的两种读取方式
 
-## Claude 额度的两种来源
-
-**statusLine 钩子**（默认）：Claude Code 本身会把官方额度推给状态栏脚本，钩子只提取额度数字写成本地文件，零网络请求、零凭据。已有自定义 statusLine 时会自动串联，卸载时原样恢复。局限是只有在终端里渲染出状态栏的交互式会话才会刷新，主要在 IDE 或网页里用 Claude 的话额度会停更。
-
-**OAuth 直连**（可选，默认关闭）：读取 Claude Code 已保存的登录凭据，直接查询官方额度接口，覆盖网页版消耗。
-
-> ⚠️ **条款风险**：Anthropic 2026 年 2 月更新的消费者条款禁止在第三方工具中使用 Claude 订阅的 OAuth 凭据。目前公开的封禁集中在借订阅做推理的工具，未见只读用量查询被封号的案例，但按条款字面本功能同样属于违规范围。**不愿承担风险请保持关闭。**
+1. **状态栏钩子（默认）**：Claude Code 把配额推送至状态栏脚本，Metrik 从本地文件提取数值，不发网络请求、不使用凭据。已有自定义脚本会自动串联，卸载时恢复原状。限制是仅交互式终端会话会刷新，主要在 IDE 或网页端用 Claude 时配额不更新。
+2. **OAuth 直连（可选，默认关闭）**：读取 Claude Code 已保存的登录凭据直查官方接口，可覆盖网页端消耗。风险：Anthropic 2026 年 2 月的消费者条款禁止第三方工具使用订阅 OAuth 凭据，目前封禁案例集中于借订阅做推理的工具，未见只读用量查询被封，但按条款字面本功能同属违规范围，是否开启需自行判断。
 
 ## 开发
 
-要求 Node.js 22+、Rust 1.88+。
+依赖 Node.js 22+、Rust 1.88+。
 
 ```bash
 npm install
-npm run desktop:dev    # 桌面开发模式（读取真实本机日志）
-npm run dev            # 仅浏览器预览（演示数据，显式标注）
+npm run desktop:dev    # 桌面开发模式，读取本机真实日志
+npm run dev            # 浏览器预览，仅演示数据
 npm run desktop:build  # 构建安装包
 
-npm run build                                                 # 验证
+npm run build
 cd src-tauri && cargo test && cargo clippy -- -D warnings && cargo fmt --check
-cargo test live_snapshot_smoke_test -- --ignored --nocapture  # 读真实本机日志的烟测
+cargo test live_snapshot_smoke_test -- --ignored --nocapture  # 读本机真实日志的烟测
 ```
 
 ## 已知限制
 
-- 安装包未做代码签名，首次运行需要在系统提示里手动放行。Release 页附 SHA256 可校验文件完整性。
-- Windows 上没装 WebView2 的话，安装器需要联网获取运行时。
-- 只提供 Windows 和 macOS 安装包，Linux 需自行构建。
-- Antigravity 需要 IDE 正在运行才有数据。
-- 首次索引大日志会占一段 CPU 和磁盘。期间界面照常可用、进度可见，未覆盖完整历史的数字会标注出来。
+1. 安装包未做数字签名，首次运行需手动放行；Windows 未预装 WebView2 时安装程序需联网获取运行时。
+2. 仅提供 Windows 与 macOS 预编译包，Linux 需自行构建。
+3. Antigravity 需对应 IDE 处于运行状态才有数据。
+4. 首次索引大体量日志会占用一段 CPU 与磁盘，界面可正常操作，未覆盖完整历史的数值会标注说明。
 
-## License
+## 开源协议
 
-[AGPL-3.0-or-later](LICENSE)，Copyright © 2026 keros68。
-
-本项目允许自由使用、修改和 fork。分发修改版，或基于修改版对外提供网络服务时，需按 AGPL-3.0 开放对应源码。
-
-v0.10.0 及更早的版本按 MIT 发布，那些版本仍然适用 MIT。
+[AGPL-3.0-or-later](LICENSE)，Copyright © 2026 keros68。分发修改版，或基于修改版对外提供网络服务时，需按 AGPL-3.0 开放对应源码。v0.10.0 及更早版本适用 MIT。
