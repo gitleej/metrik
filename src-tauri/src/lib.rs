@@ -691,6 +691,39 @@ mod taskbar {
     }
 }
 
+/// Win11 默认给顶层窗口画系统圆角，并沿那条弧描一道边。tao 的 `to_window_styles()`
+/// 无条件加 `WS_CAPTION`（decorations: false 只在 `to_adjusted_window_styles()` 里剥，
+/// 那个只用于算尺寸），所以无边框窗口照样被 DWM 圆角，而 tao/wry/tauri 三层都没有
+/// 设置过这个属性。
+///
+/// DWM 的半径跟系统 DPI 走，`#root` 那条 `--glass-radius` 按物理像素钉死，两者不存在
+/// 能重合的缩放档；再叠上客户区相对窗口的缩进，画面上就是两个同心圆角矩形——四角外
+/// 面多一圈底，暗色档尤其明显。关掉 DWM 这条，`--glass-radius` 才是唯一轮廓。
+///
+/// 只关圆角，不用 `SetWindowRgn`：GDI region 是二值边界，压在 per-pixel alpha 上是硬
+/// 锯齿；而且它在变形与内容测量并发时会短暂沿用旧区域（见 WINDOWS-GLASS-IMPLEMENTATION
+/// 第 7 节）。pogget 用 region 是因为它是不透明窗口，没有 alpha 可用。
+#[cfg(windows)]
+fn disable_system_corner_rounding(hwnd: isize) {
+    use core::ffi::c_void;
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::Graphics::Dwm::{
+        DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND,
+    };
+
+    let handle = HWND(hwnd as *mut c_void);
+    let preference = DWMWCP_DONOTROUND;
+    unsafe {
+        // 失败静默：圆角是装饰，不值得让启动失败。
+        let _ = DwmSetWindowAttribute(
+            handle,
+            DWMWA_WINDOW_CORNER_PREFERENCE,
+            &preference as *const _ as *const c_void,
+            std::mem::size_of_val(&preference) as u32,
+        );
+    }
+}
+
 /// 完整视图要出现在任务栏，小组件不要。调用方负责在隐藏状态下调用并随后重新显示。
 #[tauri::command]
 async fn set_taskbar_button(window: tauri::WebviewWindow, visible: bool) -> Result<(), String> {
@@ -931,6 +964,13 @@ pub fn run() {
 
             #[cfg(all(desktop, not(target_os = "macos")))]
             setup_tray(app)?;
+
+            #[cfg(windows)]
+            if let Some(window) = app.get_webview_window("main") {
+                if let Ok(hwnd) = window.hwnd() {
+                    disable_system_corner_rounding(hwnd.0 as isize);
+                }
+            }
 
             let database_path = match (
                 app.path().app_data_dir(),
