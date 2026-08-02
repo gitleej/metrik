@@ -74,6 +74,12 @@ pub struct UsageEvent {
     pub tokens: TokenVector,
     pub quality: &'static str,
     pub payload_hash: String,
+    /// 事件所属项目的工作目录（各 Agent 的 cwd / session directory）。
+    /// 拿不到就是 None——不从会话名或日志路径反推。
+    /// 刻意不参与 `payload_hash`：它是事件的附带归属，不是计量事实。若参与，
+    /// 现有账本在解析器升级后重扫时会对同一 event_id 算出不同的 hash，而
+    /// 非合并型 adapter（Codex/Kimi 等）遇到 hash 不一致就报身份冲突。
+    pub project_path: Option<String>,
 }
 
 impl UsageEvent {
@@ -107,8 +113,35 @@ impl UsageEvent {
             tokens,
             quality,
             payload_hash,
+            project_path: None,
         }
     }
+
+    /// 附加项目归属；`None` 与空白路径都保持"未归属"。
+    pub fn with_project(mut self, project_path: Option<String>) -> Self {
+        self.project_path = project_path.and_then(|value| normalize_project_path(&value));
+        self
+    }
+}
+
+/// 项目路径的存储形态：反斜杠转正斜杠、去掉尾部分隔符、Windows 盘符统一大写。
+/// 盘符大小写是同一台机器上不同 Agent 之间唯一实测会分叉的地方（`D:\work` 与
+/// `d:/work`）；路径其余部分按各 Agent 报出的原样保留，不做大小写折叠。
+pub fn normalize_project_path(value: &str) -> Option<String> {
+    let mut path = value.trim().replace('\\', "/");
+    while path.len() > 1 && path.ends_with('/') && !path.ends_with(":/") {
+        path.pop();
+    }
+    if path.is_empty() {
+        return None;
+    }
+    let mut chars = path.chars();
+    if let (Some(drive), Some(':')) = (chars.next(), chars.next()) {
+        if drive.is_ascii_alphabetic() {
+            path = format!("{}{}", drive.to_ascii_uppercase(), &path[1..]);
+        }
+    }
+    Some(path)
 }
 
 #[derive(Clone, Debug)]
@@ -289,6 +322,21 @@ pub struct UsageReport {
     pub top_models: Vec<ModelSummary>,
     pub agents: Vec<AgentReportRow>,
     pub streak_days: i64,
+    /// 182 天窗口内按项目（分组规则归并后）的走势，token 降序取前若干个。
+    pub projects: Vec<ProjectReportRow>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectReportRow {
+    pub path: String,
+    pub label: String,
+    pub tokens: i64,
+    /// 26 个 7 天桶，最旧在前、以今日结尾，供 sparkline 使用。
+    pub weekly: Vec<i64>,
+    /// 近 7 天相对再前 7 天的变化率（百分比）；前一段为 0 时为 None。
+    pub recent_delta_percent: Option<f64>,
+    pub active_days: i64,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -338,6 +386,54 @@ pub struct SessionSummary {
     /// 按 `pricing` 模块可计价部分求和的估算成本；会话内模型全部未定价时为 None。
     pub usd: Option<f64>,
     pub event_count: i64,
+    /// 该会话内 token 最多的项目（按分组规则归并后的根路径）；
+    /// 事件都没有归属或全部被隐藏时为 None。
+    pub project: Option<String>,
+    /// 项目根的目录名，供列表直接显示。
+    pub project_label: Option<String>,
+}
+
+/// 只读项目明细：按分组规则归并后的项目聚合 `usage_event`，只查询本地账本
+/// 已有数据，绝不触发日志扫描。归属不到的事件不并进任何项目：读不到目录的
+/// 计入 `unattributed_tokens`，命中隐藏规则的计入 `hidden_tokens`，都如实
+/// 单列，不塞进"其他"。
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageProjects {
+    pub period: String,
+    pub projects: Vec<ProjectSummary>,
+    pub total_projects: i64,
+    pub truncated: bool,
+    pub unattributed_tokens: i64,
+    /// 本周期内有用量、但当前版本读不到项目归属的 Agent（如 Antigravity）。
+    pub unattributed_agents: Vec<String>,
+    /// 命中隐藏规则（用户或内置）的用量。
+    pub hidden_tokens: i64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectSummary {
+    /// 项目根目录（归一化后的完整路径；手动登记或 .git 归并的结果）。
+    pub path: String,
+    /// 目录名，用于列表主标题。
+    pub label: String,
+    pub tokens: i64,
+    pub input_uncached: i64,
+    pub cache_read: i64,
+    pub cache_write: i64,
+    pub output: i64,
+    /// 可计价部分的估算成本；项目内模型全部未定价时为 None。
+    pub usd: Option<f64>,
+    pub session_count: i64,
+    pub event_count: i64,
+    pub last_ms: i64,
+    /// 该项目下用过的 Agent，按 token 降序。
+    pub agents: Vec<String>,
+    /// 该项目下 token 最多的模型。
+    pub model: Option<String>,
+    /// 是否命中手动登记的项目根。
+    pub pinned: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]

@@ -16,6 +16,8 @@ pub use zcode::ZcodeAdapter;
 
 use crate::domain::{stable_hash, ParsedSource};
 use anyhow::Result;
+use rusqlite::Connection;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 use walkdir::WalkDir;
@@ -126,6 +128,24 @@ pub fn discover_jsonl(roots: &[PathBuf], adapter_id: &str, cutoff_ms: i64) -> Ve
     }
     found.sort_by(|left, right| left.path.cmp(&right.path));
     found
+}
+
+/// OpenCode 系（OpenCode 与其分支 zcode）的 `session` 表把会话工作目录记在
+/// `directory` 列，用量表只带 `session_id`，靠这张映射补项目归属。
+/// 表或列不存在（旧版本、纯文件存储）时返回空映射——项目归属缺失是可接受的
+/// 降级，不能让整个源的用量因此解析失败。
+pub fn opencode_session_directories(connection: &Connection) -> HashMap<String, String> {
+    let Ok(mut statement) = connection.prepare("SELECT id, directory FROM session") else {
+        return HashMap::new();
+    };
+    let Ok(rows) = statement.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+    }) else {
+        return HashMap::new();
+    };
+    rows.filter_map(Result::ok)
+        .filter_map(|(id, directory)| directory.map(|value| (id, value)))
+        .collect()
 }
 
 fn normalize_locator(path: &Path) -> String {

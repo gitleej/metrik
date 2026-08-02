@@ -6,12 +6,14 @@ use crate::app_server;
 use crate::claude_hook::ClaudeHook;
 use crate::claude_oauth::{self, ClaudeOauth};
 use crate::coding_quota;
+use crate::domain::ProjectReportRow;
 use crate::domain::{
     AgentCost, AgentQuotaView, AgentReportRow, AgentSummary, CostSummary, DayUsage, IndexingView,
-    ModelSummary, QuotaSample, QuotaView, SeriesPoint, SessionSummary, SourceView, SyncView,
-    UsageReport, UsageSessions, UsageSnapshot, AGENT_IDS,
+    ModelSummary, ProjectSummary, QuotaSample, QuotaView, SeriesPoint, SessionSummary, SourceView,
+    SyncView, UsageProjects, UsageReport, UsageSessions, UsageSnapshot, AGENT_IDS,
 };
 use crate::pricing;
+use crate::projects::{self, ProjectResolver, Resolution};
 use crate::storage;
 use crate::sync;
 use anyhow::{Context, Result};
@@ -102,6 +104,7 @@ struct StoredSessionEvent {
     cache_read: i64,
     cache_write: i64,
     output: i64,
+    project: Option<String>,
 }
 
 #[derive(Default)]
@@ -111,6 +114,49 @@ struct SessionAgg {
     totals: TokenComponents,
     event_count: i64,
     model_components: HashMap<String, TokenComponents>,
+    project_tokens: HashMap<String, i64>,
+}
+
+#[derive(Default)]
+struct ProjectAgg {
+    last_ms: i64,
+    totals: TokenComponents,
+    event_count: i64,
+    model_components: HashMap<String, TokenComponents>,
+    agent_tokens: HashMap<String, i64>,
+    sessions: HashSet<(String, String)>,
+    pinned: bool,
+}
+
+/// 项目根路径的展示名：最后一段目录名。
+fn project_label(path: &str) -> String {
+    path.rsplit('/')
+        .find(|part| !part.is_empty())
+        .unwrap_or(path)
+        .to_owned()
+}
+
+/// token 最多者优先、同量按名称定序，返回排好序的名字列表。
+fn ranked_keys(totals: &HashMap<String, i64>) -> Vec<String> {
+    let mut ranked: Vec<(&String, &i64)> = totals.iter().collect();
+    ranked.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
+    ranked.into_iter().map(|(name, _)| name.clone()).collect()
+}
+
+/// 按模型分量求可计价成本；全部模型都没有定价时返回 None。
+fn estimate_usd(model_components: &HashMap<String, TokenComponents>) -> Option<f64> {
+    let mut total = 0.0_f64;
+    let mut priced_any = false;
+    for (model, comps) in model_components {
+        if let Some(price) = pricing::price_for(model) {
+            priced_any = true;
+            total += comps.input_uncached as f64 * price.input / 1_000_000.0
+                + comps.cache_read as f64 * price.cache_read / 1_000_000.0
+                + comps.cache_write as f64 * price.cache_write / 1_000_000.0
+                + comps.output as f64 * price.output / 1_000_000.0;
+        }
+    }
+    priced_any.then_some(total)
 }
 
 pub fn build_snapshot(
@@ -252,6 +298,7 @@ fn report_at(connection: &Connection, local_now: chrono::DateTime<Local>) -> Res
     }
 
     let streak_days = compute_streak(&day_totals);
+    let projects = report_projects(connection, today, start_ms, end_ms)?;
 
     let days: Vec<DayUsage> = day_totals
         .into_iter()
@@ -299,7 +346,100 @@ fn report_at(connection: &Connection, local_now: chrono::DateTime<Local>) -> Res
         top_models,
         agents,
         streak_days,
+        projects,
     })
+}
+
+const REPORT_PROJECT_LIMIT: usize = 8;
+const REPORT_WEEK_BUCKETS: usize = (REPORT_WINDOW_DAYS / 7) as usize;
+
+/// 报告窗口内按项目的走势。只查本地 `usage_event`（远端同步事件不带项目），
+/// 分组规则与用量页同一套。
+fn report_projects(
+    connection: &Connection,
+    today: NaiveDate,
+    start_ms: i64,
+    end_ms: i64,
+) -> Result<Vec<ProjectReportRow>> {
+    let mut statement = connection.prepare(
+        "SELECT project_path, occurred_at_ms, processed_tokens
+         FROM usage_event
+         WHERE project_path IS NOT NULL
+           AND occurred_at_ms >= ?1 AND occurred_at_ms < ?2",
+    )?;
+    let rows = statement.query_map(params![start_ms, end_ms], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, i64>(2)?,
+        ))
+    })?;
+
+    let mut resolver = ProjectResolver::new(projects::load_rules(connection)?);
+    struct ProjectTrend {
+        tokens: i64,
+        weekly: Vec<i64>,
+        last_seven: i64,
+        previous_seven: i64,
+        active_days: HashSet<NaiveDate>,
+    }
+    let mut trends: HashMap<String, ProjectTrend> = HashMap::new();
+    for row in rows.filter_map(Result::ok) {
+        let (raw, occurred_at_ms, tokens) = row;
+        let Resolution::Project { path, .. } = resolver.resolve(raw.trim()) else {
+            continue;
+        };
+        let Some(local) = Local.timestamp_millis_opt(occurred_at_ms).single() else {
+            continue;
+        };
+        let date = local.date_naive();
+        let days_ago = (today - date).num_days();
+        if !(0..REPORT_WINDOW_DAYS).contains(&days_ago) {
+            continue;
+        }
+        let trend = trends.entry(path).or_insert_with(|| ProjectTrend {
+            tokens: 0,
+            weekly: vec![0; REPORT_WEEK_BUCKETS],
+            last_seven: 0,
+            previous_seven: 0,
+            active_days: HashSet::new(),
+        });
+        trend.tokens += tokens;
+        // 7 天一桶、以今日结尾：最近 7 天进最后一桶，供 sparkline 从旧到新画。
+        let bucket =
+            REPORT_WEEK_BUCKETS - 1 - ((days_ago / 7) as usize).min(REPORT_WEEK_BUCKETS - 1);
+        trend.weekly[bucket] += tokens;
+        if days_ago < 7 {
+            trend.last_seven += tokens;
+        } else if days_ago < 14 {
+            trend.previous_seven += tokens;
+        }
+        trend.active_days.insert(date);
+    }
+
+    let mut projects: Vec<ProjectReportRow> = trends
+        .into_iter()
+        .map(|(path, trend)| ProjectReportRow {
+            label: project_label(&path),
+            tokens: trend.tokens,
+            weekly: trend.weekly,
+            // 前 7 天没有用量时环比没有意义，如实置空。
+            recent_delta_percent: (trend.previous_seven > 0).then(|| {
+                (trend.last_seven - trend.previous_seven) as f64 * 100.0
+                    / trend.previous_seven as f64
+            }),
+            active_days: trend.active_days.len() as i64,
+            path,
+        })
+        .collect();
+    projects.sort_by(|left, right| {
+        right
+            .tokens
+            .cmp(&left.tokens)
+            .then_with(|| left.path.cmp(&right.path))
+    });
+    projects.truncate(REPORT_PROJECT_LIMIT);
+    Ok(projects)
 }
 
 const MAX_SESSIONS: usize = 300;
@@ -330,6 +470,7 @@ fn sessions_at(
     let end_ms = local_now.timestamp_millis() + 1;
 
     let events = load_session_events(connection, start_ms, end_ms)?;
+    let mut resolver = ProjectResolver::new(projects::load_rules(connection)?);
 
     let mut aggregates: HashMap<(String, String), SessionAgg> = HashMap::new();
     for event in events {
@@ -371,6 +512,17 @@ fn sessions_at(
                 .or_default()
                 .add(&comps);
         }
+        // 会话的项目归属走同一套分组规则；命中隐藏的事件不参与判定。
+        if let Some(raw) = event
+            .project
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            if let Resolution::Project { path, .. } = resolver.resolve(raw) {
+                *agg.project_tokens.entry(path).or_default() += comps.processed();
+            }
+        }
     }
 
     let mut sessions: Vec<SessionSummary> = aggregates
@@ -385,18 +537,9 @@ fn sessions_at(
             let model = model_totals.first().map(|(model, _)| model.clone());
             let models = model_totals.into_iter().map(|(model, _)| model).collect();
 
-            let mut usd_total = 0.0_f64;
-            let mut priced_any = false;
-            for (model, comps) in &agg.model_components {
-                if let Some(price) = pricing::price_for(model) {
-                    priced_any = true;
-                    usd_total += comps.input_uncached as f64 * price.input / 1_000_000.0
-                        + comps.cache_read as f64 * price.cache_read / 1_000_000.0
-                        + comps.cache_write as f64 * price.cache_write / 1_000_000.0
-                        + comps.output as f64 * price.output / 1_000_000.0;
-                }
-            }
-            let usd = priced_any.then_some(usd_total);
+            let usd = estimate_usd(&agg.model_components);
+            let project = ranked_keys(&agg.project_tokens).into_iter().next();
+            let project_label = project.as_deref().map(project_label);
 
             SessionSummary {
                 agent,
@@ -412,6 +555,8 @@ fn sessions_at(
                 models,
                 usd,
                 event_count: agg.event_count,
+                project,
+                project_label,
             }
         })
         .collect();
@@ -436,7 +581,8 @@ fn load_session_events(
 ) -> Result<Vec<StoredSessionEvent>> {
     let mut statement = connection.prepare(
         "SELECT adapter_id, session_id, occurred_at_ms, model,
-                input_uncached_tokens, cache_read_tokens, cache_write_tokens, output_tokens
+                input_uncached_tokens, cache_read_tokens, cache_write_tokens, output_tokens,
+                project_path
          FROM usage_event
          WHERE occurred_at_ms >= ?1 AND occurred_at_ms < ?2
          ORDER BY occurred_at_ms",
@@ -451,9 +597,142 @@ fn load_session_events(
             cache_read: row.get(5)?,
             cache_write: row.get(6)?,
             output: row.get(7)?,
+            project: row.get(8)?,
         })
     })?;
     Ok(rows.filter_map(Result::ok).collect())
+}
+
+const MAX_PROJECTS: usize = 200;
+
+/// 只读项目明细：与会话明细同一批事件，只是聚合键换成项目工作目录。
+/// 同样只查本地账本，绝不触发日志扫描。
+pub fn build_projects(database_path: &Path, period: &str) -> Result<UsageProjects> {
+    let connection = storage::open_database_read_only(database_path)?;
+    projects_at(&connection, period, Local::now())
+}
+
+fn projects_at(
+    connection: &Connection,
+    requested_period: &str,
+    local_now: chrono::DateTime<Local>,
+) -> Result<UsageProjects> {
+    let period = match requested_period {
+        "week" | "month" => requested_period,
+        _ => "today",
+    };
+    let today = local_now.date_naive();
+    let start_date = match period {
+        "week" => today - Duration::days(6),
+        "month" => today - Duration::days(29),
+        _ => today,
+    };
+    let start_ms = local_midnight(start_date)?.timestamp_millis();
+    let end_ms = local_now.timestamp_millis() + 1;
+
+    let events = load_session_events(connection, start_ms, end_ms)?;
+    let mut resolver = ProjectResolver::new(projects::load_rules(connection)?);
+
+    let mut aggregates: HashMap<String, ProjectAgg> = HashMap::new();
+    let mut unattributed_tokens = 0_i64;
+    let mut unattributed_agents: HashMap<String, i64> = HashMap::new();
+    let mut hidden_tokens = 0_i64;
+    for event in events {
+        let Some(agent) = AGENT_IDS.iter().find(|agent| **agent == event.adapter) else {
+            continue;
+        };
+        let comps = TokenComponents {
+            input_uncached: event.input_uncached,
+            cache_read: event.cache_read,
+            cache_write: event.cache_write,
+            output: event.output,
+        };
+        let Some(raw) = event
+            .project
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            // 归属不到就如实计为未归属，不并进任何项目、也不造一个"其他"。
+            unattributed_tokens += comps.processed();
+            *unattributed_agents.entry((*agent).to_owned()).or_default() += comps.processed();
+            continue;
+        };
+        let (project, pinned) = match resolver.resolve(raw) {
+            Resolution::Hidden => {
+                hidden_tokens += comps.processed();
+                continue;
+            }
+            Resolution::Project { path, pinned } => (path, pinned),
+        };
+
+        let agg = aggregates.entry(project).or_default();
+        agg.pinned |= pinned;
+        agg.last_ms = agg.last_ms.max(event.timestamp);
+        agg.event_count += 1;
+        agg.totals.add(&comps);
+        *agg.agent_tokens.entry((*agent).to_owned()).or_default() += comps.processed();
+        agg.sessions
+            .insert(((*agent).to_owned(), event.session_id.clone()));
+        if let Some(model) = event
+            .model
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            agg.model_components
+                .entry(model.to_owned())
+                .or_default()
+                .add(&comps);
+        }
+    }
+
+    let mut projects: Vec<ProjectSummary> = aggregates
+        .into_iter()
+        .map(|(path, agg)| ProjectSummary {
+            label: project_label(&path),
+            tokens: agg.totals.processed(),
+            input_uncached: agg.totals.input_uncached,
+            cache_read: agg.totals.cache_read,
+            cache_write: agg.totals.cache_write,
+            output: agg.totals.output,
+            usd: estimate_usd(&agg.model_components),
+            session_count: agg.sessions.len() as i64,
+            event_count: agg.event_count,
+            last_ms: agg.last_ms,
+            agents: ranked_keys(&agg.agent_tokens),
+            model: ranked_keys(
+                &agg.model_components
+                    .iter()
+                    .map(|(model, comps)| (model.clone(), comps.processed()))
+                    .collect(),
+            )
+            .into_iter()
+            .next(),
+            pinned: agg.pinned,
+            path,
+        })
+        .collect();
+
+    projects.sort_by(|left, right| {
+        right
+            .tokens
+            .cmp(&left.tokens)
+            .then_with(|| left.path.cmp(&right.path))
+    });
+    let total_projects = projects.len() as i64;
+    let truncated = projects.len() > MAX_PROJECTS;
+    projects.truncate(MAX_PROJECTS);
+
+    Ok(UsageProjects {
+        period: period.into(),
+        projects,
+        total_projects,
+        truncated,
+        unattributed_tokens,
+        unattributed_agents: ranked_keys(&unattributed_agents),
+        hidden_tokens,
+    })
 }
 
 /// 截至最近一个有数据的日子，向前数连续活跃天数；没有数据返回 0。
@@ -1514,6 +1793,240 @@ mod tests {
                 ],
             )
             .unwrap();
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn insert_test_project_event(
+        connection: &Connection,
+        event_id: &str,
+        adapter_id: &str,
+        session_id: &str,
+        occurred_at_ms: i64,
+        model: Option<&str>,
+        processed: i64,
+        project_path: Option<&str>,
+    ) {
+        connection
+            .execute(
+                "INSERT INTO usage_event (
+                    event_id, adapter_id, event_key, occurred_at_ms, session_id,
+                    model, input_uncached_tokens, cache_read_tokens,
+                    cache_write_tokens, output_tokens, reasoning_tokens,
+                    processed_tokens, quality, payload_hash, project_path
+                 ) VALUES (?1, ?2, ?1, ?3, ?4, ?5, ?6, 0, 0, 0, 0, ?6, 'exact', ?1, ?7)",
+                params![
+                    event_id,
+                    adapter_id,
+                    occurred_at_ms,
+                    session_id,
+                    model,
+                    processed,
+                    project_path,
+                ],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn projects_aggregate_across_agents_and_keep_unattributed_usage_separate() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(include_str!("../migrations/001_init.sql"))
+            .unwrap();
+        let today = Local::now().date_naive();
+        let local_now = test_local_time(today, 12);
+        let at = |hour: u32| test_local_time(today, hour).timestamp_millis();
+
+        // 路径刻意用不存在的盘符：不命中任何规则、也没有 .git 可找，
+        // 走"按原样呈现"的兜底，结果与真机文件系统无关。
+        // 同一个项目下两个 Agent、三个会话。
+        insert_test_project_event(
+            &connection,
+            "a",
+            "codex",
+            "sess-1",
+            at(8),
+            Some("gpt-5"),
+            100,
+            Some("Z:/metrik-tests/alpha"),
+        );
+        insert_test_project_event(
+            &connection,
+            "b",
+            "codex",
+            "sess-1",
+            at(9),
+            Some("gpt-5"),
+            50,
+            Some("Z:/metrik-tests/alpha"),
+        );
+        insert_test_project_event(
+            &connection,
+            "c",
+            "claude",
+            "sess-2",
+            at(10),
+            Some("claude-sonnet"),
+            30,
+            Some("Z:/metrik-tests/alpha"),
+        );
+        insert_test_project_event(
+            &connection,
+            "d",
+            "codex",
+            "sess-3",
+            at(7),
+            Some("gpt-5"),
+            20,
+            Some("Z:/metrik-tests/beta"),
+        );
+        // 读不到项目归属的用量不并进任何项目。
+        insert_test_project_event(
+            &connection,
+            "e",
+            "antigravity",
+            "cascade-1",
+            at(11),
+            Some("gemini"),
+            7,
+            None,
+        );
+
+        let result = projects_at(&connection, "today", local_now).unwrap();
+
+        assert_eq!(result.total_projects, 2);
+        assert!(!result.truncated);
+        let first = &result.projects[0];
+        assert_eq!(first.path, "Z:/metrik-tests/alpha");
+        assert_eq!(first.label, "alpha");
+        assert_eq!(first.tokens, 180);
+        assert_eq!(first.event_count, 3);
+        assert_eq!(first.session_count, 2);
+        assert_eq!(first.agents, vec!["codex", "claude"]);
+        assert_eq!(first.last_ms, at(10));
+        assert!(!first.pinned);
+        assert_eq!(result.projects[1].path, "Z:/metrik-tests/beta");
+        assert_eq!(result.unattributed_tokens, 7);
+        assert_eq!(result.unattributed_agents, vec!["antigravity"]);
+        assert_eq!(result.hidden_tokens, 0);
+    }
+
+    #[test]
+    fn grouping_rules_merge_subdirectories_and_hide_configured_paths() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(include_str!("../migrations/001_init.sql"))
+            .unwrap();
+        crate::projects::save_rules(
+            &connection,
+            crate::projects::ProjectRules {
+                roots: vec!["Z:/metrik-tests/budget".into()],
+                hidden: vec!["Z:/metrik-tests/scrap".into()],
+            },
+        )
+        .unwrap();
+        let today = Local::now().date_naive();
+        let local_now = test_local_time(today, 12);
+        let at = |hour: u32| test_local_time(today, hour).timestamp_millis();
+
+        // 登记根下的三个子目录归并成一行。
+        for (id, sub, tokens) in [
+            ("a", "Z:/metrik-tests/budget", 100),
+            ("b", "Z:/metrik-tests/budget/data/raw", 40),
+            ("c", "Z:/metrik-tests/budget/data/raw/part1", 10),
+        ] {
+            insert_test_project_event(
+                &connection,
+                id,
+                "claude",
+                "sess-1",
+                at(8),
+                Some("claude-sonnet"),
+                tokens,
+                Some(sub),
+            );
+        }
+        // 隐藏目录下的用量单列，不出现在项目里。
+        insert_test_project_event(
+            &connection,
+            "d",
+            "codex",
+            "sess-2",
+            at(9),
+            Some("gpt-5"),
+            30,
+            Some("Z:/metrik-tests/scrap/tmp"),
+        );
+
+        let result = projects_at(&connection, "today", local_now).unwrap();
+
+        assert_eq!(result.total_projects, 1);
+        let merged = &result.projects[0];
+        assert_eq!(merged.path, "Z:/metrik-tests/budget");
+        assert_eq!(merged.tokens, 150);
+        assert!(merged.pinned);
+        assert_eq!(result.hidden_tokens, 30);
+        assert_eq!(result.unattributed_tokens, 0);
+
+        // 会话明细用同一套规则：sess-1 的项目是归并后的根。
+        let sessions = sessions_at(&connection, "today", local_now).unwrap();
+        let merged_session = sessions
+            .sessions
+            .iter()
+            .find(|session| session.session_id == "sess-1")
+            .unwrap();
+        assert_eq!(
+            merged_session.project.as_deref(),
+            Some("Z:/metrik-tests/budget")
+        );
+        assert_eq!(merged_session.project_label.as_deref(), Some("budget"));
+        // 全部事件被隐藏的会话不带项目标注。
+        let hidden_session = sessions
+            .sessions
+            .iter()
+            .find(|session| session.session_id == "sess-2")
+            .unwrap();
+        assert_eq!(hidden_session.project, None);
+    }
+
+    #[test]
+    fn report_projects_bucket_weekly_trends_with_recent_delta() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(include_str!("../migrations/001_init.sql"))
+            .unwrap();
+        let today = Local::now().date_naive();
+        let local_now = test_local_time(today, 12);
+        let at_days_ago = |days: i64, hour: u32| {
+            test_local_time(today - Duration::days(days), hour).timestamp_millis()
+        };
+
+        // 近 7 天 60、再前 7 天 40 → 环比 +50%；更早的 20 落进更旧的周桶。
+        for (id, days_ago, tokens) in [("a", 1_i64, 60_i64), ("b", 9, 40), ("c", 30, 20)] {
+            insert_test_project_event(
+                &connection,
+                id,
+                "codex",
+                "sess-1",
+                at_days_ago(days_ago, 8),
+                Some("gpt-5"),
+                tokens,
+                Some("Z:/metrik-tests/alpha"),
+            );
+        }
+
+        let report = report_at(&connection, local_now).unwrap();
+
+        assert_eq!(report.projects.len(), 1);
+        let row = &report.projects[0];
+        assert_eq!(row.path, "Z:/metrik-tests/alpha");
+        assert_eq!(row.tokens, 120);
+        assert_eq!(row.weekly.len(), REPORT_WEEK_BUCKETS);
+        assert_eq!(*row.weekly.last().unwrap(), 60);
+        assert_eq!(row.weekly[REPORT_WEEK_BUCKETS - 2], 40);
+        assert_eq!(row.weekly.iter().sum::<i64>(), 120);
+        assert_eq!(row.recent_delta_percent, Some(50.0));
+        assert_eq!(row.active_days, 3);
     }
 
     #[test]
@@ -2600,6 +3113,71 @@ mod tests {
             Some(expected_last_label.as_str())
         );
         std::fs::remove_file(database).ok();
+    }
+
+    /// 在真实日志上核对项目归属的覆盖率：每个 adapter 有多少 token 能落到项目、
+    /// 落到了哪些目录。只读日志，不建账本、不发网络请求。
+    #[test]
+    #[ignore = "reads the current user's local agent logs"]
+    fn live_project_attribution_smoke_test() {
+        let cutoff_ms = Utc::now().timestamp_millis() - 7 * 86_400_000;
+        let adapters: Vec<Box<dyn AgentAdapter>> = vec![
+            Box::new(CodexAdapter::detected()),
+            Box::new(ClaudeAdapter::detected()),
+            Box::new(ZcodeAdapter::detected()),
+            Box::new(OpencodeAdapter::detected()),
+            Box::new(KimiAdapter::detected()),
+            Box::new(WorkbuddyAdapter::detected()),
+        ];
+
+        for adapter in adapters {
+            let mut attributed = 0_i64;
+            let mut unattributed = 0_i64;
+            let mut projects: HashMap<String, i64> = HashMap::new();
+            for candidate in adapter.discover(cutoff_ms) {
+                let Ok(scan) = adapter.parse(&candidate, cutoff_ms) else {
+                    continue;
+                };
+                for event in scan.source.events {
+                    let tokens = event.tokens.processed();
+                    match event.project_path {
+                        Some(path) => {
+                            attributed += tokens;
+                            *projects.entry(path).or_default() += tokens;
+                        }
+                        None => unattributed += tokens,
+                    }
+                }
+            }
+            let total = attributed + unattributed;
+            let share = if total > 0 {
+                attributed as f64 * 100.0 / total as f64
+            } else {
+                0.0
+            };
+            println!(
+                "{}: {total} tokens, {share:.1}% 有项目归属, {} 个原始目录",
+                adapter.id(),
+                projects.len()
+            );
+            // 默认分组规则（无手动规则）下的归并效果。
+            let mut resolver = ProjectResolver::new(crate::projects::ProjectRules::default());
+            let mut grouped: HashMap<String, i64> = HashMap::new();
+            let mut hidden = 0_i64;
+            for (path, tokens) in &projects {
+                match resolver.resolve(path) {
+                    Resolution::Project { path, .. } => *grouped.entry(path).or_default() += tokens,
+                    Resolution::Hidden => hidden += tokens,
+                }
+            }
+            println!(
+                "    默认规则归并后: {} 个项目, 内置隐藏 {hidden}",
+                grouped.len()
+            );
+            for path in ranked_keys(&grouped).into_iter().take(5) {
+                println!("    {path}: {}", grouped[&path]);
+            }
+        }
     }
 
     #[test]
