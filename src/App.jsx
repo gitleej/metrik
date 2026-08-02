@@ -2231,9 +2231,9 @@ const THEME_OPTIONS = [
   { id: "dark", label: "暗色" },
 ];
 
-// 悬浮形态的窗口圆角，物理像素。取值对齐卡片此前的观感：8 CSS px 在当时的
-// dpr 1.1875（系统 125% × 卡片缩放 95%）下正好画出 9.5 物理像素。
-const GLASS_RADIUS_PX = 10;
+// 悬浮形态的窗口圆角，物理像素。10 收到 8：贴着壁纸看，10 的弧偏圆，靠近
+// macOS 大部件而不是任务栏那一排小图标；8 更贴合胶囊的高度。
+const GLASS_RADIUS_PX = 8;
 
 const GLASS_TINT_OPTIONS = [
   { id: "dark", label: "深色" },
