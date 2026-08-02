@@ -330,7 +330,7 @@ CSS px 会被卡片和胶囊各自的 WebView 原生 zoom 放大，所以同样�
 | 卡片（缩放 0.95） | 0.95 | 1.1875 | 9.5 物理像素 |
 | 竖胶囊（缩放 1.75） | 1.75 | 2.1875 | **17.5 物理像素**——即被否掉的"大圆头" |
 
-`App.jsx` 按 `devicePixelRatio` 把 `GLASS_RADIUS_PX`（10 物理像素）折算成
+`App.jsx` 按 `devicePixelRatio` 把 `GLASS_RADIUS_PX`（8 物理像素）折算成
 `--glass-radius`，`resize` 时重算。两种形态、任何缩放档都是同一个视觉半径。
 
 静态外框只在浏览器补（`html[data-runtime="browser"]`）；桌面端不画，避免与
