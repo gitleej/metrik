@@ -524,6 +524,7 @@ function QuotaBarRow({ label, view, windowKey, accent }) {
 /// 状态由灯和 state 这一行承担，不把"数据不完整"顶成入口的名字。
 /// "部分覆盖" 这种自造词读者看不懂，直接说清楚哪里不全。
 function sourceStatusCopy(snapshot, loading, partial) {
+  const indexingPending = snapshot.indexing?.pending || 0;
   if (snapshot.pending) {
     return {
       title: "正在读取",
@@ -538,6 +539,15 @@ function sourceStatusCopy(snapshot, loading, partial) {
       hint: "点此排查",
       state: "读取失败",
       detail: "本机日志读取失败。界面不会用演示数字顶替，点此查看数据来源。",
+    };
+  }
+  if (indexingPending > 0) {
+    return {
+      title: "补齐历史",
+      hint: `还剩 ${indexingPending}`,
+      // 侧栏那行不能换行，只放数字；完整说明走 title 与统计说明抽屉。
+      state: `补齐中 ${indexingPending}`,
+      detail: `正在补齐历史索引，还剩 ${indexingPending} 个日志文件。历史周期的数字尚不完整，会随补齐自动更新。`,
     };
   }
   if (partial) {
@@ -566,6 +576,7 @@ function sourceStatusCopy(snapshot, loading, partial) {
 
 function Sidebar({ activeNav, onNavChange, snapshot, loading }) {
   const partial = snapshotIsPartial(snapshot);
+  const indexing = (snapshot.indexing?.pending || 0) > 0;
   const sourceStatus = sourceStatusCopy(snapshot, loading, partial);
   return (
     <aside className="sidebar" aria-label="主导航">
@@ -597,7 +608,7 @@ function Sidebar({ activeNav, onNavChange, snapshot, loading }) {
         onClick={() => onNavChange("sources")}
         title={sourceStatus.detail}
       >
-        <span className={`status-dot ${loading ? "status-dot--loading" : ""} ${snapshot.loadError ? "status-dot--error" : ""} ${partial ? "status-dot--warning" : ""}`} />
+        <span className={`status-dot ${loading || indexing ? "status-dot--loading" : ""} ${snapshot.loadError ? "status-dot--error" : ""} ${partial && !indexing ? "status-dot--warning" : ""}`} />
         <span>数据统计</span>
         <small>{sourceStatus.state}</small>
       </button>
@@ -1756,6 +1767,16 @@ function SourceDrawer({ snapshot, onClose, onRebuildLedger, rebuildState }) {
             <X size={21} weight="light" />
           </button>
         </header>
+
+        {(snapshot.indexing?.pending || 0) > 0 && (
+          <div className="indexing-note" role="status">
+            <ClockCounterClockwise size={20} weight="light" aria-hidden="true" />
+            <p>
+              正在补齐历史索引，还剩 <strong>{snapshot.indexing.pending}</strong> 个日志文件。
+              历史周期的数字尚不完整，会随补齐自动更新。
+            </p>
+          </div>
+        )}
 
         <div className="source-list">
           {snapshot.sources.map((source) => (
@@ -3113,7 +3134,7 @@ function UsageSection({ projectsState, sessionsState, period, onRulesChanged }) 
   const [detail, setDetail] = useState(null);
   const [showAllProjects, setShowAllProjects] = useState(false);
   const [copiedId, setCopiedId] = useState(null);
-  const [exportNote, setExportNote] = useState(null);
+  const [note, setNote] = useState(null);
   const [rulesOpen, setRulesOpen] = useState(false);
   const [rules, setRules] = useState(null);
   const [rulesBusy, setRulesBusy] = useState(false);
@@ -3141,7 +3162,7 @@ function UsageSection({ projectsState, sessionsState, period, onRulesChanged }) 
 
   const openDetail = (next) => {
     setModelFilter("all");
-    setExportNote(null);
+    setNote(null);
     setDetail(next);
   };
 
@@ -3152,7 +3173,7 @@ function UsageSection({ projectsState, sessionsState, period, onRulesChanged }) 
       setRules(saved);
       onRulesChanged();
     } catch (error) {
-      setExportNote(`规则保存失败：${error}`);
+      setNote({ text: `规则保存失败：${error}` });
     } finally {
       setRulesBusy(false);
     }
@@ -3166,10 +3187,6 @@ function UsageSection({ projectsState, sessionsState, period, onRulesChanged }) 
     const current = await currentRules();
     await applyRules({ ...current, roots: [...current.roots, path] });
   };
-  const hideProject = async (path) => {
-    const current = await currentRules();
-    await applyRules({ ...current, hidden: [...current.hidden, path] });
-  };
   const removeRoot = async (path) => {
     const current = await currentRules();
     await applyRules({ ...current, roots: current.roots.filter((item) => item !== path) });
@@ -3178,13 +3195,26 @@ function UsageSection({ projectsState, sessionsState, period, onRulesChanged }) 
     const current = await currentRules();
     await applyRules({ ...current, hidden: current.hidden.filter((item) => item !== path) });
   };
+  // 登记与取消登记同一颗按钮：图钉状态可逆，按钮也不会中途从 DOM 消失。
+  const togglePin = (project) => (
+    project.pinned ? removeRoot(project.path) : pinProject(project.path)
+  );
+  // 隐藏会让这一行消失，就地留一个撤销入口；规则面板仍是长期的恢复位置。
+  const hideProject = async (project) => {
+    const current = await currentRules();
+    await applyRules({ ...current, hidden: [...current.hidden, project.path] });
+    setNote({
+      text: `已隐藏 ${project.label}`,
+      undo: () => removeHidden(project.path),
+    });
+  };
 
   const noteExport = async (task) => {
     try {
       const savedPath = await task();
-      setExportNote(savedPath ? `已导出到 ${savedPath}` : "已开始下载");
+      setNote({ text: savedPath ? `已导出到 ${savedPath}` : "已开始下载" });
     } catch (error) {
-      setExportNote(`导出失败：${error}`);
+      setNote({ text: `导出失败：${error}` });
     }
   };
   const copySessionId = (sessionId) => {
@@ -3331,7 +3361,20 @@ ${session.sessionId}`}
           </button>
         </div>
 
-        {exportNote && <p className="settings-muted" role="status">{exportNote}</p>}
+        {note && (
+        <p className="usage-note" role="status">
+          {note.text}
+          {note.undo && (
+            <button
+              type="button"
+              disabled={rulesBusy}
+              onClick={() => { setNote(null); note.undo(); }}
+            >
+              撤销
+            </button>
+          )}
+        </p>
+      )}
         {groups.length === 0 && <p className="settings-muted">本周期内没有可显示的会话。</p>}
         {groups.length > 0 && <div className="report-card session-board">{renderSessionRows(groups)}</div>}
       </main>
@@ -3383,7 +3426,20 @@ ${session.sessionId}`}
         </button>
       </div>
 
-      {exportNote && <p className="settings-muted" role="status">{exportNote}</p>}
+      {note && (
+        <p className="usage-note" role="status">
+          {note.text}
+          {note.undo && (
+            <button
+              type="button"
+              disabled={rulesBusy}
+              onClick={() => { setNote(null); note.undo(); }}
+            >
+              撤销
+            </button>
+          )}
+        </p>
+      )}
 
       {rulesOpen && (
         <ProjectRulesCard
@@ -3451,7 +3507,10 @@ ${session.sessionId}`}
           <article
             className="project-row"
             key={project.path}
-            onClick={() => openDetail({ type: "project", path: project.path })}
+            onClick={(event) => {
+              if (event.target.closest?.(".project-actions")) return;
+              openDetail({ type: "project", path: project.path });
+            }}
             role="button"
             tabIndex={0}
             onKeyDown={(event) => {
@@ -3462,10 +3521,7 @@ ${session.sessionId}`}
             }}
           >
             <div className="session-copy">
-              <strong title={project.path}>
-                {project.label}
-                {project.pinned && <PushPinSimple size={11} weight="fill" aria-label="手动登记的项目根" />}
-              </strong>
+              <strong title={project.path}>{project.label}</strong>
               <small>
                 {project.agents.map((id) => AGENT_META[id]?.label || id).join(" · ")}
                 {project.model ? ` · ${modelDisplayName(project.model)}` : ""}
@@ -3481,24 +3537,33 @@ ${session.sessionId}`}
                 />
               </span>
             </div>
-            <div className="project-actions">
-              {!project.pinned && (
-                <button
-                  type="button"
-                  disabled={rulesBusy}
-                  title={`登记为项目根：${project.path} 下的子目录都归并到这一行`}
-                  aria-label={`把 ${project.label} 登记为项目根`}
-                  onClick={(event) => { event.stopPropagation(); pinProject(project.path); }}
-                >
-                  <PushPinSimple size={13} weight="regular" aria-hidden="true" />
-                </button>
-              )}
+            {/* 操作区整体阻断冒泡：按钮若在点击途中卸载，mouseup 会落到行上误触发进入详情。 */}
+            <div
+              className={`project-actions ${project.pinned ? "project-actions--pinned" : ""}`}
+              onClick={(event) => event.stopPropagation()}
+              onMouseDown={(event) => event.stopPropagation()}
+            >
+              <button
+                type="button"
+                className={project.pinned ? "is-active" : ""}
+                disabled={rulesBusy}
+                aria-pressed={project.pinned}
+                title={project.pinned
+                  ? `取消登记：${project.path} 下的子目录恢复各自成行`
+                  : `登记为项目根：${project.path} 下的子目录都归并到这一行`}
+                aria-label={project.pinned
+                  ? `取消登记项目根 ${project.label}`
+                  : `把 ${project.label} 登记为项目根`}
+                onClick={() => togglePin(project)}
+              >
+                <PushPinSimple size={13} weight={project.pinned ? "fill" : "regular"} aria-hidden="true" />
+              </button>
               <button
                 type="button"
                 disabled={rulesBusy}
                 title={`隐藏 ${project.path}：其用量不再作为项目展示，可在分组规则里恢复`}
                 aria-label={`隐藏项目 ${project.label}`}
-                onClick={(event) => { event.stopPropagation(); hideProject(project.path); }}
+                onClick={() => hideProject(project)}
               >
                 <EyeSlash size={13} weight="regular" aria-hidden="true" />
               </button>
@@ -4878,13 +4943,6 @@ export function App() {
           <ArrowsClockwise size={15} weight="light" aria-hidden="true" />
         </button>
         <Sidebar activeNav={activeNav} onNavChange={handleNavChange} snapshot={snapshot} loading={appBusy} />
-
-        {indexingPending > 0 ? (
-          <div className="indexing-banner" role="status">
-            <ClockCounterClockwise size={18} weight="light" aria-hidden="true" />
-            正在补齐历史索引，还剩 <strong>{indexingPending}</strong> 个日志文件。历史周期的数字尚不完整，会随补齐自动更新。
-          </div>
-        ) : null}
 
         {activeNav === "overview" ? (
           <>
