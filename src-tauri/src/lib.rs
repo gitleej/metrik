@@ -8,12 +8,13 @@ mod engine;
 #[cfg(target_os = "macos")]
 mod macos;
 mod pricing;
+mod projects;
 mod schema;
 mod storage;
 mod sync;
 
 use anyhow::{Context, Result};
-use domain::{QuotaSample, UsageReport, UsageSessions, UsageSnapshot};
+use domain::{QuotaSample, UsageProjects, UsageReport, UsageSessions, UsageSnapshot};
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::ErrorKind;
@@ -389,6 +390,53 @@ async fn usage_sessions(
     })
     .await
     .map_err(|error| format!("usage sessions task failed: {error}"))?
+}
+
+/// 只读项目明细：与会话明细同源，按分组规则归并后聚合。
+#[tauri::command]
+async fn usage_projects(
+    period: String,
+    state: State<'_, AppState>,
+) -> Result<UsageProjects, String> {
+    let database_path = state.database_path.clone();
+
+    tauri::async_runtime::spawn_blocking(move || {
+        engine::build_projects(&database_path, &period).map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("usage projects task failed: {error}"))?
+}
+
+/// 读取项目分组规则（手动项目根与隐藏目录）。
+#[tauri::command]
+async fn project_rules(state: State<'_, AppState>) -> Result<projects::ProjectRules, String> {
+    let database_path = state.database_path.clone();
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let connection =
+            storage::open_database_read_only(&database_path).map_err(|error| error.to_string())?;
+        projects::load_rules(&connection).map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("project rules task failed: {error}"))?
+}
+
+/// 保存项目分组规则，返回归一化去重后的结果。只写 `app_setting` 一行，
+/// 不触发扫描；分组在查询层生效，下一次读取即是新规则。
+#[tauri::command]
+async fn set_project_rules(
+    rules: projects::ProjectRules,
+    state: State<'_, AppState>,
+) -> Result<projects::ProjectRules, String> {
+    let database_path = state.database_path.clone();
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let connection =
+            storage::open_database(&database_path).map_err(|error| error.to_string())?;
+        projects::save_rules(&connection, rules).map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("set project rules task failed: {error}"))?
 }
 
 /// 把前端拼好的 CSV 文本写入「下载」目录并返回完整路径。WebView 里的
@@ -1033,6 +1081,9 @@ pub fn run() {
             usage_snapshot,
             usage_report,
             usage_sessions,
+            usage_projects,
+            project_rules,
+            set_project_rules,
             export_csv,
             rebuild_local_ledger,
             sync_settings,

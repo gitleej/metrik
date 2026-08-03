@@ -27,8 +27,18 @@ struct CodexPayload {
     id: Option<String>,
     forked_from_id: Option<String>,
     model: Option<String>,
+    cwd: Option<String>,
     info: Option<TokenInfo>,
     rate_limits: Option<RateLimits>,
+}
+
+/// 一条待落账的增量：同一轮里模型和工作目录都可能变，所以随事件一起暂存。
+struct PendingEvent {
+    fingerprint: String,
+    timestamp: i64,
+    model: Option<String>,
+    tokens: TokenVector,
+    cwd: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -100,6 +110,9 @@ impl AgentAdapter for CodexAdapter {
             .to_owned();
         let mut session_id = fallback_session;
         let mut current_model: Option<String> = None;
+        // `session_meta.cwd` 是会话起始目录，`turn_context.cwd` 是当轮实际目录
+        // （用户中途换目录时只有后者会变）。按事件发生时的值记录。
+        let mut current_cwd: Option<String> = None;
         let mut previous: Option<TokenVector> = None;
         // Codex Desktop fork/subagent files replay the parent thread's history
         // (including its cumulative token_count events) before the first live
@@ -107,7 +120,7 @@ impl AgentAdapter for CodexAdapter {
         // session, so counting them again would double-count. The replay never
         // contains turn_context lines, so the first turn_context marks live data.
         let mut in_fork_replay = false;
-        let mut pending_events: Vec<(String, i64, Option<String>, TokenVector)> = Vec::new();
+        let mut pending_events: Vec<PendingEvent> = Vec::new();
         let mut quotas = Vec::new();
         let mut diagnostics = ScanDiagnostics::default();
         let track_skipped_lines = candidate.mtime_ns / 1_000_000 >= cutoff_ms;
@@ -146,11 +159,17 @@ impl AgentAdapter for CodexAdapter {
                     if let Some(model) = non_empty(payload.model) {
                         current_model = Some(model);
                     }
+                    if let Some(cwd) = non_empty(payload.cwd) {
+                        current_cwd = Some(cwd);
+                    }
                 }
                 "turn_context" => {
                     in_fork_replay = false;
                     if let Some(model) = non_empty(payload.model) {
                         current_model = Some(model);
+                    }
+                    if let Some(cwd) = non_empty(payload.cwd) {
+                        current_cwd = Some(cwd);
                     }
                 }
                 "event_msg" if payload.payload_type.as_deref() == Some("token_count") => {
@@ -186,7 +205,13 @@ impl AgentAdapter for CodexAdapter {
                                 current.reasoning_output
                             );
                             let model = event_model.or_else(|| current_model.clone());
-                            pending_events.push((fingerprint, timestamp, model, delta));
+                            pending_events.push(PendingEvent {
+                                fingerprint,
+                                timestamp,
+                                model,
+                                tokens: delta,
+                                cwd: current_cwd.clone(),
+                            });
                         }
                     }
 
@@ -209,17 +234,18 @@ impl AgentAdapter for CodexAdapter {
 
         let events = pending_events
             .into_iter()
-            .map(|(fingerprint, timestamp, model, tokens)| {
-                let event_key = format!("{session_id}:{fingerprint}");
+            .map(|pending| {
+                let event_key = format!("{session_id}:{}", pending.fingerprint);
                 UsageEvent::new(
                     self.id(),
                     event_key,
-                    timestamp,
+                    pending.timestamp,
                     session_id.clone(),
-                    model,
-                    tokens,
+                    pending.model,
+                    pending.tokens,
                     "cumulative_delta",
                 )
+                .with_project(pending.cwd)
             })
             .collect();
 
@@ -306,6 +332,55 @@ mod tests {
             .collect();
         assert_eq!(deltas, vec![100, 40, 50]);
         assert_eq!(deltas.iter().sum::<i64>(), 190);
+        std::fs::remove_file(temp).ok();
+    }
+
+    #[test]
+    fn events_carry_the_working_directory_in_effect_when_they_happened() {
+        let temp =
+            std::env::temp_dir().join(format!("metrik-codex-cwd-{}.jsonl", std::process::id()));
+        let mut file = File::create(&temp).unwrap();
+        writeln!(
+            file,
+            r#"{{"type":"session_meta","payload":{{"id":"session-a","cwd":"D:\\work\\usage"}}}}"#
+        )
+        .unwrap();
+        writeln!(
+            file,
+            r#"{{"timestamp":"2026-07-12T01:00:00Z","type":"event_msg","payload":{{"type":"token_count","info":{{"total_token_usage":{{"input_tokens":100,"cached_input_tokens":0,"output_tokens":0,"reasoning_output_tokens":0}}}}}}}}"#
+        )
+        .unwrap();
+        // 中途换目录：之后的事件跟着 turn_context 走。
+        writeln!(
+            file,
+            r#"{{"timestamp":"2026-07-12T02:00:00Z","type":"turn_context","payload":{{"cwd":"E:/other"}}}}"#
+        )
+        .unwrap();
+        writeln!(
+            file,
+            r#"{{"timestamp":"2026-07-12T03:00:00Z","type":"event_msg","payload":{{"type":"token_count","info":{{"total_token_usage":{{"input_tokens":180,"cached_input_tokens":0,"output_tokens":0,"reasoning_output_tokens":0}}}}}}}}"#
+        )
+        .unwrap();
+        drop(file);
+        let metadata = temp.metadata().unwrap();
+        let candidate = SourceCandidate {
+            source_id: "source".into(),
+            path: temp.clone(),
+            size: metadata.len(),
+            mtime_ns: 1,
+        };
+
+        let parsed = CodexAdapter::with_roots(vec![])
+            .parse(&candidate, i64::MIN)
+            .unwrap();
+
+        let projects: Vec<Option<&str>> = parsed
+            .source
+            .events
+            .iter()
+            .map(|event| event.project_path.as_deref())
+            .collect();
+        assert_eq!(projects, vec![Some("D:/work/usage"), Some("E:/other")]);
         std::fs::remove_file(temp).ok();
     }
 

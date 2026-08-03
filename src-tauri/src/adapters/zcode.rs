@@ -73,6 +73,7 @@ impl AgentAdapter for ZcodeAdapter {
         )
         .with_context(|| format!("failed to open {}", candidate.path.display()))?;
         connection.pragma_update(None, "busy_timeout", 2_000_i64)?;
+        let session_directories = super::opencode_session_directories(&connection);
 
         let mut statement = connection.prepare(
             "SELECT id, session_id, model_id,
@@ -129,15 +130,19 @@ impl AgentAdapter for ZcodeAdapter {
             if tokens.processed() == 0 {
                 continue;
             }
-            events.push(UsageEvent::new(
-                "zcode",
-                format!("request:{id}"),
-                occurred_at_ms,
-                session_id,
-                model,
-                tokens,
-                "exact",
-            ));
+            let project = session_directories.get(&session_id).cloned();
+            events.push(
+                UsageEvent::new(
+                    "zcode",
+                    format!("request:{id}"),
+                    occurred_at_ms,
+                    session_id,
+                    model,
+                    tokens,
+                    "exact",
+                )
+                .with_project(project),
+            );
         }
 
         Ok(ParsedScan {
@@ -276,6 +281,53 @@ mod tests {
 
         assert_eq!(scan.source.events.len(), 1);
         assert_eq!(scan.source.events[0].event_key, "request:req-new");
+    }
+
+    #[test]
+    fn session_directory_becomes_the_project_and_is_optional() {
+        let test = TestDirectory::new("project");
+        let db_path = test.path().join("db.sqlite");
+        let fixture = create_fixture_db(&db_path);
+        fixture
+            .execute_batch(
+                "CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT);
+                 INSERT INTO session VALUES ('sess-a', 'D:\\work\\usage');
+                 INSERT INTO model_usage VALUES
+                 ('req-1', 'sess-a', 'p', 'GLM-5.2', 'completed', 1000, 1100, 10, 1, 0, 0, 0, 11),
+                 ('req-2', 'sess-orphan', 'p', 'GLM-5.2', 'completed', 1000, 1100, 10, 1, 0, 0, 0, 11);",
+            )
+            .unwrap();
+        drop(fixture);
+        let adapter = ZcodeAdapter::with_database(db_path);
+
+        let scan = adapter.parse(&adapter.discover(0)[0], 0).unwrap();
+
+        assert_eq!(
+            scan.source.events[0].project_path.as_deref(),
+            Some("D:/work/usage")
+        );
+        // session 表里没有的会话保持未归属，不猜。
+        assert_eq!(scan.source.events[1].project_path, None);
+    }
+
+    #[test]
+    fn a_database_without_a_session_table_still_parses_usage() {
+        let test = TestDirectory::new("no-session-table");
+        let db_path = test.path().join("db.sqlite");
+        let fixture = create_fixture_db(&db_path);
+        fixture
+            .execute_batch(
+                "INSERT INTO model_usage VALUES
+                 ('req-1', 'sess-a', 'p', 'GLM-5.2', 'completed', 1000, 1100, 10, 1, 0, 0, 0, 11);",
+            )
+            .unwrap();
+        drop(fixture);
+        let adapter = ZcodeAdapter::with_database(db_path);
+
+        let scan = adapter.parse(&adapter.discover(0)[0], 0).unwrap();
+
+        assert_eq!(scan.source.events.len(), 1);
+        assert_eq!(scan.source.events[0].project_path, None);
     }
 
     #[test]

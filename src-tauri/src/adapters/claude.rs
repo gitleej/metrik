@@ -21,6 +21,7 @@ struct MessageUsage {
     request_id: Option<String>,
     model: Option<String>,
     tokens: TokenVector,
+    cwd: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -32,6 +33,9 @@ struct ClaudeRecord {
     session_id: Option<String>,
     #[serde(rename = "requestId")]
     request_id: Option<String>,
+    /// 每条记录都带工作目录；目录名 `~/.claude/projects/<编码 cwd>` 是有损编码
+    /// （路径分隔符和字面 `-` 都写成 `-`），只能用这个字段还原真实路径。
+    cwd: Option<String>,
     message: Option<ClaudeMessage>,
 }
 
@@ -178,6 +182,7 @@ impl AgentAdapter for ClaudeAdapter {
                 stored.tokens.component_max(&candidate_usage);
                 stored.request_id = stored.request_id.clone().or(record.request_id);
                 stored.model = stored.model.clone().or(model);
+                stored.cwd = stored.cwd.clone().or(record.cwd);
                 if timestamp >= stored.timestamp {
                     stored.timestamp = timestamp;
                 }
@@ -191,6 +196,7 @@ impl AgentAdapter for ClaudeAdapter {
                         request_id: record.request_id,
                         model,
                         tokens: candidate_usage,
+                        cwd: record.cwd,
                     },
                 );
             }
@@ -209,6 +215,7 @@ impl AgentAdapter for ClaudeAdapter {
                     message.tokens,
                     "exact",
                 )
+                .with_project(message.cwd)
             })
             .collect();
         events.sort_by_key(|event| event.occurred_at_ms);
@@ -365,6 +372,60 @@ mod tests {
         assert_eq!(parsed.source.events[0].event_key, "message:message-valid");
         assert_eq!(parsed.source.events[0].tokens.processed(), 42);
         assert_eq!(parsed.diagnostics.rejected_events, 1);
+        std::fs::remove_file(temp).ok();
+    }
+
+    #[test]
+    fn the_record_cwd_becomes_the_project_path() {
+        let temp = std::env::temp_dir().join(format!(
+            "metrik-claude-cwd-{}-{}.jsonl",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let mut file = File::create(&temp).unwrap();
+        let with_cwd = serde_json::json!({
+            "type": "assistant",
+            "timestamp": "2026-07-12T01:00:00Z",
+            "sessionId": "session-a",
+            "cwd": "D:\\work\\usage",
+            "message": {
+                "id": "message-a",
+                "model": "claude-sonnet",
+                "usage": { "input_tokens": 100, "output_tokens": 5 }
+            }
+        });
+        let without_cwd = serde_json::json!({
+            "type": "assistant",
+            "timestamp": "2026-07-12T01:01:00Z",
+            "sessionId": "session-a",
+            "message": {
+                "id": "message-b",
+                "model": "claude-sonnet",
+                "usage": { "input_tokens": 20, "output_tokens": 3 }
+            }
+        });
+        writeln!(file, "{with_cwd}").unwrap();
+        writeln!(file, "{without_cwd}").unwrap();
+        drop(file);
+
+        let metadata = temp.metadata().unwrap();
+        let candidate = SourceCandidate {
+            source_id: "source".into(),
+            path: temp.clone(),
+            size: metadata.len(),
+            mtime_ns: 1,
+        };
+        let parsed = ClaudeAdapter::with_roots(vec![])
+            .parse(&candidate, i64::MIN)
+            .unwrap();
+
+        let projects: Vec<Option<&str>> = parsed
+            .source
+            .events
+            .iter()
+            .map(|event| event.project_path.as_deref())
+            .collect();
+        assert_eq!(projects, vec![Some("D:/work/usage"), None]);
         std::fs::remove_file(temp).ok();
     }
 

@@ -121,6 +121,40 @@ fn session_id_from_path(path: &Path) -> String {
         .to_owned()
 }
 
+#[derive(Deserialize, Default)]
+struct KimiWorkspaces {
+    #[serde(default)]
+    workspaces: BTreeMap<String, KimiWorkspace>,
+}
+
+#[derive(Deserialize, Default)]
+struct KimiWorkspace {
+    root: Option<String>,
+}
+
+/// 新版路径 `<data>/sessions/<workspace>/<session>/agents/<agent>/wire.jsonl`
+/// 里的 `<workspace>` 只是工作区 ID（`wd_agentteam_578762e1c526`），真实目录在
+/// `<data>/workspaces.json` 的 `workspaces.<id>.root`。查不到就返回 None：
+/// 旧版 `~/.kimi/sessions/<group>/…` 的 `<group>` 不是工作区 ID，不能当路径用。
+fn project_root_from_path(path: &Path) -> Option<String> {
+    let sessions_dir = path
+        .ancestors()
+        .find(|dir| dir.file_name().and_then(|name| name.to_str()) == Some("sessions"))?;
+    let workspace_id = path
+        .strip_prefix(sessions_dir)
+        .ok()?
+        .iter()
+        .next()?
+        .to_str()?;
+    let raw = std::fs::read_to_string(sessions_dir.parent()?.join("workspaces.json")).ok()?;
+    serde_json::from_str::<KimiWorkspaces>(&raw)
+        .ok()?
+        .workspaces
+        .get(workspace_id)?
+        .root
+        .clone()
+}
+
 impl AgentAdapter for KimiAdapter {
     fn id(&self) -> &'static str {
         "kimi"
@@ -141,6 +175,7 @@ impl AgentAdapter for KimiAdapter {
         let reader = BufReader::with_capacity(256 * 1024, file);
 
         let session_id = session_id_from_path(&candidate.path);
+        let project = project_root_from_path(&candidate.path);
         let mut events: Vec<UsageEvent> = Vec::new();
         // 旧版按 message_id 合并（分量取最大值），值同时记录首见时间。
         let mut legacy: BTreeMap<String, (i64, TokenVector)> = BTreeMap::new();
@@ -194,15 +229,18 @@ impl AgentAdapter for KimiAdapter {
                     "{timestamp}:{}:{}:{}:{}",
                     tokens.input_uncached, tokens.cache_read, tokens.cache_write, tokens.output
                 );
-                events.push(UsageEvent::new(
-                    self.id(),
-                    format!("{session_id}:{fingerprint}"),
-                    timestamp,
-                    session_id.clone(),
-                    non_empty(record.model),
-                    tokens,
-                    "turn_delta",
-                ));
+                events.push(
+                    UsageEvent::new(
+                        self.id(),
+                        format!("{session_id}:{fingerprint}"),
+                        timestamp,
+                        session_id.clone(),
+                        non_empty(record.model),
+                        tokens,
+                        "turn_delta",
+                    )
+                    .with_project(project.clone()),
+                );
                 continue;
             }
 
@@ -259,6 +297,7 @@ impl AgentAdapter for KimiAdapter {
                 tokens,
                 "message_merge",
             )
+            .with_project(project.clone())
         }));
 
         Ok(ParsedScan {
@@ -350,6 +389,44 @@ mod tests {
         assert_eq!(parsed.source.events[0].session_id, "session-a/main");
         assert_eq!(parsed.source.events[0].tokens.cache_read, 14_848);
         std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn workspace_id_resolves_to_its_real_root_and_only_through_the_mapping_file() {
+        let path = wire_file(
+            "workspace",
+            &["sessions", "wd_usage_abc", "session-a", "agents", "main"],
+            concat!(
+                r#"{"type":"usage.record","model":"kimi-code/kimi-for-coding","usage":{"inputOther":100,"output":10,"inputCacheRead":0,"inputCacheCreation":0},"usageScope":"turn","time":1782113184943}"#,
+                "\n",
+            ),
+        );
+        let sessions_dir = path
+            .ancestors()
+            .find(|dir| dir.file_name().and_then(|name| name.to_str()) == Some("sessions"))
+            .unwrap();
+        let data_dir = sessions_dir.parent().unwrap().to_path_buf();
+
+        // 没有 workspaces.json 时不拿工作区 ID 冒充路径。
+        let unmapped = KimiAdapter::with_roots(vec![])
+            .parse(&candidate_for(&path), i64::MIN)
+            .unwrap();
+        assert_eq!(unmapped.source.events[0].project_path, None);
+
+        std::fs::write(
+            data_dir.join("workspaces.json"),
+            r#"{"version":1,"workspaces":{"wd_usage_abc":{"root":"D:/work/usage","name":"usage"}}}"#,
+        )
+        .unwrap();
+        let mapped = KimiAdapter::with_roots(vec![])
+            .parse(&candidate_for(&path), i64::MIN)
+            .unwrap();
+
+        assert_eq!(
+            mapped.source.events[0].project_path.as_deref(),
+            Some("D:/work/usage")
+        );
+        std::fs::remove_dir_all(data_dir).ok();
     }
 
     #[test]

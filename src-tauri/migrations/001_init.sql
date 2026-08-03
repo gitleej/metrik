@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS usage_event (
     processed_tokens         INTEGER NOT NULL CHECK (processed_tokens >= 0),
     quality                  TEXT NOT NULL,
     payload_hash             TEXT NOT NULL,
+    project_path             TEXT,
     UNIQUE(adapter_id, event_key)
 );
 

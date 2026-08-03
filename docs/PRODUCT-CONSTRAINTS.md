@@ -26,6 +26,13 @@ change.
   session window looks. A reading whose reset moment has already passed
   describes a finished cycle and is never used as the current value.
 
+- Usage is grouped by project only from the working directory the source itself
+  records (`cwd`, or the session-to-directory mapping the agent maintains). Never
+  infer a project from a log path, a session title, or a workspace ID that has no
+  mapping to a real directory. Usage from a source that reports no directory is
+  counted as unattributed and shown as such; it is never folded into a project or
+  into an "other" bucket.
+
 ## Agent and adapter behavior
 
 - New data sources use the adapter contract. Source-specific parsing must not

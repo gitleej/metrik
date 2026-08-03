@@ -86,10 +86,37 @@ pub fn ensure_schema(connection: &Connection) -> Result<()> {
     connection
         .execute_batch(include_str!("../migrations/001_init.sql"))
         .context("failed to initialize usage database schema")?;
+    ensure_optional_columns(connection)?;
     connection
         .pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)
         .context("failed to record database schema version")?;
     Ok(())
+}
+
+/// 可空的后加列：老库用 `ALTER TABLE` 补上，不进 `REQUIRED_TABLES`。
+/// 进了兼容性判定就会把所有老账本判为不兼容而整库重建；这些列缺失时旧数据
+/// 依然可用（该列读出 NULL），随下一次重扫补齐即可。
+fn ensure_optional_columns(connection: &Connection) -> Result<()> {
+    for (table, column, definition) in [("usage_event", "project_path", "TEXT")] {
+        if !table_has_column(connection, table, column)? {
+            connection
+                .execute_batch(&format!(
+                    "ALTER TABLE {table} ADD COLUMN {column} {definition}"
+                ))
+                .with_context(|| format!("failed to add {table}.{column}"))?;
+        }
+    }
+    Ok(())
+}
+
+fn table_has_column(connection: &Connection, table: &str, column: &str) -> Result<bool> {
+    let mut statement = connection
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .with_context(|| format!("failed to inspect {table} schema"))?;
+    let columns: HashSet<String> = statement
+        .query_map([], |row| row.get(1))?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(columns.contains(column))
 }
 
 fn has_any_managed_table(connection: &Connection) -> Result<bool> {
@@ -182,6 +209,37 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM scan_source", [], |row| row.get(0))
             .unwrap();
         assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn adds_optional_columns_to_a_ledger_that_predates_them() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(include_str!("../migrations/001_init.sql"))
+            .unwrap();
+        // 回到加列之前的形态：其余表都在，只有这一列缺失。
+        connection
+            .execute_batch(
+                "ALTER TABLE usage_event DROP COLUMN project_path;
+                 INSERT INTO usage_event VALUES (
+                     'keep', 'codex', 'key', 1, 'session', 'gpt-5.2',
+                     1, 0, 0, 1, 0, 2, 'exact', 'hash'
+                 );",
+            )
+            .unwrap();
+        assert!(!table_has_column(&connection, "usage_event", "project_path").unwrap());
+
+        ensure_schema(&connection).unwrap();
+
+        assert!(table_has_column(&connection, "usage_event", "project_path").unwrap());
+        let kept: Option<String> = connection
+            .query_row(
+                "SELECT project_path FROM usage_event WHERE event_id = 'keep'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(kept, None);
     }
 
     #[test]

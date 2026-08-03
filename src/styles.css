@@ -18,6 +18,15 @@
   --warn: #d99a2b;
   --critical: #d4553f;
   --motion: cubic-bezier(0.2, 0, 0, 1);
+  /* 项目分类色：固定顺序，经 CVD 与对比度校验（dataviz 参考色板，白底通过；
+     三个 <3:1 的浅色按 relief 规则由行列表逐行直接标注兜底）。 */
+  --viz-1: #2a78d6;
+  --viz-2: #eb6834;
+  --viz-3: #1baf7a;
+  --viz-4: #eda100;
+  --viz-5: #e87ba4;
+  --viz-6: #008300;
+  --viz-other: #a7a9ae;
 }
 
 * { box-sizing: border-box; }
@@ -2989,8 +2998,6 @@ html:has(.strip-shell--glass-ink-light) #root {
   scrollbar-color: rgba(31, 33, 36, 0.22) transparent;
 }
 
-.settings-header .section-kicker { font-size: 24px; }
-
 .settings-header h1 {
   margin: 10px 0 0;
   font-size: 34px;
@@ -3004,6 +3011,12 @@ html:has(.strip-shell--glass-ink-light) #root {
   font-size: 14px;
   line-height: 1.65;
   text-wrap: pretty;
+}
+
+/* 说明行里的粗体引导：承接原先的分区名（项目 / 近 26 周活动 / 外观…）。 */
+.settings-header p strong {
+  color: #26282b;
+  font-weight: 580;
 }
 
 .settings-demo-note {
@@ -3343,10 +3356,10 @@ html:has(.strip-shell--glass-ink-light) #root {
   border-radius: 11px;
 }
 
-.usage-toolbar .ledger-button {
-  margin-left: auto;
-  padding: 0 16px;
-}
+.usage-toolbar .ledger-button { padding: 0 16px; }
+
+/* 右侧按钮组：规则开关把后续按钮一起推到右缘。 */
+.usage-toolbar .rules-toggle { margin-left: auto; }
 
 .session-group { margin-top: 26px; }
 
@@ -3399,6 +3412,352 @@ html:has(.strip-shell--glass-ink-light) #root {
 .session-id-chip--copied { color: #4a7a43; background: rgba(92, 156, 77, 0.12); }
 
 .session-row:last-child { box-shadow: none; }
+
+/* --- 用量页主从结构：上半项目汇总、下半会话明细 --- */
+
+/* 项目行：整行可点用于筛选会话；末列宽度与会话行的 token 列对齐。 */
+.project-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 56px 14px 74px;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 8px 12px 10px;
+  margin-inline: -6px;
+  border-radius: 12px;
+  box-shadow: 0 1px rgba(31, 33, 36, 0.07);
+  cursor: pointer;
+  transition: background-color 180ms var(--motion);
+}
+
+.project-row:last-of-type { box-shadow: none; }
+.project-row:hover { background: rgba(31, 33, 36, 0.035); }
+
+.project-row .session-copy strong {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.project-row .session-copy strong svg { color: #83858a; flex: none; }
+
+.project-row > em {
+  color: #2b2d31;
+  font-size: 13px;
+  font-style: normal;
+  font-weight: 580;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+/* 行内操作：默认隐身，悬停或聚焦时浮现，不干扰扫读。 */
+.project-actions {
+  display: inline-flex;
+  gap: 2px;
+  justify-content: flex-end;
+  opacity: 0;
+  transition: opacity 180ms var(--motion);
+}
+
+.project-row:hover .project-actions,
+.project-row:focus-within .project-actions { opacity: 1; }
+
+.project-actions button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  color: #6a6c70;
+  background: transparent;
+  border: 0;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: color 160ms var(--motion), background-color 160ms var(--motion);
+}
+
+.project-actions button:hover {
+  color: #26282b;
+  background: rgba(31, 33, 36, 0.08);
+}
+
+.project-actions button:disabled { opacity: 0.4; cursor: default; }
+
+/* 相对占比条：只表达同一列表内的相对量级，不标数值。 */
+.project-bar {
+  display: block;
+  height: 5px;
+  margin-top: 4px;
+  overflow: hidden;
+  background: rgba(31, 33, 36, 0.08);
+  border-radius: 3px;
+}
+
+.project-bar i {
+  display: block;
+  height: 100%;
+  /* 排名进入前 6 的项目由行内 style 覆盖为分类色，其余保持中性灰。 */
+  background: rgba(31, 33, 36, 0.32);
+  border-radius: 3px;
+  transition: width 300ms var(--motion);
+}
+
+/* 项目占比环形 + 汇总数字。 */
+.project-overview {
+  display: flex;
+  align-items: center;
+  gap: 30px;
+  padding: 14px 4px 18px;
+}
+
+.project-donut {
+  flex: none;
+  width: 200px;
+  height: 200px;
+}
+
+.project-donut-segment { cursor: pointer; transition: stroke-width 180ms var(--motion); }
+
+.project-overview-figures {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.project-overview-figures strong {
+  color: #17181a;
+  font-family: "Newsreader", Georgia, serif;
+  font-size: 40px;
+  font-weight: 400;
+  font-variant-numeric: lining-nums tabular-nums;
+  letter-spacing: -0.03em;
+  line-height: 1;
+}
+
+.project-overview-figures span {
+  color: #74767a;
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.project-overview-figures small {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  color: #83858a;
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.project-overview-figures small button {
+  padding: 0;
+  color: #83858a;
+  font: inherit;
+  background: none;
+  border: 0;
+  border-bottom: 1px dashed rgba(31, 33, 36, 0.25);
+  cursor: pointer;
+  transition: color 160ms var(--motion);
+}
+
+.project-overview-figures small button:hover { color: #26282b; }
+
+.project-expand {
+  margin-top: 10px;
+  padding: 6px 12px;
+  color: #55575b;
+  font-size: 12px;
+  background: rgba(31, 33, 36, 0.05);
+  border: 0;
+  border-radius: 9px;
+  cursor: pointer;
+  transition: color 160ms var(--motion), background-color 160ms var(--motion);
+}
+
+.project-expand:hover { color: #202124; background: rgba(31, 33, 36, 0.09); }
+
+/* 详情页返回入口：位于 kicker 与标题之间的轻量链接。 */
+.detail-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  width: fit-content;
+  margin: 4px 0 2px;
+  padding: 0;
+  color: #55575b;
+  font-size: 12.5px;
+  background: none;
+  border: 0;
+  cursor: pointer;
+  transition: color 160ms var(--motion);
+}
+
+.detail-back:hover { color: #17181a; }
+
+/* 详情标题前的项目色点，与列表占比条同色。 */
+.project-title-dot {
+  display: inline-block;
+  width: 11px;
+  height: 11px;
+  margin-right: 10px;
+  border-radius: 50%;
+  vertical-align: 4px;
+}
+
+/* 行尾的进入指示：默认极淡，悬停加深。 */
+.project-open {
+  display: inline-flex;
+  justify-content: center;
+  color: rgba(31, 33, 36, 0.22);
+  transition: color 160ms var(--motion);
+}
+
+.project-row:hover .project-open { color: #55575b; }
+
+/* 详情页工具栏只有一颗导出按钮时也贴右缘。 */
+.usage-toolbar .usage-toolbar-end { margin-left: auto; }
+
+.session-board .session-group { margin-top: 18px; }
+
+.session-board .session-group h3 {
+  margin: 0 0 6px;
+  color: #74767a;
+  font-size: 12px;
+  font-weight: 560;
+  letter-spacing: 0.02em;
+}
+
+/* --- 分组规则面板 --- */
+
+.rules-card {
+  margin-top: 14px;
+  padding: 18px 20px;
+  background: #fff;
+  border-radius: 14px;
+  box-shadow: 0 1px 3px rgba(28, 30, 33, 0.07), 0 0 0 1px rgba(31, 33, 36, 0.05);
+}
+
+.rules-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.rules-card-head h2 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.rules-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  color: #6a6c70;
+  background: transparent;
+  border: 0;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.rules-close:hover { color: #26282b; background: rgba(31, 33, 36, 0.07); }
+
+.rules-card > p {
+  margin: 8px 0 0;
+  color: #74767a;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.rules-add {
+  display: flex;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.rules-add input {
+  flex: 1;
+  min-width: 0;
+  min-height: 36px;
+  padding: 0 12px;
+  color: #26282b;
+  font: inherit;
+  font-size: 12.5px;
+  background: rgba(31, 33, 36, 0.04);
+  border: 1px solid rgba(31, 33, 36, 0.1);
+  border-radius: 10px;
+}
+
+.rules-add input:focus {
+  outline: none;
+  background: #fff;
+  border-color: rgba(31, 33, 36, 0.3);
+}
+
+.rules-group { margin-top: 14px; }
+
+.rules-group h3 {
+  margin: 0 0 6px;
+  color: #74767a;
+  font-size: 11.5px;
+  font-weight: 560;
+  letter-spacing: 0.02em;
+}
+
+.rules-group ul {
+  display: grid;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.rules-group li {
+  display: grid;
+  grid-template-columns: 14px minmax(0, 1fr) 24px;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: #3c3e42;
+}
+
+.rules-group li:hover { background: rgba(31, 33, 36, 0.04); }
+.rules-group li svg { color: #83858a; }
+
+.rules-group li span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rules-group li button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  color: #83858a;
+  background: transparent;
+  border: 0;
+  border-radius: 7px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 160ms var(--motion);
+}
+
+.rules-group li:hover button,
+.rules-group li button:focus-visible { opacity: 1; }
+.rules-group li button:hover { color: #26282b; background: rgba(31, 33, 36, 0.08); }
+
+.rules-toggle { display: inline-flex; align-items: center; gap: 6px; }
+.rules-toggle--open { background: rgba(31, 33, 36, 0.09); }
 
 .session-copy { display: grid; gap: 4px; min-width: 0; }
 
@@ -3476,6 +3835,81 @@ html:has(.strip-shell--glass-ink-light) #root {
 }
 
 .report-grid .report-card { margin-top: 24px; }
+
+/* 项目走势：名称 + 26 周迷你折线 + 总量与近 7 天环比。 */
+.report-projects { margin-top: 24px; }
+
+.project-trend-list {
+  display: grid;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.project-trend-list li {
+  display: grid;
+  grid-template-columns: minmax(120px, 200px) minmax(0, 1fr) 96px;
+  align-items: center;
+  gap: 18px;
+  padding: 9px 8px;
+  border-radius: 10px;
+}
+
+.project-trend-list li:hover { background: rgba(31, 33, 36, 0.03); }
+
+.project-trend-name { display: grid; gap: 2px; min-width: 0; }
+
+.project-trend-name span {
+  overflow: hidden;
+  color: #26282b;
+  font-size: 13.5px;
+  font-weight: 540;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-trend-name small {
+  color: #83858a;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.project-sparkline {
+  width: 100%;
+  height: 26px;
+  color: #55575b;
+}
+
+.project-sparkline rect { fill: currentColor; opacity: 0.4; }
+.project-sparkline rect:last-child { opacity: 1; }
+
+.project-trend-figures {
+  display: grid;
+  gap: 2px;
+  justify-items: end;
+}
+
+.project-trend-figures em {
+  color: #2b2d31;
+  font-size: 13px;
+  font-style: normal;
+  font-weight: 580;
+  font-variant-numeric: tabular-nums;
+}
+
+.project-trend-figures small {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 用量上升不是好坏判断，只用中性色深浅区分方向。 */
+.trend-up { color: #55575b; }
+.trend-down { color: #83858a; }
+.trend-flat { color: #a7a9ae; }
 
 /* 热力图：蓝色序列（浅→深）编码日用量；空白天用中性灰。 */
 .heatmap {
@@ -3994,6 +4428,14 @@ html:has(.strip-shell--glass-ink-light) #root {
   --green: #7cc069;
   --warn: #dca648;
   --critical: #ec8468;
+  /* 项目分类色的暗色档：同一组色相按暗底重新取步，非直接翻转。 */
+  --viz-1: #3987e5;
+  --viz-2: #d95926;
+  --viz-3: #199e70;
+  --viz-4: #c98500;
+  --viz-5: #d55181;
+  --viz-6: #008300;
+  --viz-other: rgba(255, 255, 255, 0.35);
 
   /* 展开视图专用的暗色 token：文字梯度、卡片层级、描边与阴影。 */
   --d-strong: #f3f4f6;
@@ -4220,6 +4662,7 @@ html:has(.strip-shell--glass-ink-light) #root {
 
 /* --- 设置页 --- */
 :root[data-theme="dark"] .settings-header p { color: var(--d-muted); }
+:root[data-theme="dark"] .settings-header p strong { color: var(--d-ink-2); }
 :root[data-theme="dark"] .settings-demo-note {
   color: #e0c67c;
   background: rgba(220, 166, 72, 0.13);
@@ -4286,6 +4729,77 @@ html:has(.strip-shell--glass-ink-light) #root {
 :root[data-theme="dark"] .session-group h2 { color: var(--d-muted); }
 :root[data-theme="dark"] .session-row { box-shadow: 0 1px rgba(255, 255, 255, 0.07); }
 :root[data-theme="dark"] .session-row:last-child { box-shadow: none; }
+:root[data-theme="dark"] .project-row { box-shadow: 0 1px rgba(255, 255, 255, 0.07); }
+:root[data-theme="dark"] .project-row:last-of-type { box-shadow: none; }
+:root[data-theme="dark"] .project-row:hover { background: rgba(255, 255, 255, 0.045); }
+:root[data-theme="dark"] .project-row > em { color: var(--d-strong); }
+:root[data-theme="dark"] .project-row .session-copy strong svg { color: var(--d-muted); }
+:root[data-theme="dark"] .project-bar { background: rgba(255, 255, 255, 0.09); }
+:root[data-theme="dark"] .project-bar i { background: rgba(255, 255, 255, 0.42); }
+:root[data-theme="dark"] .session-board .session-group h3 { color: var(--d-muted); }
+:root[data-theme="dark"] .project-actions button { color: var(--d-muted); }
+:root[data-theme="dark"] .project-actions button:hover {
+  color: var(--d-strong);
+  background: rgba(255, 255, 255, 0.1);
+}
+:root[data-theme="dark"] .project-expand {
+  color: var(--d-ink-3);
+  background: rgba(255, 255, 255, 0.06);
+}
+:root[data-theme="dark"] .project-expand:hover {
+  color: var(--d-strong);
+  background: rgba(255, 255, 255, 0.1);
+}
+:root[data-theme="dark"] .rules-card {
+  background: var(--d-card);
+  box-shadow: var(--d-card-shadow);
+}
+:root[data-theme="dark"] .rules-card-head h2 { color: var(--d-strong); }
+:root[data-theme="dark"] .rules-card > p { color: var(--d-muted); }
+:root[data-theme="dark"] .rules-close { color: var(--d-muted); }
+:root[data-theme="dark"] .rules-close:hover {
+  color: var(--d-strong);
+  background: rgba(255, 255, 255, 0.08);
+}
+:root[data-theme="dark"] .rules-add input {
+  color: var(--d-ink-2);
+  background: var(--d-sunken);
+  border-color: var(--d-hairline);
+}
+:root[data-theme="dark"] .rules-add input:focus {
+  background: rgba(255, 255, 255, 0.02);
+  border-color: rgba(255, 255, 255, 0.3);
+}
+:root[data-theme="dark"] .rules-group h3 { color: var(--d-muted); }
+:root[data-theme="dark"] .rules-group li { color: var(--d-ink-2); }
+:root[data-theme="dark"] .rules-group li:hover { background: rgba(255, 255, 255, 0.05); }
+:root[data-theme="dark"] .rules-group li svg { color: var(--d-muted); }
+:root[data-theme="dark"] .rules-group li button { color: var(--d-muted); }
+:root[data-theme="dark"] .rules-group li button:hover {
+  color: var(--d-strong);
+  background: rgba(255, 255, 255, 0.1);
+}
+:root[data-theme="dark"] .rules-toggle--open { background: rgba(255, 255, 255, 0.12); }
+:root[data-theme="dark"] .detail-back { color: var(--d-ink-3); }
+:root[data-theme="dark"] .detail-back:hover { color: var(--d-strong); }
+:root[data-theme="dark"] .project-open { color: rgba(255, 255, 255, 0.2); }
+:root[data-theme="dark"] .project-row:hover .project-open { color: var(--d-ink-2); }
+:root[data-theme="dark"] .project-overview-figures strong { color: var(--d-strong); }
+:root[data-theme="dark"] .project-overview-figures span { color: var(--d-muted); }
+:root[data-theme="dark"] .project-overview-figures small { color: var(--d-muted); }
+:root[data-theme="dark"] .project-overview-figures small button {
+  color: var(--d-muted);
+  border-bottom-color: rgba(255, 255, 255, 0.25);
+}
+:root[data-theme="dark"] .project-overview-figures small button:hover { color: var(--d-strong); }
+:root[data-theme="dark"] .project-trend-list li:hover { background: rgba(255, 255, 255, 0.04); }
+:root[data-theme="dark"] .project-trend-name span { color: var(--d-strong); }
+:root[data-theme="dark"] .project-trend-name small { color: var(--d-muted); }
+:root[data-theme="dark"] .project-sparkline { color: var(--d-ink-3); }
+:root[data-theme="dark"] .project-trend-figures em { color: var(--d-strong); }
+:root[data-theme="dark"] .trend-up { color: var(--d-ink-2); }
+:root[data-theme="dark"] .trend-down { color: var(--d-muted); }
+:root[data-theme="dark"] .trend-flat { color: rgba(255, 255, 255, 0.3); }
 :root[data-theme="dark"] .session-id-chip {
   color: var(--d-muted);
   background: var(--d-sunken);

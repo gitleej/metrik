@@ -248,6 +248,9 @@ impl OpencodeAdapter {
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
         )
         .with_context(|| format!("failed to open {}", candidate.path.display()))?;
+        // 项目归属只在 SQLite 形态里可得：`session.directory`。旧的纯 JSON 文件
+        // 存储没有随消息落盘的工作目录，那批事件保持未归属。
+        let session_directories = super::opencode_session_directories(&connection);
         let mut statement = connection
             .prepare("SELECT id, session_id, data FROM message")
             .context("opencode.db 缺少预期的 message 表")?;
@@ -273,7 +276,8 @@ impl OpencodeAdapter {
             message.id = Some(message_id);
             message.session_id = message.session_id.take().or(session_id);
             if let Some(event) = usage_event(&candidate.path, message, cutoff_ms) {
-                events.push(event);
+                let project = session_directories.get(&event.session_id).cloned();
+                events.push(event.with_project(project));
             }
         }
         events.sort_by_key(|event| event.occurred_at_ms);
@@ -396,7 +400,9 @@ mod tests {
         let connection = rusqlite::Connection::open(&db_path).unwrap();
         connection
             .execute_batch(
-                "CREATE TABLE message (id TEXT, session_id TEXT, time_created INTEGER, data TEXT);",
+                "CREATE TABLE message (id TEXT, session_id TEXT, time_created INTEGER, data TEXT);
+                 CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT);
+                 INSERT INTO session VALUES ('ses_db', '/Users/alice/repo');",
             )
             .unwrap();
         // assistant 行：id/session 在列里，data 里没有（对齐真实库形状）。
@@ -439,6 +445,7 @@ mod tests {
         assert_eq!(event.occurred_at_ms, 1_784_000_009_000);
         assert_eq!(event.tokens.processed(), 2014 + 103 + 14784);
         assert_eq!(event.tokens.reasoning_output, 235);
+        assert_eq!(event.project_path.as_deref(), Some("/Users/alice/repo"));
         assert!(!scans[0].diagnostics.is_partial());
     }
 
