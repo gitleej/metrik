@@ -3099,7 +3099,7 @@ function ProjectShareDonut({ projects, colorByPath, onOpen }) {
         return rendered;
       })}
       <text x="100" y="96" textAnchor="middle" className="donut-total">{compactTokens(total)}</text>
-      <text x="100" y="114" textAnchor="middle" className="donut-caption">tokens · 有归属</text>
+      <text x="100" y="114" textAnchor="middle" className="donut-caption">tokens</text>
     </svg>
   );
 }
