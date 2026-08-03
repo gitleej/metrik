@@ -4007,12 +4007,12 @@ function ReportsSection({ report }) {
           <ReportShareDonut agents={rangeAgents} totalTokens={rangeTotal} weeksCount={trendWeeks.length} />
         ) : (
           <>
-        <div className="heatmap-months" aria-hidden="true">
+        <div className="heatmap-months" style={{ "--heatmap-weeks": weeks.length }} aria-hidden="true">
           {monthLabels.map((month) => (
             <span key={month.index} style={{ gridColumnStart: month.index + 1 }}>{month.label}</span>
           ))}
         </div>
-        <div className="heatmap" role="img" aria-label="近 26 周每日 token 用量热力图，颜色越深用量越大">
+        <div className="heatmap" style={{ "--heatmap-weeks": weeks.length }} role="img" aria-label="近 26 周每日 token 用量热力图，颜色越深用量越大">
           {weeks.map((week, weekIndex) => (
             <div className="heatmap-week" key={weekIndex}>
               {week.map((cell, dayIndex) => (
