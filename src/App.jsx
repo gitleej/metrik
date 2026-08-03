@@ -22,6 +22,7 @@ import {
   Database,
   EyeSlash,
   FileText,
+  FolderSimple,
   FunnelSimple,
   GearSix,
   HardDrives,
@@ -2951,7 +2952,7 @@ function projectLabel(path) {
   return parts[parts.length - 1] || path;
 }
 
-// 分组规则面板：登记项目根、隐藏目录，列出已有规则并可移除。
+// 项目归类设置：登记项目根、隐藏目录，列出已有规则并可移除。
 function ProjectRulesCard({ rules, busy, onAddRoot, onRemoveRoot, onRemoveHidden, onClose }) {
   const [draft, setDraft] = useState("");
   const submit = () => {
@@ -2961,16 +2962,16 @@ function ProjectRulesCard({ rules, busy, onAddRoot, onRemoveRoot, onRemoveHidden
     setDraft("");
   };
   return (
-    <section className="rules-card" aria-label="项目分组规则">
+    <section className="rules-card" aria-label="项目归类设置">
       <header className="rules-card-head">
-        <h2>分组规则</h2>
-        <button type="button" className="rules-close" onClick={onClose} aria-label="收起规则面板">
+        <h2>项目归类</h2>
+        <button type="button" className="rules-close" onClick={onClose} aria-label="收起项目归类设置">
           <X size={14} weight="bold" aria-hidden="true" />
         </button>
       </header>
       <p>
-        账本始终记录事件发生时的原始目录，规则只改变展示时的归并，移除规则即恢复。
-        未命中规则的目录自动向上合并到 git 仓库根；家目录、下载与系统临时目录默认不列为项目。
+        决定哪些目录算作一个项目。默认按 git 仓库根归并，家目录、下载与系统临时目录不列为项目。
+        账本始终记录事件发生时的原始目录，这里只改变展示时的归类，移除后即恢复。
       </p>
       <div className="rules-add">
         <input
@@ -3022,7 +3023,7 @@ function ProjectRulesCard({ rules, busy, onAddRoot, onRemoveRoot, onRemoveHidden
             </div>
           )}
           {rules.roots.length === 0 && rules.hidden.length === 0 && (
-            <p className="settings-muted">还没有手动规则。在项目行上点「归并」或「隐藏」，或在上方登记目录。</p>
+            <p className="settings-muted">还没有手动归类。在项目行上点图钉或眼睛，或在上方登记目录。</p>
           )}
         </>
       )}
@@ -3413,8 +3414,8 @@ ${session.sessionId}`}
           aria-expanded={rulesOpen}
           onClick={() => setRulesOpen((open) => !open)}
         >
-          <FunnelSimple size={13} weight="bold" aria-hidden="true" />
-          分组规则
+          <FolderSimple size={13} weight="bold" aria-hidden="true" />
+          项目归类
         </button>
         <button
           type="button"
@@ -3561,7 +3562,7 @@ ${session.sessionId}`}
               <button
                 type="button"
                 disabled={rulesBusy}
-                title={`隐藏 ${project.path}：其用量不再作为项目展示，可在分组规则里恢复`}
+                title={`隐藏 ${project.path}：其用量不再作为项目展示，可在项目归类里恢复`}
                 aria-label={`隐藏项目 ${project.label}`}
                 onClick={() => hideProject(project)}
               >
