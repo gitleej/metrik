@@ -192,6 +192,12 @@ function normalizeVisibleAgentList(agentIds) {
   );
 }
 
+/// 用户在设置里排出的顺序优先，其余按注册表顺序垫后。设置面板、小组件、
+/// 完整视图侧栏共用这一份顺序，改一处四处同步。
+function agentIdsInDisplayOrder(preferred) {
+  return [...preferred, ...AGENT_ORDER.filter((agentId) => !preferred.includes(agentId))];
+}
+
 // 胶囊条首帧尺寸估计：横条一格约 68px 宽；竖条是横条立起来的窄长条，
 // 一格约 54px 高（图标/百分比/进度条纵向堆叠）。
 // 这些常量只用于进入 strip 的第一帧，之后的窗口尺寸由 StripBar 里的
@@ -819,20 +825,36 @@ function AgentMark({ agentId }) {
   );
 }
 
-function Inspector({ snapshot, selectedAgent, onSelectAgent, onOpenSources }) {
+function Inspector({ snapshot, selectedAgent, onSelectAgent, onOpenSources, widgetAgents }) {
   const dataUnavailable = snapshot.pending || snapshot.loadError;
   const partial = snapshotIsPartial(snapshot);
-  // 用得最多的排最上面。后端按注册表顺序返回，那个顺序对读者没有意义。
-  // Array.sort 是稳定的：并列（尤其一堆 0）时保持注册表顺序，不会每次刷新乱跳。
-  const rankedAgents = [...snapshot.agents].sort((left, right) => right.tokens - left.tokens);
+  const chosen = new Set(widgetAgents);
+  // 侧栏两块都只留用户勾选的 Agent，外加本周期确有用量的。勾选的含义是「即使
+  // 为 0 也留一行」，有用量则一律不藏——否则装了七个 Agent 的机器上半屏都是
+  // "0 tokens 0.0%" 的死行，而单靠勾选又会把真实用量从统计软件里抹掉。
+  // 图表、Token 构成、成本估算不受此影响，顶部总量始终等于全部 Agent 之和。
+  const keepsRow = (agent) =>
+    // 数据还没到位时不按用量过滤：那会儿人人都是 0，滤完只剩勾选的两行，
+    // 快照一到又跳回七行。
+    dataUnavailable ||
+    chosen.has(agent.id) ||
+    agent.tokens > 0 ||
+    // 当前用作筛选的那个始终留一行：否则切到它没有用量的周期时行会消失，
+    // 图表还筛着它，却再没有可点的地方把筛选取消掉。
+    agent.id === selectedAgent;
+  const rankedAgents = [...snapshot.agents]
+    .filter(keepsRow)
+    // 用得最多的排最上面。后端按注册表顺序返回，那个顺序对读者没有意义。
+    // Array.sort 是稳定的：并列（尤其一堆 0）时保持注册表顺序，不会每次刷新乱跳。
+    .sort((left, right) => right.tokens - left.tokens);
   return (
     <aside className="inspector" aria-label="配额与 Agent 明细">
       <div className="quota-groups" aria-label="各 Agent 官方配额">
-        {AGENT_ORDER.map((agentId) => {
+        {agentIdsInDisplayOrder(widgetAgents).map((agentId) => {
           const entry = agentQuotaFor(snapshot, agentId);
           const hasData = quotaHasData(entry);
-          // 没有配额来源的可选 Agent 不占版面；Codex 与 Claude 始终显示。
-          if (!hasData && !["codex", "claude"].includes(agentId)) return null;
+          // 勾选的 Agent 即使没有配额来源也占一行——"暂无可靠来源"本身是有效信息。
+          if (!hasData && !chosen.has(agentId)) return null;
           const provenanceView = entry.windows?.find((window) => window.view.available)?.view;
           return (
             <section className="quota-group" key={agentId}>
@@ -2411,10 +2433,7 @@ function AppearanceCard({ theme, onThemeChange, glassAlpha, onGlassAlpha, glassT
 
 function AgentListColumn({ title, hint, agents, onToggle, onMove }) {
   // 已选的按显示顺序排前面，未选的按默认顺序垫后。
-  const rows = [
-    ...agents,
-    ...AGENT_ORDER.filter((agentId) => !agents.includes(agentId)),
-  ];
+  const rows = agentIdsInDisplayOrder(agents);
   return (
     <div className="settings-agent-column">
       <h3>{title}</h3>
@@ -2460,12 +2479,12 @@ function AgentsDisplayCard({ widgetAgents, onToggleWidgetAgent, onMoveWidgetAgen
     <div className="settings-card">
       <h2>显示的 Agent</h2>
       <p className="settings-muted">
-        勾选即展示（至少保留一个），顺序即显示顺序，↑ 上移。完整视图始终展示全部。
+        勾选即展示（至少保留一个），顺序即显示顺序，↑ 上移。
       </p>
       <div className="settings-agent-columns">
         <AgentListColumn
-          title={IS_MAC ? "菜单栏与小组件" : "小组件"}
-          hint="桌面小插件里的行。"
+          title={IS_MAC ? "菜单栏、小组件与侧栏" : "小组件与侧栏"}
+          hint="完整视图侧栏还会自动补上本周期有用量的 Agent。"
           agents={widgetAgents}
           onToggle={onToggleWidgetAgent}
           onMove={onMoveWidgetAgent}
@@ -5029,6 +5048,7 @@ export function App() {
                 selectedAgent={selectedAgent}
                 onSelectAgent={setSelectedAgent}
                 onOpenSources={() => setDrawerOpen(true)}
+                widgetAgents={widgetAgents}
               />
             </div>
           </>
