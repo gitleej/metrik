@@ -3694,12 +3694,29 @@ function smoothPath(points) {
 }
 
 function ReportTrendChart({ weeks }) {
+  // viewBox 宽度跟随容器实测宽度，缩放系数恒为 1：图表始终占满整行，
+  // 刻度字号也不再随窗口忽大忽小。固定 620 时，宽窗口下按高度约束缩放，
+  // 只画得出 720px，左右各空几百像素。
+  const hostRef = useRef(null);
+  const [width, setWidth] = useState(620);
+  useLayoutEffect(() => {
+    const host = hostRef.current;
+    if (!host) return undefined;
+    const apply = (value) => setWidth(Math.max(420, Math.round(value)));
+    apply(host.clientWidth);
+    const observer = new ResizeObserver((entries) => {
+      const rect = entries[0]?.contentRect;
+      if (rect) apply(rect.width);
+    });
+    observer.observe(host);
+    return () => observer.disconnect();
+  }, []);
+
   const agents = AGENT_ORDER.filter((id) => weeks.some((week) => (week.byAgent[id] || 0) > 0));
   if (!agents.length) {
-    return <p className="settings-muted">所选时间段内没有已索引的用量。</p>;
+    return <p className="settings-muted" ref={hostRef}>所选时间段内没有已索引的用量。</p>;
   }
   const max = Math.max(1, ...weeks.flatMap((week) => agents.map((id) => week.byAgent[id] || 0)));
-  const width = 620;
   const height = 210;
   const pad = { top: 12, right: 8, bottom: 22, left: 8 };
   const x = (index) => pad.left + (index / Math.max(1, weeks.length - 1)) * (width - pad.left - pad.right);
@@ -3711,7 +3728,7 @@ function ReportTrendChart({ weeks }) {
   const gridValues = [max / 2, max];
 
   return (
-    <div>
+    <div ref={hostRef}>
       <svg
         className="report-trend"
         viewBox={`0 0 ${width} ${height}`}
@@ -4007,12 +4024,12 @@ function ReportsSection({ report }) {
           <ReportShareDonut agents={rangeAgents} totalTokens={rangeTotal} weeksCount={trendWeeks.length} />
         ) : (
           <>
-        <div className="heatmap-months" aria-hidden="true">
+        <div className="heatmap-months" style={{ "--heatmap-weeks": weeks.length }} aria-hidden="true">
           {monthLabels.map((month) => (
             <span key={month.index} style={{ gridColumnStart: month.index + 1 }}>{month.label}</span>
           ))}
         </div>
-        <div className="heatmap" role="img" aria-label="近 26 周每日 token 用量热力图，颜色越深用量越大">
+        <div className="heatmap" style={{ "--heatmap-weeks": weeks.length }} role="img" aria-label="近 26 周每日 token 用量热力图，颜色越深用量越大">
           {weeks.map((week, weekIndex) => (
             <div className="heatmap-week" key={weekIndex}>
               {week.map((cell, dayIndex) => (

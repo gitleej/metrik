@@ -3875,6 +3875,9 @@ html:has(.strip-shell--glass-ink-light) #root {
   display: grid;
   align-content: center;
   gap: 2px;
+  /* 与热力图、环形一样给个宽度上限：sparkline 用 preserveAspectRatio="none"
+     横向铺满，列再宽下去 26 根柱子会被拉成扁块，读不出柱状。 */
+  max-width: 820px;
   margin: 0;
   padding: 0;
   list-style: none;
@@ -3885,7 +3888,8 @@ html:has(.strip-shell--glass-ink-light) #root {
   grid-template-columns: minmax(110px, 190px) minmax(0, 1fr) 62px 52px;
   align-items: center;
   gap: 16px;
-  padding: 5px 8px;
+  /* 6px 内边距让后端上限的 8 行正好用满 272px 的视图体。 */
+  padding: 6px 8px;
   border-radius: 8px;
 }
 
@@ -3944,20 +3948,32 @@ html:has(.strip-shell--glass-ink-light) #root {
 .trend-flat { color: #a7a9ae; }
 
 /* 热力图：蓝色序列（浅→深）编码日用量；空白天用中性灰。 */
+/* 格子尺寸随卡片宽度伸缩：固定 13px 时 7 行只占 109px，在 272px 的视图体里
+   留下一大块空白。上限 780px 是为了超宽窗口下格子不至于变成大色块；窄到
+   每列 11px 以下就横向滚动，保证仍然认得出深浅。 */
 .heatmap {
   display: flex;
-  gap: 3px;
+  gap: 4px;
+  max-width: 780px;
   overflow-x: auto;
   padding-bottom: 4px;
 }
 
 .heatmap-week {
   display: grid;
-  flex: 0 0 auto;
-  gap: 3px;
+  flex: 1 1 0;
+  min-width: 11px;
+  gap: 4px;
 }
 
-.heatmap i,
+.heatmap i {
+  display: block;
+  width: 100%;
+  aspect-ratio: 1;
+  border-radius: 3px;
+}
+
+/* 图例格子不参与伸缩，保持固定小尺寸。 */
 .heatmap-scale i {
   display: block;
   width: 13px;
@@ -3974,8 +3990,9 @@ html:has(.strip-shell--glass-ink-light) #root {
 
 .heatmap-months {
   display: grid;
-  grid-auto-columns: 16px;
-  grid-auto-flow: column;
+  grid-template-columns: repeat(var(--heatmap-weeks, 27), minmax(0, 1fr));
+  gap: 4px;
+  max-width: 780px;
   margin-bottom: 6px;
   color: #83858a;
   font-size: 10px;
@@ -4095,18 +4112,17 @@ html:has(.strip-shell--glass-ink-light) #root {
 .report-donut {
   display: grid;
   align-items: center;
-  grid-template-columns: 200px minmax(0, 1fr);
-  gap: 28px;
-  max-width: 560px;
+  /* 始终两列。窄窗口下改成上下堆叠会让高度变成「环形 + 图例」之和，
+     在固定高度的视图体里必然溢出（Agent 越多越严重），所以让环形随列宽
+     收缩，高度取两者较大值。 */
+  grid-template-columns: minmax(96px, 240px) minmax(0, 1fr);
+  gap: min(30px, 4%);
+  max-width: 600px;
 }
 
-.report-donut svg { width: 200px; height: 200px; }
+.report-donut svg { width: 100%; height: auto; aspect-ratio: 1; }
 .donut-total { fill: #17181a; font-family: "Newsreader", Georgia, serif; font-size: 26px; }
 .donut-caption { fill: #83858a; font-size: 10px; }
-
-@media (max-width: 720px) {
-  .report-donut { grid-template-columns: 1fr; justify-items: center; }
-}
 
 .empty-section {
   grid-column: 2 / 4;
