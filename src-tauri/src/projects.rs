@@ -191,7 +191,8 @@ impl ProjectResolver {
 }
 
 /// 路径前缀匹配，按路径分段对齐（"D:/work/usa" 不匹配 "D:/work/usage"）。
-/// Windows 上大小写不敏感——不同 Agent 对同一目录的大小写记录可能不一致。
+/// Windows 与 macOS 上大小写不敏感——NTFS 与默认 APFS 都不区分大小写，
+/// 手动输入的规则路径与日志记录的大小写可能不一致；Linux 保持区分。
 fn is_within(path: &str, root: &str) -> bool {
     if root.is_empty() {
         return false;
@@ -203,11 +204,15 @@ fn is_within(path: &str, root: &str) -> bool {
 }
 
 fn path_equals(left: &str, right: &str) -> bool {
-    if cfg!(windows) {
+    if path_compare_ignores_case() {
         left.eq_ignore_ascii_case(right)
     } else {
         left == right
     }
+}
+
+fn path_compare_ignores_case() -> bool {
+    cfg!(any(windows, target_os = "macos"))
 }
 
 /// 按字节比较前缀：路径可能含多字节字符（中文目录名），在任意字节位置
@@ -219,7 +224,7 @@ fn starts_with_ci(path: &str, prefix: &str) -> bool {
 }
 
 fn ascii_insensitive_eq(left: &[u8], right: &[u8]) -> bool {
-    if cfg!(windows) {
+    if path_compare_ignores_case() {
         left.eq_ignore_ascii_case(right)
     } else {
         left == right
@@ -330,6 +335,25 @@ mod tests {
             Resolution::Project {
                 path: "C:/Users/tester/code".into(),
                 pinned: false
+            }
+        );
+    }
+
+    /// NTFS 与默认 APFS 不区分大小写：手动输入的规则大小写和日志记录
+    /// 不一致时也要命中。Linux 区分大小写，此测试不适用。
+    #[test]
+    #[cfg(any(windows, target_os = "macos"))]
+    fn rule_matching_ignores_ascii_case_on_case_insensitive_platforms() {
+        let mut resolver = resolver(ProjectRules {
+            roots: vec!["/Users/tester/Work/Metrik".into()],
+            hidden: vec![],
+        });
+
+        assert_eq!(
+            resolver.resolve("/Users/tester/work/metrik/src"),
+            Resolution::Project {
+                path: "/Users/tester/Work/Metrik".into(),
+                pinned: true
             }
         );
     }
