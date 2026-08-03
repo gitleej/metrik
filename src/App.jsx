@@ -22,6 +22,7 @@ import {
   Database,
   EyeSlash,
   FileText,
+  FolderSimple,
   FunnelSimple,
   GearSix,
   HardDrives,
@@ -524,6 +525,7 @@ function QuotaBarRow({ label, view, windowKey, accent }) {
 /// 状态由灯和 state 这一行承担，不把"数据不完整"顶成入口的名字。
 /// "部分覆盖" 这种自造词读者看不懂，直接说清楚哪里不全。
 function sourceStatusCopy(snapshot, loading, partial) {
+  const indexingPending = snapshot.indexing?.pending || 0;
   if (snapshot.pending) {
     return {
       title: "正在读取",
@@ -538,6 +540,15 @@ function sourceStatusCopy(snapshot, loading, partial) {
       hint: "点此排查",
       state: "读取失败",
       detail: "本机日志读取失败。界面不会用演示数字顶替，点此查看数据来源。",
+    };
+  }
+  if (indexingPending > 0) {
+    return {
+      title: "补齐历史",
+      hint: `还剩 ${indexingPending}`,
+      // 侧栏那行不能换行，只放数字；完整说明走 title 与统计说明抽屉。
+      state: `补齐中 ${indexingPending}`,
+      detail: `正在补齐历史索引，还剩 ${indexingPending} 个日志文件。历史周期的数字尚不完整，会随补齐自动更新。`,
     };
   }
   if (partial) {
@@ -566,6 +577,7 @@ function sourceStatusCopy(snapshot, loading, partial) {
 
 function Sidebar({ activeNav, onNavChange, snapshot, loading }) {
   const partial = snapshotIsPartial(snapshot);
+  const indexing = (snapshot.indexing?.pending || 0) > 0;
   const sourceStatus = sourceStatusCopy(snapshot, loading, partial);
   return (
     <aside className="sidebar" aria-label="主导航">
@@ -597,7 +609,7 @@ function Sidebar({ activeNav, onNavChange, snapshot, loading }) {
         onClick={() => onNavChange("sources")}
         title={sourceStatus.detail}
       >
-        <span className={`status-dot ${loading ? "status-dot--loading" : ""} ${snapshot.loadError ? "status-dot--error" : ""} ${partial ? "status-dot--warning" : ""}`} />
+        <span className={`status-dot ${loading || indexing ? "status-dot--loading" : ""} ${snapshot.loadError ? "status-dot--error" : ""} ${partial && !indexing ? "status-dot--warning" : ""}`} />
         <span>数据统计</span>
         <small>{sourceStatus.state}</small>
       </button>
@@ -1756,6 +1768,16 @@ function SourceDrawer({ snapshot, onClose, onRebuildLedger, rebuildState }) {
             <X size={21} weight="light" />
           </button>
         </header>
+
+        {(snapshot.indexing?.pending || 0) > 0 && (
+          <div className="indexing-note" role="status">
+            <ClockCounterClockwise size={20} weight="light" aria-hidden="true" />
+            <p>
+              正在补齐历史索引，还剩 <strong>{snapshot.indexing.pending}</strong> 个日志文件。
+              历史周期的数字尚不完整，会随补齐自动更新。
+            </p>
+          </div>
+        )}
 
         <div className="source-list">
           {snapshot.sources.map((source) => (
@@ -2930,7 +2952,7 @@ function projectLabel(path) {
   return parts[parts.length - 1] || path;
 }
 
-// 分组规则面板：登记项目根、隐藏目录，列出已有规则并可移除。
+// 项目归类设置：登记项目根、隐藏目录，列出已有规则并可移除。
 function ProjectRulesCard({ rules, busy, onAddRoot, onRemoveRoot, onRemoveHidden, onClose }) {
   const [draft, setDraft] = useState("");
   const submit = () => {
@@ -2940,16 +2962,16 @@ function ProjectRulesCard({ rules, busy, onAddRoot, onRemoveRoot, onRemoveHidden
     setDraft("");
   };
   return (
-    <section className="rules-card" aria-label="项目分组规则">
+    <section className="rules-card" aria-label="项目归类设置">
       <header className="rules-card-head">
-        <h2>分组规则</h2>
-        <button type="button" className="rules-close" onClick={onClose} aria-label="收起规则面板">
+        <h2>项目归类</h2>
+        <button type="button" className="rules-close" onClick={onClose} aria-label="收起项目归类设置">
           <X size={14} weight="bold" aria-hidden="true" />
         </button>
       </header>
       <p>
-        账本始终记录事件发生时的原始目录，规则只改变展示时的归并，移除规则即恢复。
-        未命中规则的目录自动向上合并到 git 仓库根；家目录、下载与系统临时目录默认不列为项目。
+        决定哪些目录算作一个项目。默认按 git 仓库根归并，家目录、下载与系统临时目录不列为项目。
+        账本始终记录事件发生时的原始目录，这里只改变展示时的归类，移除后即恢复。
       </p>
       <div className="rules-add">
         <input
@@ -3001,7 +3023,7 @@ function ProjectRulesCard({ rules, busy, onAddRoot, onRemoveRoot, onRemoveHidden
             </div>
           )}
           {rules.roots.length === 0 && rules.hidden.length === 0 && (
-            <p className="settings-muted">还没有手动规则。在项目行上点「归并」或「隐藏」，或在上方登记目录。</p>
+            <p className="settings-muted">还没有手动归类。在项目行上点图钉或眼睛，或在上方登记目录。</p>
           )}
         </>
       )}
@@ -3113,7 +3135,7 @@ function UsageSection({ projectsState, sessionsState, period, onRulesChanged }) 
   const [detail, setDetail] = useState(null);
   const [showAllProjects, setShowAllProjects] = useState(false);
   const [copiedId, setCopiedId] = useState(null);
-  const [exportNote, setExportNote] = useState(null);
+  const [note, setNote] = useState(null);
   const [rulesOpen, setRulesOpen] = useState(false);
   const [rules, setRules] = useState(null);
   const [rulesBusy, setRulesBusy] = useState(false);
@@ -3141,7 +3163,7 @@ function UsageSection({ projectsState, sessionsState, period, onRulesChanged }) 
 
   const openDetail = (next) => {
     setModelFilter("all");
-    setExportNote(null);
+    setNote(null);
     setDetail(next);
   };
 
@@ -3152,7 +3174,7 @@ function UsageSection({ projectsState, sessionsState, period, onRulesChanged }) 
       setRules(saved);
       onRulesChanged();
     } catch (error) {
-      setExportNote(`规则保存失败：${error}`);
+      setNote({ text: `规则保存失败：${error}` });
     } finally {
       setRulesBusy(false);
     }
@@ -3166,10 +3188,6 @@ function UsageSection({ projectsState, sessionsState, period, onRulesChanged }) 
     const current = await currentRules();
     await applyRules({ ...current, roots: [...current.roots, path] });
   };
-  const hideProject = async (path) => {
-    const current = await currentRules();
-    await applyRules({ ...current, hidden: [...current.hidden, path] });
-  };
   const removeRoot = async (path) => {
     const current = await currentRules();
     await applyRules({ ...current, roots: current.roots.filter((item) => item !== path) });
@@ -3178,13 +3196,26 @@ function UsageSection({ projectsState, sessionsState, period, onRulesChanged }) 
     const current = await currentRules();
     await applyRules({ ...current, hidden: current.hidden.filter((item) => item !== path) });
   };
+  // 登记与取消登记同一颗按钮：图钉状态可逆，按钮也不会中途从 DOM 消失。
+  const togglePin = (project) => (
+    project.pinned ? removeRoot(project.path) : pinProject(project.path)
+  );
+  // 隐藏会让这一行消失，就地留一个撤销入口；规则面板仍是长期的恢复位置。
+  const hideProject = async (project) => {
+    const current = await currentRules();
+    await applyRules({ ...current, hidden: [...current.hidden, project.path] });
+    setNote({
+      text: `已隐藏 ${project.label}`,
+      undo: () => removeHidden(project.path),
+    });
+  };
 
   const noteExport = async (task) => {
     try {
       const savedPath = await task();
-      setExportNote(savedPath ? `已导出到 ${savedPath}` : "已开始下载");
+      setNote({ text: savedPath ? `已导出到 ${savedPath}` : "已开始下载" });
     } catch (error) {
-      setExportNote(`导出失败：${error}`);
+      setNote({ text: `导出失败：${error}` });
     }
   };
   const copySessionId = (sessionId) => {
@@ -3331,7 +3362,20 @@ ${session.sessionId}`}
           </button>
         </div>
 
-        {exportNote && <p className="settings-muted" role="status">{exportNote}</p>}
+        {note && (
+        <p className="usage-note" role="status">
+          {note.text}
+          {note.undo && (
+            <button
+              type="button"
+              disabled={rulesBusy}
+              onClick={() => { setNote(null); note.undo(); }}
+            >
+              撤销
+            </button>
+          )}
+        </p>
+      )}
         {groups.length === 0 && <p className="settings-muted">本周期内没有可显示的会话。</p>}
         {groups.length > 0 && <div className="report-card session-board">{renderSessionRows(groups)}</div>}
       </main>
@@ -3370,8 +3414,8 @@ ${session.sessionId}`}
           aria-expanded={rulesOpen}
           onClick={() => setRulesOpen((open) => !open)}
         >
-          <FunnelSimple size={13} weight="bold" aria-hidden="true" />
-          分组规则
+          <FolderSimple size={13} weight="bold" aria-hidden="true" />
+          项目归类
         </button>
         <button
           type="button"
@@ -3383,7 +3427,20 @@ ${session.sessionId}`}
         </button>
       </div>
 
-      {exportNote && <p className="settings-muted" role="status">{exportNote}</p>}
+      {note && (
+        <p className="usage-note" role="status">
+          {note.text}
+          {note.undo && (
+            <button
+              type="button"
+              disabled={rulesBusy}
+              onClick={() => { setNote(null); note.undo(); }}
+            >
+              撤销
+            </button>
+          )}
+        </p>
+      )}
 
       {rulesOpen && (
         <ProjectRulesCard
@@ -3451,7 +3508,10 @@ ${session.sessionId}`}
           <article
             className="project-row"
             key={project.path}
-            onClick={() => openDetail({ type: "project", path: project.path })}
+            onClick={(event) => {
+              if (event.target.closest?.(".project-actions")) return;
+              openDetail({ type: "project", path: project.path });
+            }}
             role="button"
             tabIndex={0}
             onKeyDown={(event) => {
@@ -3462,10 +3522,7 @@ ${session.sessionId}`}
             }}
           >
             <div className="session-copy">
-              <strong title={project.path}>
-                {project.label}
-                {project.pinned && <PushPinSimple size={11} weight="fill" aria-label="手动登记的项目根" />}
-              </strong>
+              <strong title={project.path}>{project.label}</strong>
               <small>
                 {project.agents.map((id) => AGENT_META[id]?.label || id).join(" · ")}
                 {project.model ? ` · ${modelDisplayName(project.model)}` : ""}
@@ -3481,24 +3538,33 @@ ${session.sessionId}`}
                 />
               </span>
             </div>
-            <div className="project-actions">
-              {!project.pinned && (
-                <button
-                  type="button"
-                  disabled={rulesBusy}
-                  title={`登记为项目根：${project.path} 下的子目录都归并到这一行`}
-                  aria-label={`把 ${project.label} 登记为项目根`}
-                  onClick={(event) => { event.stopPropagation(); pinProject(project.path); }}
-                >
-                  <PushPinSimple size={13} weight="regular" aria-hidden="true" />
-                </button>
-              )}
+            {/* 操作区整体阻断冒泡：按钮若在点击途中卸载，mouseup 会落到行上误触发进入详情。 */}
+            <div
+              className={`project-actions ${project.pinned ? "project-actions--pinned" : ""}`}
+              onClick={(event) => event.stopPropagation()}
+              onMouseDown={(event) => event.stopPropagation()}
+            >
+              <button
+                type="button"
+                className={project.pinned ? "is-active" : ""}
+                disabled={rulesBusy}
+                aria-pressed={project.pinned}
+                title={project.pinned
+                  ? `取消登记：${project.path} 下的子目录恢复各自成行`
+                  : `登记为项目根：${project.path} 下的子目录都归并到这一行`}
+                aria-label={project.pinned
+                  ? `取消登记项目根 ${project.label}`
+                  : `把 ${project.label} 登记为项目根`}
+                onClick={() => togglePin(project)}
+              >
+                <PushPinSimple size={13} weight={project.pinned ? "fill" : "regular"} aria-hidden="true" />
+              </button>
               <button
                 type="button"
                 disabled={rulesBusy}
-                title={`隐藏 ${project.path}：其用量不再作为项目展示，可在分组规则里恢复`}
+                title={`隐藏 ${project.path}：其用量不再作为项目展示，可在项目归类里恢复`}
                 aria-label={`隐藏项目 ${project.label}`}
-                onClick={(event) => { event.stopPropagation(); hideProject(project.path); }}
+                onClick={() => hideProject(project)}
               >
                 <EyeSlash size={13} weight="regular" aria-hidden="true" />
               </button>
@@ -3754,6 +3820,7 @@ const REPORT_VIEWS = [
   { id: "heatmap", label: "热力图" },
   { id: "trend", label: "周趋势" },
   { id: "share", label: "构成" },
+  { id: "projects", label: "项目" },
 ];
 
 // 周趋势/构成的统计时间段档位；热力图固定 26 周日历不参与。
@@ -3883,7 +3950,7 @@ function ReportsSection({ report }) {
               </button>
             ))}
           </div>
-          {view !== "heatmap" && (
+          {view !== "heatmap" && view !== "projects" && (
             <div className="report-view-toggle" role="group" aria-label="统计时间段">
               {REPORT_RANGE_WEEKS.map((num) => (
                 <button
@@ -3901,7 +3968,40 @@ function ReportsSection({ report }) {
         </div>
         {/* 固定高度：三种视图内容高度不同，卡片会随切换忽大忽小。 */}
         <div className="report-view-body">
-        {view === "trend" ? (
+        {view === "projects" ? (
+          (data.projects || []).length > 0 ? (
+            <ul className="project-trend-list">
+              {data.projects.map((project, index) => (
+                <li key={project.path}>
+                  <span className="project-trend-name" title={project.path}>
+                    {project.label}
+                    <small>{project.activeDays} 天</small>
+                  </span>
+                  <Sparkline
+                    points={project.weekly}
+                    color={index < PROJECT_COLOR_COUNT ? `var(--viz-${index + 1})` : "var(--viz-other)"}
+                  />
+                  <em>{compactTokens(project.tokens)}</em>
+                  {project.recentDeltaPercent != null ? (
+                    <small
+                      className={project.recentDeltaPercent >= 0 ? "trend-up" : "trend-down"}
+                      title="近 7 天相对再前 7 天"
+                    >
+                      {project.recentDeltaPercent >= 0
+                        ? <ArrowUp size={10} weight="bold" aria-hidden="true" />
+                        : <ArrowDown size={10} weight="bold" aria-hidden="true" />}
+                      {Math.abs(Math.round(project.recentDeltaPercent))}%
+                    </small>
+                  ) : (
+                    <small className="trend-flat">—</small>
+                  )}
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="settings-muted">这段时间的用量还没有可归属的项目。</p>
+          )
+        ) : view === "trend" ? (
           <ReportTrendChart weeks={trendWeeks} />
         ) : view === "share" ? (
           <ReportShareDonut agents={rangeAgents} totalTokens={rangeTotal} weeksCount={trendWeeks.length} />
@@ -3984,41 +4084,6 @@ function ReportsSection({ report }) {
         </section>
       </div>
 
-      {(data.projects || []).length > 0 && (
-        <section className="report-card report-projects" aria-label="项目走势">
-          <h2>项目走势</h2>
-          <ul className="project-trend-list">
-            {data.projects.map((project, index) => (
-              <li key={project.path}>
-                <div className="project-trend-name">
-                  <span title={project.path}>{project.label}</span>
-                  <small>{project.activeDays} 天活跃</small>
-                </div>
-                <Sparkline
-                  points={project.weekly}
-                  color={index < PROJECT_COLOR_COUNT ? `var(--viz-${index + 1})` : "var(--viz-other)"}
-                />
-                <div className="project-trend-figures">
-                  <em>{compactTokens(project.tokens)}</em>
-                  {project.recentDeltaPercent != null ? (
-                    <small
-                      className={project.recentDeltaPercent >= 0 ? "trend-up" : "trend-down"}
-                      title="近 7 天相对再前 7 天"
-                    >
-                      {project.recentDeltaPercent >= 0
-                        ? <ArrowUp size={10} weight="bold" aria-hidden="true" />
-                        : <ArrowDown size={10} weight="bold" aria-hidden="true" />}
-                      {Math.abs(Math.round(project.recentDeltaPercent))}%
-                    </small>
-                  ) : (
-                    <small className="trend-flat">—</small>
-                  )}
-                </div>
-              </li>
-            ))}
-          </ul>
-        </section>
-      )}
     </main>
   );
 }
@@ -4878,13 +4943,6 @@ export function App() {
           <ArrowsClockwise size={15} weight="light" aria-hidden="true" />
         </button>
         <Sidebar activeNav={activeNav} onNavChange={handleNavChange} snapshot={snapshot} loading={appBusy} />
-
-        {indexingPending > 0 ? (
-          <div className="indexing-banner" role="status">
-            <ClockCounterClockwise size={18} weight="light" aria-hidden="true" />
-            正在补齐历史索引，还剩 <strong>{indexingPending}</strong> 个日志文件。历史周期的数字尚不完整，会随补齐自动更新。
-          </div>
-        ) : null}
 
         {activeNav === "overview" ? (
           <>
