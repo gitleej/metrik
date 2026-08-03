@@ -8,6 +8,7 @@ import {
   ArrowsInSimple,
   ArrowsLeftRight,
   ArrowsOutSimple,
+  CaretLeft,
   CaretRight,
   ChartBar,
   ChartLineUp,
@@ -2669,9 +2670,8 @@ function SettingsSection({ onSnapshotRefresh, widgetAgents, onToggleWidgetAgent,
   return (
     <main className="settings-section" aria-labelledby="settings-title">
       <header className="settings-header">
-        <span className="section-kicker">设置</span>
-        <h1 id="settings-title">{activeTab.title}</h1>
-        <p>{activeTab.blurb}</p>
+        <h1 id="settings-title">设置</h1>
+        <p><strong>{activeTab.title}</strong> · {activeTab.blurb}</p>
       </header>
 
       <div className="settings-tabs" role="tablist" aria-label="设置分类">
@@ -3011,12 +3011,106 @@ function ProjectRulesCard({ rules, busy, onAddRoot, onRemoveRoot, onRemoveHidden
 
 const PROJECT_PREVIEW_COUNT = 8;
 
-// 用量页：上半项目汇总、下半会话明细的主从结构。点击项目行筛选会话；
-// 行内可把目录登记为项目根（归并子目录）或隐藏。
+// 项目分类色：经 CVD/对比度校验的固定顺序（styles.css 里的 --viz-1..6），
+// 按周期内 token 排名前 6 依序分配，之后统一入"其他"灰。颜色跟随项目路径，
+// Agent 筛选不重新分配，避免筛选后颜色跳变。
+const PROJECT_COLOR_COUNT = 6;
+
+function projectColorMap(projects) {
+  const map = new Map();
+  projects.slice(0, PROJECT_COLOR_COUNT).forEach((project, index) => {
+    map.set(project.path, `var(--viz-${index + 1})`);
+  });
+  return map;
+}
+
+// 项目总表导出：与账本口径一致的统计字段。
+function buildProjectsCsv(projects) {
+  const header = ["project", "path", "agents", "model", "tokens", "input_uncached", "cache_read", "cache_write", "output", "estimated_usd", "sessions", "events", "last_used"];
+  const rows = projects.map((project) => [
+    project.label,
+    project.path,
+    project.agents.join(" "),
+    project.model || "",
+    project.tokens,
+    project.inputUncached,
+    project.cacheRead,
+    project.cacheWrite,
+    project.output,
+    project.usd == null ? "" : project.usd.toFixed(4),
+    project.sessionCount,
+    project.eventCount,
+    new Date(project.lastMs).toLocaleString("sv-SE"),
+  ]);
+  return `﻿${[header, ...rows].map((row) => row.map(csvEscape).join(",")).join("\r\n")}`;
+}
+
+async function exportProjectsCsv(projects) {
+  return saveCsv(
+    `metrik-projects-${new Date().toLocaleDateString("sv-SE")}.csv`,
+    buildProjectsCsv(projects),
+  );
+}
+
+// 项目占比环形图：与报告页 Agent 占比同一视觉语言；段间留白 2.5，
+// 点击分段进入对应项目详情。"其他"聚合段不可点。
+function ProjectShareDonut({ projects, colorByPath, onOpen }) {
+  const total = projects.reduce((sum, project) => sum + project.tokens, 0) || 1;
+  const top = projects.slice(0, PROJECT_COLOR_COUNT);
+  const otherTokens = projects.slice(PROJECT_COLOR_COUNT).reduce((sum, project) => sum + project.tokens, 0);
+  const segments = [
+    ...top.map((project) => ({
+      key: project.path,
+      label: project.label,
+      tokens: project.tokens,
+      color: colorByPath.get(project.path),
+      selectable: true,
+    })),
+    ...(otherTokens > 0
+      ? [{ key: "__other", label: "其他", tokens: otherTokens, color: "var(--viz-other)", selectable: false }]
+      : []),
+  ];
+  const radius = 74;
+  const circumference = 2 * Math.PI * radius;
+  let offset = 0;
+  return (
+    <svg className="project-donut" viewBox="0 0 200 200" role="img" aria-label="项目用量占比环形图">
+      {segments.map((segment) => {
+        const dash = (segment.tokens / total) * circumference;
+        const rendered = (
+          <circle
+            key={segment.key}
+            cx="100"
+            cy="100"
+            r={radius}
+            fill="none"
+            stroke={segment.color}
+            strokeWidth="21"
+            strokeDasharray={`${Math.max(0, dash - 2.5)} ${circumference - Math.max(0, dash - 2.5)}`}
+            strokeDashoffset={-offset}
+            transform="rotate(-90 100 100)"
+            className={segment.selectable ? "project-donut-segment" : undefined}
+            onClick={segment.selectable ? () => onOpen(segment.key) : undefined}
+          >
+            <title>{`${segment.label} · ${compactTokens(segment.tokens)} · ${((segment.tokens / total) * 100).toFixed(1)}%`}</title>
+          </circle>
+        );
+        offset += dash;
+        return rendered;
+      })}
+      <text x="100" y="96" textAnchor="middle" className="donut-total">{compactTokens(total)}</text>
+      <text x="100" y="114" textAnchor="middle" className="donut-caption">tokens · 有归属</text>
+    </svg>
+  );
+}
+
+// 用量页：项目列表 → 点击进入单个项目的会话明细（层级下钻，不再同屏堆两个列表）。
+// detail 为 null 时是项目列表；{ type:"project", path } 是项目详情；
+// { type:"unattributed" } 是读不到目录的会话。
 function UsageSection({ projectsState, sessionsState, period, onRulesChanged }) {
   const [agentFilter, setAgentFilter] = useState("all");
   const [modelFilter, setModelFilter] = useState("all");
-  const [selectedProject, setSelectedProject] = useState(null);
+  const [detail, setDetail] = useState(null);
   const [showAllProjects, setShowAllProjects] = useState(false);
   const [copiedId, setCopiedId] = useState(null);
   const [exportNote, setExportNote] = useState(null);
@@ -3032,14 +3126,24 @@ function UsageSection({ projectsState, sessionsState, period, onRulesChanged }) 
 
   const projects = projectsState?.data;
   const sessionsData = sessionsState?.data;
+  const colorByPath = useMemo(
+    () => projectColorMap(projects?.projects || []),
+    [projects],
+  );
 
-  // 选中的项目在规则变更或换周期后消失时，退回"全部"。
+  // 正在看的项目因规则变更或换周期消失时，退回列表。
   useEffect(() => {
-    if (!selectedProject || !projects || projects.loadError) return;
-    if (!projects.projects.some((project) => project.path === selectedProject)) {
-      setSelectedProject(null);
+    if (detail?.type !== "project" || !projects || projects.loadError) return;
+    if (!projects.projects.some((project) => project.path === detail.path)) {
+      setDetail(null);
     }
-  }, [selectedProject, projects]);
+  }, [detail, projects]);
+
+  const openDetail = (next) => {
+    setModelFilter("all");
+    setExportNote(null);
+    setDetail(next);
+  };
 
   const applyRules = async (next) => {
     setRulesBusy(true);
@@ -3064,7 +3168,6 @@ function UsageSection({ projectsState, sessionsState, period, onRulesChanged }) 
   };
   const hideProject = async (path) => {
     const current = await currentRules();
-    if (selectedProject === path) setSelectedProject(null);
     await applyRules({ ...current, hidden: [...current.hidden, path] });
   };
   const removeRoot = async (path) => {
@@ -3076,9 +3179,9 @@ function UsageSection({ projectsState, sessionsState, period, onRulesChanged }) 
     await applyRules({ ...current, hidden: current.hidden.filter((item) => item !== path) });
   };
 
-  const handleExport = async (sessions) => {
+  const noteExport = async (task) => {
     try {
-      const savedPath = await exportSessionsCsv(sessions);
+      const savedPath = await task();
       setExportNote(savedPath ? `已导出到 ${savedPath}` : "已开始下载");
     } catch (error) {
       setExportNote(`导出失败：${error}`);
@@ -3097,9 +3200,8 @@ function UsageSection({ projectsState, sessionsState, period, onRulesChanged }) 
     return (
       <main className="usage-section" aria-busy="true">
         <header className="settings-header">
-          <span className="section-kicker">用量</span>
-          <h1>正在读取用量明细</h1>
-          <p>只读取已索引的账本，不触发新的日志扫描。</p>
+          <h1>用量</h1>
+          <p>正在读取用量明细。只读取已索引的账本，不触发新的日志扫描。</p>
         </header>
       </main>
     );
@@ -3108,40 +3210,141 @@ function UsageSection({ projectsState, sessionsState, period, onRulesChanged }) 
     return (
       <main className="usage-section">
         <header className="settings-header">
-          <span className="section-kicker">用量</span>
-          <h1>用量明细暂不可用</h1>
-          <p>本地账本读取失败；没有用演示数字替代。请稍后重试。</p>
+          <h1>用量</h1>
+          <p>本地账本读取失败，明细暂不可用；没有用演示数字替代。请稍后重试。</p>
         </header>
       </main>
     );
   }
 
+  const timeRange = (session) => {
+    const fmt = (ms) => new Date(ms).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false });
+    return `${fmt(session.startMs)}–${fmt(session.endMs)}`;
+  };
+
+  const sessionGroups = (sessions) => {
+    const groups = [];
+    sessions.forEach((session) => {
+      const label = sessionDayLabel(session.endMs);
+      const group = groups[groups.length - 1];
+      if (group && group.label === label) group.sessions.push(session);
+      else groups.push({ label, sessions: [session] });
+    });
+    return groups;
+  };
+
+  const renderSessionRows = (groups) => groups.map((group) => (
+    <section className="session-group" key={group.label} aria-label={group.label}>
+      <h3>{group.label}</h3>
+      {group.sessions.map((session) => {
+        const meta = AGENT_META[session.agent];
+        return (
+          <article className="session-row" key={`${session.agent}-${session.sessionId}`}>
+            <i className="model-dot" style={{ backgroundColor: meta?.accent || "#74767a" }} aria-hidden="true" />
+            <div className="session-copy">
+              <strong>
+                {timeRange(session)} · {meta?.label || session.agent}
+                {session.model ? ` · ${session.model}` : ""}
+              </strong>
+              <small>
+                {compactTokens(session.tokens)} tokens
+                {session.usd != null ? ` · ≈${formatUsd(session.usd)}` : " · 未计价"}
+                {` · ${session.eventCount} 次记录`}
+                {` · 缓存读 ${session.tokens ? Math.round((session.cacheRead / session.tokens) * 100) : 0}%`}
+              </small>
+            </div>
+            <button
+              type="button"
+              className={`session-id-chip ${copiedId === session.sessionId ? "session-id-chip--copied" : ""}`}
+              onClick={() => copySessionId(session.sessionId)}
+              title={`复制会话 ID（可用于 resume 等操作）
+${session.sessionId}`}
+            >
+              {copiedId === session.sessionId
+                ? <Check size={12} weight="bold" aria-hidden="true" />
+                : <Copy size={12} weight="light" aria-hidden="true" />}
+              <span>{session.sessionId.length > 14 ? `${session.sessionId.slice(0, 12)}…` : session.sessionId}</span>
+            </button>
+            <em>{compactTokens(session.tokens)}</em>
+          </article>
+        );
+      })}
+    </section>
+  ));
+
+  // ── 项目详情视图 ──
+  if (detail) {
+    const detailMeta = detail.type === "project"
+      ? projects.projects.find((project) => project.path === detail.path)
+      : null;
+    const scoped = sessionsData.sessions.filter((session) => (
+      detail.type === "project" ? session.project === detail.path : !session.project
+    ));
+    const models = [...new Set(scoped.map((session) => session.model).filter(Boolean))];
+    const filtered = scoped.filter((session) => modelFilter === "all" || session.model === modelFilter);
+    const groups = sessionGroups(filtered);
+    const title = detail.type === "project" ? (detailMeta?.label || projectLabel(detail.path)) : "未归类会话";
+
+    return (
+      <main className="usage-section" aria-labelledby="usage-title">
+        <header className="settings-header">
+          <button type="button" className="detail-back" onClick={() => openDetail(null)}>
+            <CaretLeft size={12} weight="bold" aria-hidden="true" />
+            项目列表
+          </button>
+          <h1 id="usage-title">
+            {detail.type === "project" && (
+              <i
+                className="project-title-dot"
+                style={{ backgroundColor: colorByPath.get(detail.path) || "var(--viz-other)" }}
+                aria-hidden="true"
+              />
+            )}
+            {title}
+          </h1>
+          <p>
+            {detail.type === "project" ? (
+              <>
+                {detail.path}
+                {detailMeta ? ` · ${detailMeta.agents.map((id) => AGENT_META[id]?.label || id).join("、")}` : ""}
+                {` · ${scoped.length} 个会话`}
+                {detailMeta?.usd != null ? ` · 估算 ≈${formatUsd(detailMeta.usd)}` : ""}
+              </>
+            ) : (
+              <>这些会话的来源不带工作目录（如 Antigravity），无法归入项目。{` ${scoped.length} 个会话。`}</>
+            )}
+          </p>
+        </header>
+
+        <div className="usage-toolbar">
+          <select value={modelFilter} onChange={(event) => setModelFilter(event.target.value)} aria-label="按模型筛选">
+            <option value="all">全部模型</option>
+            {models.map((model) => <option key={model} value={model}>{model}</option>)}
+          </select>
+          <button
+            type="button"
+            className="ledger-button usage-toolbar-end"
+            disabled={!filtered.length}
+            onClick={() => noteExport(() => exportSessionsCsv(filtered))}
+          >
+            导出会话 CSV（{filtered.length}）
+          </button>
+        </div>
+
+        {exportNote && <p className="settings-muted" role="status">{exportNote}</p>}
+        {groups.length === 0 && <p className="settings-muted">本周期内没有可显示的会话。</p>}
+        {groups.length > 0 && <div className="report-card session-board">{renderSessionRows(groups)}</div>}
+      </main>
+    );
+  }
+
+  // ── 项目列表视图 ──
   const filteredProjects = projects.projects.filter((project) =>
     agentFilter === "all" || project.agents.includes(agentFilter));
   const visibleProjects = showAllProjects
     ? filteredProjects
     : filteredProjects.slice(0, PROJECT_PREVIEW_COUNT);
   const maxTokens = filteredProjects.reduce((max, project) => Math.max(max, project.tokens), 0);
-  const selectedMeta = selectedProject
-    ? projects.projects.find((project) => project.path === selectedProject)
-    : null;
-
-  const models = [...new Set(sessionsData.sessions.map((session) => session.model).filter(Boolean))];
-  const filteredSessions = sessionsData.sessions.filter((session) =>
-    (agentFilter === "all" || session.agent === agentFilter)
-    && (modelFilter === "all" || session.model === modelFilter)
-    && (!selectedProject || session.project === selectedProject));
-  const groups = [];
-  filteredSessions.forEach((session) => {
-    const label = sessionDayLabel(session.endMs);
-    const group = groups[groups.length - 1];
-    if (group && group.label === label) group.sessions.push(session);
-    else groups.push({ label, sessions: [session] });
-  });
-  const timeRange = (session) => {
-    const fmt = (ms) => new Date(ms).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false });
-    return `${fmt(session.startMs)}–${fmt(session.endMs)}`;
-  };
   const unattributedLabel = (projects.unattributedAgents || [])
     .map((id) => AGENT_META[id]?.label || id)
     .join("、");
@@ -3149,11 +3352,9 @@ function UsageSection({ projectsState, sessionsState, period, onRulesChanged }) 
   return (
     <main className="usage-section" aria-labelledby="usage-title">
       <header className="settings-header">
-        <span className="section-kicker">用量</span>
-        <h1 id="usage-title">用量明细</h1>
+        <h1 id="usage-title">用量</h1>
         <p>
-          {PERIODS.find((item) => item.id === period)?.label}内 {projects.totalProjects} 个项目、{sessionsData.totalSessions} 个会话
-          {sessionsData.truncated ? "（会话仅显示最近 300 个）" : ""}。成本为按公开 API 价格的估算，非账单。
+          <strong>项目</strong> · {PERIODS.find((item) => item.id === period)?.label}内 {projects.totalProjects} 个项目、{sessionsData.totalSessions} 个会话，点击项目查看会话明细。成本为按公开 API 价格的估算，非账单。
           {sessionsData.isDemo ? " 当前为浏览器演示数据。" : ""}
         </p>
       </header>
@@ -3162,10 +3363,6 @@ function UsageSection({ projectsState, sessionsState, period, onRulesChanged }) 
         <select value={agentFilter} onChange={(event) => setAgentFilter(event.target.value)} aria-label="按 Agent 筛选">
           <option value="all">全部 Agent</option>
           {AGENT_ORDER.map((id) => <option key={id} value={id}>{AGENT_META[id].label}</option>)}
-        </select>
-        <select value={modelFilter} onChange={(event) => setModelFilter(event.target.value)} aria-label="按模型筛选">
-          <option value="all">全部模型</option>
-          {models.map((model) => <option key={model} value={model}>{model}</option>)}
         </select>
         <button
           type="button"
@@ -3176,8 +3373,13 @@ function UsageSection({ projectsState, sessionsState, period, onRulesChanged }) 
           <FunnelSimple size={13} weight="bold" aria-hidden="true" />
           分组规则
         </button>
-        <button type="button" className="ledger-button" disabled={!filteredSessions.length} onClick={() => handleExport(filteredSessions)}>
-          导出 CSV（{filteredSessions.length}）
+        <button
+          type="button"
+          className="ledger-button"
+          disabled={!filteredProjects.length}
+          onClick={() => noteExport(() => exportProjectsCsv(filteredProjects))}
+        >
+          导出 CSV（{filteredProjects.length}）
         </button>
       </div>
 
@@ -3194,15 +3396,50 @@ function UsageSection({ projectsState, sessionsState, period, onRulesChanged }) 
         />
       )}
 
-      <section className="project-board" aria-label="项目汇总">
-        <h2>
-          项目
-          <span>
-            {filteredProjects.length === projects.totalProjects
-              ? ` · ${projects.totalProjects} 个`
-              : ` · ${filteredProjects.length}/${projects.totalProjects} 个`}
-          </span>
-        </h2>
+      <section className="report-card project-board" aria-label="项目汇总">
+        {projects.projects.length > 0 && (
+          <div className="project-overview">
+            <ProjectShareDonut
+              projects={projects.projects}
+              colorByPath={colorByPath}
+              onOpen={(path) => openDetail({ type: "project", path })}
+            />
+            <div className="project-overview-figures">
+              {/* token 总量在环心；这里放成本这另一维度，同一个数不出现两次。 */}
+              {(() => {
+                const priced = projects.projects.filter((project) => project.usd != null);
+                if (!priced.length) {
+                  return (
+                    <>
+                      <strong>{projects.totalProjects}</strong>
+                      <span>个项目 · 未计价</span>
+                    </>
+                  );
+                }
+                return (
+                  <>
+                    <strong>≈{formatUsd(priced.reduce((sum, project) => sum + project.usd, 0))}</strong>
+                    <span>{projects.totalProjects} 个项目 · 估算成本</span>
+                  </>
+                );
+              })()}
+              {(projects.unattributedTokens > 0 || projects.hiddenTokens > 0) && (
+                <small>
+                  {projects.unattributedTokens > 0 && (
+                    <button type="button" onClick={() => openDetail({ type: "unattributed" })}>
+                      读不到目录 {compactTokens(projects.unattributedTokens)}{unattributedLabel ? `（${unattributedLabel}）` : ""}
+                    </button>
+                  )}
+                  {projects.hiddenTokens > 0 && (
+                    <button type="button" onClick={() => setRulesOpen(true)}>
+                      已隐藏 {compactTokens(projects.hiddenTokens)}
+                    </button>
+                  )}
+                </small>
+              )}
+            </div>
+          </div>
+        )}
         {visibleProjects.length === 0 && (
           <p className="settings-muted">
             {projects.totalProjects === 0
@@ -3210,143 +3447,73 @@ function UsageSection({ projectsState, sessionsState, period, onRulesChanged }) 
               : "当前筛选条件下没有项目。"}
           </p>
         )}
-        {visibleProjects.map((project) => {
-          const selected = selectedProject === project.path;
-          return (
-            <article
-              className={`project-row ${selected ? "project-row--selected" : ""}`}
-              key={project.path}
-              onClick={() => setSelectedProject(selected ? null : project.path)}
-              role="button"
-              tabIndex={0}
-              aria-pressed={selected}
-              onKeyDown={(event) => {
-                if (event.key === "Enter" || event.key === " ") {
-                  event.preventDefault();
-                  setSelectedProject(selected ? null : project.path);
-                }
-              }}
-            >
-              <div className="session-copy">
-                <strong title={project.path}>
-                  {project.label}
-                  {project.pinned && <PushPinSimple size={11} weight="fill" aria-label="手动登记的项目根" />}
-                </strong>
-                <small>
-                  {project.agents.map((id) => AGENT_META[id]?.label || id).join(" · ")}
-                  {project.model ? ` · ${modelDisplayName(project.model)}` : ""}
-                  {` · ${project.sessionCount} 个会话`}
-                  {project.usd != null ? ` · ≈${formatUsd(project.usd)}` : " · 未计价"}
-                </small>
-                <span className="project-bar" aria-hidden="true">
-                  <i style={{ width: `${maxTokens ? Math.max(2, (project.tokens / maxTokens) * 100) : 0}%` }} />
-                </span>
-              </div>
-              <div className="project-actions">
-                {!project.pinned && (
-                  <button
-                    type="button"
-                    disabled={rulesBusy}
-                    title={`登记为项目根：${project.path} 下的子目录都归并到这一行`}
-                    aria-label={`把 ${project.label} 登记为项目根`}
-                    onClick={(event) => { event.stopPropagation(); pinProject(project.path); }}
-                  >
-                    <PushPinSimple size={13} weight="regular" aria-hidden="true" />
-                  </button>
-                )}
+        {visibleProjects.map((project) => (
+          <article
+            className="project-row"
+            key={project.path}
+            onClick={() => openDetail({ type: "project", path: project.path })}
+            role="button"
+            tabIndex={0}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" || event.key === " ") {
+                event.preventDefault();
+                openDetail({ type: "project", path: project.path });
+              }
+            }}
+          >
+            <div className="session-copy">
+              <strong title={project.path}>
+                {project.label}
+                {project.pinned && <PushPinSimple size={11} weight="fill" aria-label="手动登记的项目根" />}
+              </strong>
+              <small>
+                {project.agents.map((id) => AGENT_META[id]?.label || id).join(" · ")}
+                {project.model ? ` · ${modelDisplayName(project.model)}` : ""}
+                {` · ${project.sessionCount} 个会话`}
+                {project.usd != null ? ` · ≈${formatUsd(project.usd)}` : " · 未计价"}
+              </small>
+              <span className="project-bar" aria-hidden="true">
+                <i
+                  style={{
+                    width: `${maxTokens ? Math.max(2, (project.tokens / maxTokens) * 100) : 0}%`,
+                    background: colorByPath.get(project.path),
+                  }}
+                />
+              </span>
+            </div>
+            <div className="project-actions">
+              {!project.pinned && (
                 <button
                   type="button"
                   disabled={rulesBusy}
-                  title={`隐藏 ${project.path}：其用量不再作为项目展示，可在分组规则里恢复`}
-                  aria-label={`隐藏项目 ${project.label}`}
-                  onClick={(event) => { event.stopPropagation(); hideProject(project.path); }}
+                  title={`登记为项目根：${project.path} 下的子目录都归并到这一行`}
+                  aria-label={`把 ${project.label} 登记为项目根`}
+                  onClick={(event) => { event.stopPropagation(); pinProject(project.path); }}
                 >
-                  <EyeSlash size={13} weight="regular" aria-hidden="true" />
+                  <PushPinSimple size={13} weight="regular" aria-hidden="true" />
                 </button>
-              </div>
-              <em>{compactTokens(project.tokens)}</em>
-            </article>
-          );
-        })}
+              )}
+              <button
+                type="button"
+                disabled={rulesBusy}
+                title={`隐藏 ${project.path}：其用量不再作为项目展示，可在分组规则里恢复`}
+                aria-label={`隐藏项目 ${project.label}`}
+                onClick={(event) => { event.stopPropagation(); hideProject(project.path); }}
+              >
+                <EyeSlash size={13} weight="regular" aria-hidden="true" />
+              </button>
+            </div>
+            <span className="project-open" aria-hidden="true">
+              <CaretRight size={13} weight="bold" />
+            </span>
+            <em>{compactTokens(project.tokens)}</em>
+          </article>
+        ))}
         {filteredProjects.length > PROJECT_PREVIEW_COUNT && (
           <button type="button" className="project-expand" onClick={() => setShowAllProjects((value) => !value)}>
             {showAllProjects ? "收起" : `显示全部 ${filteredProjects.length} 个项目`}
           </button>
         )}
-        {(projects.unattributedTokens > 0 || projects.hiddenTokens > 0) && (
-          <p className="project-footnote">
-            {projects.unattributedTokens > 0 && (
-              <span>读不到目录 {compactTokens(projects.unattributedTokens)}{unattributedLabel ? `（${unattributedLabel}）` : ""}</span>
-            )}
-            {projects.hiddenTokens > 0 && (
-              <button type="button" onClick={() => setRulesOpen(true)}>
-                已隐藏 {compactTokens(projects.hiddenTokens)}
-              </button>
-            )}
-          </p>
-        )}
-      </section>
-
-      <section className="session-board" aria-label="会话明细">
-        <h2>
-          会话
-          <span> · {filteredSessions.length} 个</span>
-          {selectedMeta && (
-            <button
-              type="button"
-              className="session-filter-chip"
-              onClick={() => setSelectedProject(null)}
-              title={`当前只显示 ${selectedMeta.path} 的会话，点击恢复全部`}
-            >
-              {selectedMeta.label}
-              <X size={11} weight="bold" aria-hidden="true" />
-            </button>
-          )}
-        </h2>
-
-        {groups.length === 0 && (
-          <p className="settings-muted">当前筛选条件下没有会话。</p>
-        )}
-
-        {groups.map((group) => (
-          <section className="session-group" key={group.label} aria-label={group.label}>
-            <h3>{group.label}</h3>
-            {group.sessions.map((session) => {
-              const meta = AGENT_META[session.agent];
-              return (
-                <article className="session-row" key={`${session.agent}-${session.sessionId}`}>
-                  <i className="model-dot" style={{ backgroundColor: meta?.accent || "#74767a" }} aria-hidden="true" />
-                  <div className="session-copy">
-                    <strong>
-                      {timeRange(session)} · {meta?.label || session.agent}
-                      {session.model ? ` · ${session.model}` : ""}
-                    </strong>
-                    <small>
-                      {compactTokens(session.tokens)} tokens
-                      {session.usd != null ? ` · ≈${formatUsd(session.usd)}` : " · 未计价"}
-                      {` · ${session.eventCount} 次记录`}
-                      {` · 缓存读 ${session.tokens ? Math.round((session.cacheRead / session.tokens) * 100) : 0}%`}
-                      {session.projectLabel ? <span className="session-project" title={session.project}> · {session.projectLabel}</span> : null}
-                    </small>
-                  </div>
-                  <button
-                    type="button"
-                    className={`session-id-chip ${copiedId === session.sessionId ? "session-id-chip--copied" : ""}`}
-                    onClick={() => copySessionId(session.sessionId)}
-                    title={`复制会话 ID（可用于 resume 等操作）
-${session.sessionId}`}
-                  >
-                    {copiedId === session.sessionId
-                      ? <Check size={12} weight="bold" aria-hidden="true" />
-                      : <Copy size={12} weight="light" aria-hidden="true" />}
-                    <span>{session.sessionId.length > 14 ? `${session.sessionId.slice(0, 12)}…` : session.sessionId}</span>
-                  </button>
-                  <em>{compactTokens(session.tokens)}</em>
-                </article>
-              );
-            })}
-          </section>
-        ))}
       </section>
     </main>
   );
@@ -3594,13 +3761,19 @@ const REPORT_RANGE_WEEKS = [4, 8, 13, 26];
 
 // 26 周走势的迷你条图：每根竖条一个周桶，与热力图同属离散语言；
 // 最近一周实色，其余降透明度。零用量周留一根底线，不假装没有那一周。
-function Sparkline({ points }) {
+function Sparkline({ points, color }) {
   const max = Math.max(...points, 1);
   const width = 100;
   const height = 26;
   const step = width / points.length;
   return (
-    <svg className="project-sparkline" viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" aria-hidden="true">
+    <svg
+      className="project-sparkline"
+      style={color ? { color } : undefined}
+      viewBox={`0 0 ${width} ${height}`}
+      preserveAspectRatio="none"
+      aria-hidden="true"
+    >
       {points.map((value, index) => {
         const barHeight = value > 0 ? Math.max(1.6, (value / max) * (height - 2)) : 0.8;
         return (
@@ -3631,9 +3804,8 @@ function ReportsSection({ report }) {
     return (
       <main className="reports-section" aria-busy="true">
         <header className="settings-header">
-          <span className="section-kicker">报告</span>
-          <h1>正在读取本地账本</h1>
-          <p>报告只统计已索引的数据，不触发新的日志扫描。</p>
+          <h1>报告</h1>
+          <p>正在读取本地账本。报告只统计已索引的数据，不触发新的日志扫描。</p>
         </header>
       </main>
     );
@@ -3643,9 +3815,8 @@ function ReportsSection({ report }) {
     return (
       <main className="reports-section">
         <header className="settings-header">
-          <span className="section-kicker">报告</span>
-          <h1>报告暂不可用</h1>
-          <p>本地账本读取失败；没有用演示数字替代。请稍后重试。</p>
+          <h1>报告</h1>
+          <p>本地账本读取失败，报告暂不可用；没有用演示数字替代。请稍后重试。</p>
         </header>
       </main>
     );
@@ -3683,10 +3854,9 @@ function ReportsSection({ report }) {
   return (
     <main className="reports-section" aria-labelledby="reports-title">
       <header className="settings-header">
-        <span className="section-kicker">报告</span>
-        <h1 id="reports-title">近 26 周活动</h1>
+        <h1 id="reports-title">报告</h1>
         <p>
-          只统计本地账本中已索引的数据（processed token 口径，非账单）。
+          <strong>近 26 周活动</strong> · 只统计本地账本中已索引的数据（processed token 口径，非账单）。
           {coverageStart ? `账本数据自 ${coverageStart} 起。` : ""}
           {data.isDemo ? " 当前为浏览器演示数据。" : ""}
         </p>
@@ -3769,39 +3939,6 @@ function ReportsSection({ report }) {
         </div>
       </section>
 
-      {(data.projects || []).length > 0 && (
-        <section className="report-card report-projects" aria-label="项目走势">
-          <h2>项目走势</h2>
-          <ul className="project-trend-list">
-            {data.projects.map((project) => (
-              <li key={project.path}>
-                <div className="project-trend-name">
-                  <span title={project.path}>{project.label}</span>
-                  <small>{project.activeDays} 天活跃</small>
-                </div>
-                <Sparkline points={project.weekly} />
-                <div className="project-trend-figures">
-                  <em>{compactTokens(project.tokens)}</em>
-                  {project.recentDeltaPercent != null ? (
-                    <small
-                      className={project.recentDeltaPercent >= 0 ? "trend-up" : "trend-down"}
-                      title="近 7 天相对再前 7 天"
-                    >
-                      {project.recentDeltaPercent >= 0
-                        ? <ArrowUp size={10} weight="bold" aria-hidden="true" />
-                        : <ArrowDown size={10} weight="bold" aria-hidden="true" />}
-                      {Math.abs(Math.round(project.recentDeltaPercent))}%
-                    </small>
-                  ) : (
-                    <small className="trend-flat">—</small>
-                  )}
-                </div>
-              </li>
-            ))}
-          </ul>
-        </section>
-      )}
-
       <div className="report-grid">
         <section className="report-card" aria-label="Agent 排行">
           <h2>Agent 排行</h2>
@@ -3846,6 +3983,42 @@ function ReportsSection({ report }) {
           </ul>
         </section>
       </div>
+
+      {(data.projects || []).length > 0 && (
+        <section className="report-card report-projects" aria-label="项目走势">
+          <h2>项目走势</h2>
+          <ul className="project-trend-list">
+            {data.projects.map((project, index) => (
+              <li key={project.path}>
+                <div className="project-trend-name">
+                  <span title={project.path}>{project.label}</span>
+                  <small>{project.activeDays} 天活跃</small>
+                </div>
+                <Sparkline
+                  points={project.weekly}
+                  color={index < PROJECT_COLOR_COUNT ? `var(--viz-${index + 1})` : "var(--viz-other)"}
+                />
+                <div className="project-trend-figures">
+                  <em>{compactTokens(project.tokens)}</em>
+                  {project.recentDeltaPercent != null ? (
+                    <small
+                      className={project.recentDeltaPercent >= 0 ? "trend-up" : "trend-down"}
+                      title="近 7 天相对再前 7 天"
+                    >
+                      {project.recentDeltaPercent >= 0
+                        ? <ArrowUp size={10} weight="bold" aria-hidden="true" />
+                        : <ArrowDown size={10} weight="bold" aria-hidden="true" />}
+                      {Math.abs(Math.round(project.recentDeltaPercent))}%
+                    </small>
+                  ) : (
+                    <small className="trend-flat">—</small>
+                  )}
+                </div>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
     </main>
   );
 }
