@@ -3819,6 +3819,7 @@ const REPORT_VIEWS = [
   { id: "heatmap", label: "热力图" },
   { id: "trend", label: "周趋势" },
   { id: "share", label: "构成" },
+  { id: "projects", label: "项目" },
 ];
 
 // 周趋势/构成的统计时间段档位；热力图固定 26 周日历不参与。
@@ -3948,7 +3949,7 @@ function ReportsSection({ report }) {
               </button>
             ))}
           </div>
-          {view !== "heatmap" && (
+          {view !== "heatmap" && view !== "projects" && (
             <div className="report-view-toggle" role="group" aria-label="统计时间段">
               {REPORT_RANGE_WEEKS.map((num) => (
                 <button
@@ -3966,7 +3967,40 @@ function ReportsSection({ report }) {
         </div>
         {/* 固定高度：三种视图内容高度不同，卡片会随切换忽大忽小。 */}
         <div className="report-view-body">
-        {view === "trend" ? (
+        {view === "projects" ? (
+          (data.projects || []).length > 0 ? (
+            <ul className="project-trend-list">
+              {data.projects.map((project, index) => (
+                <li key={project.path}>
+                  <span className="project-trend-name" title={project.path}>
+                    {project.label}
+                    <small>{project.activeDays} 天</small>
+                  </span>
+                  <Sparkline
+                    points={project.weekly}
+                    color={index < PROJECT_COLOR_COUNT ? `var(--viz-${index + 1})` : "var(--viz-other)"}
+                  />
+                  <em>{compactTokens(project.tokens)}</em>
+                  {project.recentDeltaPercent != null ? (
+                    <small
+                      className={project.recentDeltaPercent >= 0 ? "trend-up" : "trend-down"}
+                      title="近 7 天相对再前 7 天"
+                    >
+                      {project.recentDeltaPercent >= 0
+                        ? <ArrowUp size={10} weight="bold" aria-hidden="true" />
+                        : <ArrowDown size={10} weight="bold" aria-hidden="true" />}
+                      {Math.abs(Math.round(project.recentDeltaPercent))}%
+                    </small>
+                  ) : (
+                    <small className="trend-flat">—</small>
+                  )}
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="settings-muted">这段时间的用量还没有可归属的项目。</p>
+          )
+        ) : view === "trend" ? (
           <ReportTrendChart weeks={trendWeeks} />
         ) : view === "share" ? (
           <ReportShareDonut agents={rangeAgents} totalTokens={rangeTotal} weeksCount={trendWeeks.length} />
@@ -4049,41 +4083,6 @@ function ReportsSection({ report }) {
         </section>
       </div>
 
-      {(data.projects || []).length > 0 && (
-        <section className="report-card report-projects" aria-label="项目走势">
-          <h2>项目走势</h2>
-          <ul className="project-trend-list">
-            {data.projects.map((project, index) => (
-              <li key={project.path}>
-                <div className="project-trend-name">
-                  <span title={project.path}>{project.label}</span>
-                  <small>{project.activeDays} 天活跃</small>
-                </div>
-                <Sparkline
-                  points={project.weekly}
-                  color={index < PROJECT_COLOR_COUNT ? `var(--viz-${index + 1})` : "var(--viz-other)"}
-                />
-                <div className="project-trend-figures">
-                  <em>{compactTokens(project.tokens)}</em>
-                  {project.recentDeltaPercent != null ? (
-                    <small
-                      className={project.recentDeltaPercent >= 0 ? "trend-up" : "trend-down"}
-                      title="近 7 天相对再前 7 天"
-                    >
-                      {project.recentDeltaPercent >= 0
-                        ? <ArrowUp size={10} weight="bold" aria-hidden="true" />
-                        : <ArrowDown size={10} weight="bold" aria-hidden="true" />}
-                      {Math.abs(Math.round(project.recentDeltaPercent))}%
-                    </small>
-                  ) : (
-                    <small className="trend-flat">—</small>
-                  )}
-                </div>
-              </li>
-            ))}
-          </ul>
-        </section>
-      )}
     </main>
   );
 }

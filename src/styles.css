@@ -3869,11 +3869,11 @@ html:has(.strip-shell--glass-ink-light) #root {
 
 .report-grid .report-card { margin-top: 24px; }
 
-/* 项目走势：名称 + 26 周迷你折线 + 总量与近 7 天环比。 */
-.report-projects { margin-top: 24px; }
-
+/* 项目走势：作为报告卡片的一个视图，单行排布——视图体高度固定 272px，
+   最多 8 个项目必须放得下，双行会溢出。活跃天数跟在名称后面。 */
 .project-trend-list {
   display: grid;
+  align-content: center;
   gap: 2px;
   margin: 0;
   padding: 0;
@@ -3882,58 +3882,57 @@ html:has(.strip-shell--glass-ink-light) #root {
 
 .project-trend-list li {
   display: grid;
-  grid-template-columns: minmax(120px, 200px) minmax(0, 1fr) 96px;
+  grid-template-columns: minmax(110px, 190px) minmax(0, 1fr) 62px 52px;
   align-items: center;
-  gap: 18px;
-  padding: 9px 8px;
-  border-radius: 10px;
+  gap: 16px;
+  padding: 5px 8px;
+  border-radius: 8px;
 }
 
 .project-trend-list li:hover { background: rgba(31, 33, 36, 0.03); }
 
-.project-trend-name { display: grid; gap: 2px; min-width: 0; }
-
-.project-trend-name span {
+.project-trend-name {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
   overflow: hidden;
   color: #26282b;
-  font-size: 13.5px;
+  font-size: 13px;
   font-weight: 540;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .project-trend-name small {
-  color: #83858a;
-  font-size: 11px;
+  flex: none;
+  color: #a0a2a7;
+  font-size: 10.5px;
+  font-weight: 400;
   font-variant-numeric: tabular-nums;
 }
 
 .project-sparkline {
   width: 100%;
-  height: 26px;
+  height: 20px;
   color: #55575b;
 }
 
 .project-sparkline rect { fill: currentColor; opacity: 0.4; }
 .project-sparkline rect:last-child { opacity: 1; }
 
-.project-trend-figures {
-  display: grid;
-  gap: 2px;
-  justify-items: end;
-}
-
-.project-trend-figures em {
+.project-trend-list li > em {
   color: #2b2d31;
-  font-size: 13px;
+  font-size: 12.5px;
   font-style: normal;
   font-weight: 580;
   font-variant-numeric: tabular-nums;
+  text-align: right;
 }
 
-.project-trend-figures small {
+.project-trend-list li > small {
   display: inline-flex;
   align-items: center;
+  justify-content: flex-end;
   gap: 2px;
   font-size: 11px;
   font-variant-numeric: tabular-nums;
@@ -4835,10 +4834,10 @@ html:has(.strip-shell--glass-ink-light) #root {
 }
 :root[data-theme="dark"] .project-overview-figures small button:hover { color: var(--d-strong); }
 :root[data-theme="dark"] .project-trend-list li:hover { background: rgba(255, 255, 255, 0.04); }
-:root[data-theme="dark"] .project-trend-name span { color: var(--d-strong); }
+:root[data-theme="dark"] .project-trend-name { color: var(--d-strong); }
 :root[data-theme="dark"] .project-trend-name small { color: var(--d-muted); }
 :root[data-theme="dark"] .project-sparkline { color: var(--d-ink-3); }
-:root[data-theme="dark"] .project-trend-figures em { color: var(--d-strong); }
+:root[data-theme="dark"] .project-trend-list li > em { color: var(--d-strong); }
 :root[data-theme="dark"] .trend-up { color: var(--d-ink-2); }
 :root[data-theme="dark"] .trend-down { color: var(--d-muted); }
 :root[data-theme="dark"] .trend-flat { color: rgba(255, 255, 255, 0.3); }
