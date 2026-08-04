@@ -17,17 +17,27 @@ use std::time::Duration;
 /// 1. 环境变量 `CLAUDE_CODE_OAUTH_TOKEN`（用户显式指定的裸 token）；
 /// 2. 凭据文件 `$CLAUDE_CONFIG_DIR|~/.claude` 下的 `.credentials.json`
 ///    （Linux、以及部分 Windows 安装）；
-/// 3. macOS 钥匙串条目 `Claude Code-credentials`（macOS 上 Claude Code 默认
-///    把 token 存进系统钥匙串而非明文文件）。读取经 `security` 命令，token
-///    同样只在内存里用一次，不落盘。
+/// 3. macOS 钥匙串（macOS 上 Claude Code 默认把 token 存进系统钥匙串而非
+///    明文文件）：先试旧 service 名 `Claude Code-credentials`，未命中再从
+///    `security dump-keychain` 的条目里找 v2.1.52+ 的
+///    `Claude Code-credentials-<hash>`。读取经 `security` 命令，token 同样
+///    只在内存里用一次，不落盘。
+///
+/// token 失效（401）时调一次官方 CLI `claude auth status --json` 让 Claude Code
+/// 自己刷新，然后重读凭据重试一次。刷新与落盘全由官方客户端完成——本模块
+/// 从不刷新、不写回、不解析该命令的输出。
 const CREDENTIALS_FILE: &str = ".credentials.json";
 const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 const BETA_HEADER: &str = "oauth-2025-04-20";
 const REQUIRED_SCOPE: &str = "user:profile";
 /// 用户显式指定 token 的环境变量（与 Claude Code 官方同名）。
 const ENV_TOKEN: &str = "CLAUDE_CODE_OAUTH_TOKEN";
+/// 覆盖 claude 可执行文件位置的环境变量（与 CODEX_BINARY 同一惯例）。
+const ENV_CLI: &str = "CLAUDE_BINARY";
 /// Claude Code 在 macOS 钥匙串里存凭据用的 generic-password service 名。
-#[cfg(target_os = "macos")]
+/// v2.1.52 起改成 `Claude Code-credentials-<hash>`，哈希不可推导，只能从
+/// 钥匙串条目里找；旧名仍在用，两者都要试。
+#[cfg(any(target_os = "macos", test))]
 const KEYCHAIN_SERVICE: &str = "Claude Code-credentials";
 /// 覆盖 Claude 配置目录的环境变量（与 Claude Code 官方同名）。
 const ENV_CONFIG_DIR: &str = "CLAUDE_CONFIG_DIR";
@@ -87,6 +97,27 @@ struct OauthCredentials {
     access_token: Option<String>,
     #[serde(default)]
     scopes: Vec<String>,
+    /// 过期时刻。Claude Code 写的是毫秒，但字段名与单位在不同版本间变过，
+    /// 两种命名都收，秒/毫秒按量级判断。
+    #[serde(default, rename = "expiresAt", alias = "expires_at")]
+    expires_at: Option<i64>,
+}
+
+impl OauthCredentials {
+    /// token 是否已过期。读不到过期时刻就当作未过期——不能因为少一个字段
+    /// 就把一份可用的凭据判死。
+    fn is_expired(&self, now_ms: i64) -> bool {
+        let Some(raw) = self.expires_at else {
+            return false;
+        };
+        // 1e11 毫秒约合 1973 年，秒则约合公元 5138 年：两种单位不会混淆。
+        let at_ms = if raw.abs() < 100_000_000_000 {
+            raw.saturating_mul(1000)
+        } else {
+            raw
+        };
+        at_ms <= now_ms
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -213,6 +244,8 @@ impl ClaudeOauth {
                 return Some(OauthCredentials {
                     access_token: Some(token),
                     scopes: vec![REQUIRED_SCOPE.to_owned()],
+                    // 用户自己给的裸 token，没有过期信息可依据。
+                    expires_at: None,
                 });
             }
         }
@@ -259,14 +292,66 @@ impl ClaudeOauth {
         let Some(credentials) = self.read_credentials() else {
             bail!("本机没有 Claude Code 登录凭据（环境变量、~/.claude/.credentials.json、macOS 钥匙串均未命中）");
         };
+        // 已经过期就先刷新，省掉一次注定 401 的请求。
+        let credentials = if credentials.is_expired(chrono::Utc::now().timestamp_millis()) {
+            self.refresh_credentials().unwrap_or(credentials)
+        } else {
+            credentials
+        };
+        match self.request_usage(&credentials, timeout) {
+            Err(UsageError::Unauthorized) => {
+                // token 失效：让官方 CLI 自己刷新一次再重试。刷新与落盘全由
+                // Claude Code 完成，我们既不解析它的输出也不写回任何凭据。
+                let Some(refreshed) = self.refresh_credentials() else {
+                    bail!("Claude 凭据已失效（401），自动刷新未成功，请重新运行 claude login");
+                };
+                self.request_usage(&refreshed, timeout)
+                    .map_err(|error| match error {
+                        UsageError::Unauthorized => anyhow::anyhow!(
+                            "Claude 凭据已失效（401），刷新后仍被拒绝，请重新运行 claude login"
+                        ),
+                        UsageError::Other(error) => error,
+                    })
+            }
+            Err(UsageError::Other(error)) => Err(error),
+            Ok(samples) => Ok(samples),
+        }
+    }
+
+    /// 让官方 CLI 刷新 token（`claude auth status --json`），然后重读凭据。
+    /// 只取"刷新"这个副作用：输出直接丢弃，退出码也不作判据——判据是重读
+    /// 出来的凭据本身。
+    fn refresh_credentials(&self) -> Option<OauthCredentials> {
+        // 单测不碰系统来源，避免读到开发机的真实凭据或起真实进程。
+        if !self.consult_system {
+            return None;
+        }
+        let mut command = claude_cli_command()?;
+        command
+            .args(["auth", "status", "--json"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        let child = command.spawn().ok()?;
+        wait_with_deadline(child, Duration::from_secs(12));
+        self.read_credentials()
+    }
+
+    fn request_usage(
+        &self,
+        credentials: &OauthCredentials,
+        timeout: Duration,
+    ) -> std::result::Result<Vec<QuotaSample>, UsageError> {
         if !credentials
             .scopes
             .iter()
             .any(|scope| scope == REQUIRED_SCOPE)
         {
-            bail!("Claude 凭据缺少 user:profile 权限，无法查询用量。请重新运行 claude login");
+            return Err(UsageError::Other(anyhow::anyhow!(
+                "Claude 凭据缺少 user:profile 权限，无法查询用量。请重新运行 claude login"
+            )));
         }
-        let token = credentials.access_token.unwrap_or_default();
+        let token = credentials.access_token.clone().unwrap_or_default();
 
         let agent = ureq::AgentBuilder::new().timeout(timeout).build();
         let response = agent
@@ -278,29 +363,106 @@ impl ClaudeOauth {
             .call()
             .map_err(|error| match error {
                 // 错误信息里绝不能带请求头（token）。
-                ureq::Error::Status(401, _) => {
-                    anyhow::anyhow!("Claude 凭据已失效（401），请重新运行 claude login")
-                }
+                ureq::Error::Status(401, _) => UsageError::Unauthorized,
                 ureq::Error::Status(429, _) => {
-                    anyhow::anyhow!("Claude 用量接口限流（429），稍后自动重试")
+                    UsageError::Other(anyhow::anyhow!("Claude 用量接口限流（429），稍后自动重试"))
                 }
                 ureq::Error::Status(code, _) => {
-                    anyhow::anyhow!("Claude 用量接口返回 HTTP {code}")
+                    UsageError::Other(anyhow::anyhow!("Claude 用量接口返回 HTTP {code}"))
                 }
                 ureq::Error::Transport(transport) => {
-                    anyhow::anyhow!("Claude 用量接口网络错误: {transport}")
+                    UsageError::Other(anyhow::anyhow!("Claude 用量接口网络错误: {transport}"))
                 }
             })?;
 
-        let body = response.into_string().context("读取 Claude 用量响应失败")?;
-        let usage: UsageResponse =
-            serde_json::from_str(&body).context("Claude 用量响应不是预期的 JSON")?;
+        let parse = || -> Result<Vec<QuotaSample>> {
+            let body = response.into_string().context("读取 Claude 用量响应失败")?;
+            let usage: UsageResponse =
+                serde_json::from_str(&body).context("Claude 用量响应不是预期的 JSON")?;
+            let samples = samples_from_usage(usage, chrono::Utc::now().timestamp_millis());
+            if samples.is_empty() {
+                bail!("Claude 用量响应缺少可用的额度窗口");
+            }
+            Ok(samples)
+        };
+        parse().map_err(UsageError::Other)
+    }
+}
 
-        let samples = samples_from_usage(usage, chrono::Utc::now().timestamp_millis());
-        if samples.is_empty() {
-            bail!("Claude 用量响应缺少可用的额度窗口");
+/// 401 要与其它失败分开：只有它值得刷新后重试一次。
+enum UsageError {
+    Unauthorized,
+    Other(anyhow::Error),
+}
+
+/// 组装调用 claude CLI 的命令。与 `app_server.rs` 定位 codex 的写法同构：
+/// Windows 上 npm 装出来的是 `.cmd` 脚本，得经 cmd.exe 起。
+fn claude_cli_command() -> Option<std::process::Command> {
+    use std::process::Command;
+
+    let explicit = std::env::var_os(ENV_CLI).map(PathBuf::from);
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+
+        let npm_script = std::env::var_os("APPDATA")
+            .map(PathBuf::from)
+            .map(|root| root.join("npm").join("claude.cmd"))
+            .filter(|path| path.exists());
+        let script = explicit
+            .or(npm_script)
+            .unwrap_or_else(|| PathBuf::from("claude"));
+        let mut command = Command::new("cmd.exe");
+        command
+            .args(["/D", "/C"])
+            .arg(script)
+            // 不弹控制台窗口。
+            .creation_flags(0x0800_0000);
+        Some(command)
+    }
+
+    #[cfg(not(windows))]
+    {
+        if let Some(path) = explicit {
+            return Some(Command::new(path));
         }
-        Ok(samples)
+        let mut candidates = Vec::new();
+        if let Some(home) = dirs::home_dir() {
+            candidates.extend([
+                home.join(".local/bin/claude"),
+                home.join(".claude/local/claude"),
+                home.join(".npm-global/bin/claude"),
+            ]);
+        }
+        candidates.extend([
+            PathBuf::from("/opt/homebrew/bin/claude"),
+            PathBuf::from("/usr/local/bin/claude"),
+        ]);
+        let found = candidates.into_iter().find(|path| path.exists());
+        // 都没命中就交给 PATH。
+        Some(Command::new(
+            found.unwrap_or_else(|| PathBuf::from("claude")),
+        ))
+    }
+}
+
+/// 等一个子进程结束，超时就连同它一起结束。快照构建持有扫描锁，
+/// 一个吊死的 CLI 会把整次刷新拖住，所以必须有上限。
+fn wait_with_deadline(mut child: std::process::Child, limit: Duration) -> bool {
+    let started = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) => {}
+            Err(_) => return false,
+        }
+        if started.elapsed() >= limit {
+            let _ = child.kill();
+            let _ = child.wait();
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(100));
     }
 }
 
@@ -333,13 +495,29 @@ fn parse_credentials(raw: &str) -> Option<OauthCredentials> {
         })
 }
 
-/// 从 macOS 钥匙串取 Claude Code 存的凭据 JSON。`security -w` 只输出密码本体
-/// （即那段 JSON）；条目不存在或被拒时命令非零退出，返回 None，绝不猜测。
-/// 首次读取可能弹出系统钥匙串授权框，这是 macOS 的预期行为。
+/// 从 macOS 钥匙串取 Claude Code 存的凭据 JSON。先试沿用至今的旧 service 名；
+/// 未命中再从钥匙串条目里找 v2.1.52+ 的 `Claude Code-credentials-<hash>`。
+/// 只试旧名会让装了较新 Claude Code 的 Mac 用户明明登录过却被判为"未找到凭据"。
 #[cfg(target_os = "macos")]
 fn read_macos_keychain() -> Option<String> {
+    if let Some(raw) = keychain_password(KEYCHAIN_SERVICE) {
+        return Some(raw);
+    }
+    for service in discover_keychain_services() {
+        if let Some(raw) = keychain_password(&service) {
+            return Some(raw);
+        }
+    }
+    None
+}
+
+/// `security -w` 只输出密码本体（即那段 JSON）；条目不存在或被拒时命令非零
+/// 退出，返回 None，绝不猜测。首次读取可能弹出系统钥匙串授权框，这是 macOS
+/// 的预期行为。
+#[cfg(target_os = "macos")]
+fn keychain_password(service: &str) -> Option<String> {
     let output = std::process::Command::new("security")
-        .args(["find-generic-password", "-s", KEYCHAIN_SERVICE, "-w"])
+        .args(["find-generic-password", "-s", service, "-w"])
         .output()
         .ok()?;
     if !output.status.success() {
@@ -348,6 +526,48 @@ fn read_macos_keychain() -> Option<String> {
     let raw = String::from_utf8(output.stdout).ok()?;
     let trimmed = raw.trim();
     (!trimmed.is_empty()).then(|| trimmed.to_owned())
+}
+
+/// 列出钥匙串里所有 Claude Code 的 generic-password service 名。
+/// `dump-keychain` 不带 `-d` 只列元数据、不读密码本体，因此不会弹密码框。
+#[cfg(target_os = "macos")]
+fn discover_keychain_services() -> Vec<String> {
+    let Ok(output) = std::process::Command::new("security")
+        .arg("dump-keychain")
+        .output()
+    else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    keychain_services_from_dump(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// 从 `dump-keychain` 的输出里挑出 Claude Code 的 service 名。条目行形如
+/// `    "svce"<blob>="Claude Code-credentials-<hash>"`。旧名已经单独试过，
+/// 这里排掉，避免白跑一次。
+///
+/// 解析与平台无关，故不加 `cfg(macos)` 门——否则在 Windows 上连测都测不了，
+/// 而这段正是最需要回归保护的部分。
+#[cfg(any(target_os = "macos", test))]
+fn keychain_services_from_dump(dump: &str) -> Vec<String> {
+    let mut found: Vec<String> = Vec::new();
+    for line in dump.lines() {
+        let Some(rest) = line.trim().strip_prefix("\"svce\"<blob>=\"") else {
+            continue;
+        };
+        let Some(service) = rest.strip_suffix('"') else {
+            continue;
+        };
+        if service.starts_with(KEYCHAIN_SERVICE)
+            && service != KEYCHAIN_SERVICE
+            && !found.iter().any(|seen| seen == service)
+        {
+            found.push(service.to_owned());
+        }
+    }
+    found
 }
 
 /// 把用量响应归一成额度样本：平铺窗口打底，limits[] 同键覆盖，
@@ -461,6 +681,60 @@ mod tests {
 
         clear_failure(&connection).unwrap();
         assert!(last_failure(&connection).unwrap().is_none());
+    }
+
+    /// Claude Code v2.1.52 起把凭据存进带哈希后缀的 service 名。开发机是
+    /// Windows，这段只能靠样本回归——真机行为需在 macOS 上另行核实。
+    #[test]
+    fn keychain_dump_yields_hashed_service_names_only() {
+        let dump = r#"
+keychain: "/Users/dev/Library/Keychains/login.keychain-db"
+class: "genp"
+attributes:
+    0x00000007 <blob>="Claude Code-credentials-a1b2c3"
+    "acct"<blob>="unknown"
+    "svce"<blob>="Claude Code-credentials"
+class: "genp"
+attributes:
+    "acct"<blob>="dev"
+    "svce"<blob>="Claude Code-credentials-a1b2c3"
+class: "genp"
+attributes:
+    "svce"<blob>="Claude Code-credentials-a1b2c3"
+class: "genp"
+attributes:
+    "svce"<blob>="com.apple.assistant"
+"#;
+        // 旧名单独试过所以排除；标签行（0x00000007）不算；重复项去掉。
+        assert_eq!(
+            keychain_services_from_dump(dump),
+            vec!["Claude Code-credentials-a1b2c3".to_owned()]
+        );
+    }
+
+    #[test]
+    fn keychain_dump_without_claude_entries_is_empty() {
+        assert!(keychain_services_from_dump("\"svce\"<blob>=\"com.apple.assistant\"").is_empty());
+        assert!(keychain_services_from_dump("").is_empty());
+    }
+
+    #[test]
+    fn expiry_accepts_both_seconds_and_milliseconds() {
+        let now_ms = 1_785_800_000_000_i64;
+        let credentials = |expires_at| OauthCredentials {
+            access_token: Some("t".into()),
+            scopes: vec![REQUIRED_SCOPE.to_owned()],
+            expires_at,
+        };
+
+        // 毫秒
+        assert!(credentials(Some(now_ms - 1)).is_expired(now_ms));
+        assert!(!credentials(Some(now_ms + 60_000)).is_expired(now_ms));
+        // 秒
+        assert!(credentials(Some(now_ms / 1000 - 1)).is_expired(now_ms));
+        assert!(!credentials(Some(now_ms / 1000 + 60)).is_expired(now_ms));
+        // 读不到过期时刻不判死，交给服务端裁决。
+        assert!(!credentials(None).is_expired(now_ms));
     }
 
     #[test]
