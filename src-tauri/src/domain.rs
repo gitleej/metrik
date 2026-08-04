@@ -7,7 +7,10 @@ use std::path::PathBuf;
 /// qoder 是配额-only：Qoder、QoderWork 与 Qoder CLI 共用同一账户级 Credits
 /// 配额来源。Qoder CLI 的本地遥测 token 字段实测为 0，不能作为用量账本来源。
 /// kimiwork 只保留为内部配额来源，窗口合并到 kimi，不作为独立可见 Agent。
-pub const AGENT_IDS: [&str; 8] = [
+/// custom 是用户在设置里自己声明的 Claude 兼容 JSONL 目录的**合并槽位**：
+/// 我们没接的 Agent，只要日志是这个格式，用户指一下就能算进总量，不必等我们
+/// 逐家适配。多个声明来源合并成这一条，各自的名字在「数据统计」里分别列出。
+pub const AGENT_IDS: [&str; 9] = [
     "codex",
     "claude",
     "zcode",
@@ -16,6 +19,7 @@ pub const AGENT_IDS: [&str; 8] = [
     "antigravity",
     "workbuddy",
     "qoder",
+    "custom",
 ];
 
 #[derive(Clone, Debug, Default, PartialEq)]

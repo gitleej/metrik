@@ -88,6 +88,12 @@ pub fn table() -> Vec<AgentProbe> {
             id: "qoder",
             probe: Probe::Credential(|| coding_quota::qoder_cookie_source().is_some()),
         },
+        AgentProbe {
+            // 自定义来源的"装了"就是"用户声明了"，而规则存在账本里，这里读不到。
+            // 由 engine 在建快照时补判（那里有连接），见 `detected` 的赋值。
+            id: "custom",
+            probe: Probe::Unknown,
+        },
     ]
 }
 

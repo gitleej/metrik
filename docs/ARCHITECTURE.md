@@ -117,6 +117,16 @@ The current test suite covers cumulative Codex deltas, fork replay, Claude progr
 
 An adapter is only trustworthy once its field *semantics* are confirmed against real data, not just its field names. Both classes of bug this codebase has hit — Codex fork replay counted as new usage, and a weekly quota window labeled as a five-hour one — came from assuming a plausible meaning for a field that the source defines differently. When a source cannot be observed on a real machine, prefer leaving the agent unimplemented over shipping a parser whose numbers look right.
 
+Reading another project's parser does not substitute for that confirmation. Competitors reliably tell you *where the logs are* and *what the fields are called* — those are facts. They are not reliable about what a field *means*: the widely used `tokscale` assumes `output_tokens` excludes reasoning tokens and adds them separately, which 112,386 readings across 654 local Codex sessions disprove (`total_tokens == input_tokens + output_tokens` in every one, never `+ reasoning`). Projects that share such a dependency are wrong together, so agreement between several of them is not verification.
+
+### Accounting self-check
+
+Where a source reports its own total, `TokenVector::disagrees_with_reported_total` compares it against the components we derived. A mismatch increments `ScanDiagnostics::total_mismatches`, which marks that source incomplete and states in the sources drawer that the displayed numbers may be wrong. This exists because a misread field does not crash — it produces a plausible wrong number that nobody notices. The check converts that silent failure into a visible one, which is what makes it defensible to add adapters based on formats we have not exercised ourselves.
+
+### User-declared sources
+
+Users can point Metrik at a directory of **Claude-compatible JSONL** and have it counted without waiting for a dedicated adapter; those events merge into the `custom` agent slot, and each declared source is listed by name in the sources drawer. The format is fixed on purpose: offering a field-mapping UI would push the very semantic judgement described above onto the user, where getting it wrong is silent. A directory in another format simply parses to no events and reports zero.
+
 ## Runtime boundary
 
 - Compact mode refreshes every five minutes while visible; expanded mode refreshes every minute. While `indexing.pending > 0` the UI polls every 400 ms instead, so each snapshot spends another `PARSE_BUDGET` on the backlog until it is drained. Returning to the window triggers a refresh.
