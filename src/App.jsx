@@ -2055,10 +2055,10 @@ function ClaudeOauthBlock({ onSnapshotRefresh }) {
     <div className="settings-subsection">
       <h3>官方额度直连（OAuth）</h3>
       <p className="settings-muted">
-        备选来源：用本机 Claude Code 已保存的凭据直接查询官方额度（全产品合并值，约两分钟一刷新）。
-        凭据只在内存中读取，不存储、不上传；接口失效时自动回落到状态栏钩子。
-        平时只用网页版或桌面客户端也能用：装一次 Claude Code 并运行 claude 登录，之后无需再碰 CLI，
-        网页与客户端的消耗同样计入这里的账户级额度。
+        备选来源：用本机 Claude Code 已保存的凭据直接查询官方额度（账户级合并值，约两分钟一刷新），
+        网页版与桌面客户端的消耗同样计入。凭据只在内存中读取，不存储、不上传。
+        前提是最近用过 Claude Code：凭据只活几小时，且只有 Claude Code 自己跑起来才会刷新它，
+        过期后这里回落到状态栏钩子。
       </p>
       <p className="settings-muted">
         ⚠️ 条款风险须知：Anthropic 2026 年 2 月更新的消费者条款禁止在第三方工具中使用 Claude 订阅的
@@ -2085,9 +2085,11 @@ function ClaudeOauthBlock({ onSnapshotRefresh }) {
                   ? "本机未找到 Claude Code 登录凭据（请先在终端运行 claude 登录）"
                   : !status.scopeOk
                     ? "凭据缺少 user:profile 权限，开启后可能查询失败（可运行 claude login 重新登录）"
-                    : status.enabled
-                      ? "已开启 · 凭据可用"
-                      : "未开启 · 凭据可用"}
+                    : status.expired
+                      ? `${status.enabled ? "已开启" : "未开启"} · 凭据已过期，用一次 Claude Code 即可自动刷新`
+                      : status.enabled
+                        ? "已开启 · 凭据可用"
+                        : "未开启 · 凭据可用"}
               </dd>
             </div>
             {/* 开关一切正常、却始终没有额度数字时，唯一能解释原因的就是这一行。 */}
