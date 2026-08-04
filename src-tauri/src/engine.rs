@@ -56,6 +56,8 @@ struct AdapterDiagnostics {
     malformed_lines: usize,
     unreadable_lines: usize,
     rejected_events: usize,
+    /// 口径自检失败：分量和来源自报总量对不上，说明字段语义可能理解错了。
+    total_mismatches: usize,
 }
 
 #[derive(Clone)]
@@ -838,6 +840,7 @@ fn record_scan_diagnostics(
     aggregate.malformed_lines += diagnostics.malformed_lines;
     aggregate.unreadable_lines += diagnostics.unreadable_lines;
     aggregate.rejected_events += diagnostics.rejected_events;
+    aggregate.total_mismatches += diagnostics.total_mismatches;
 }
 
 fn query_snapshot(
@@ -1510,7 +1513,17 @@ fn coverage_detail(diagnostics: &AdapterDiagnostics, errors: usize) -> String {
         return String::new();
     }
 
-    let skipped = (diagnostics.partial_sources > 0).then(|| {
+    // 口径校验失败与"内容没读到"性质不同：前者说明读到的数字本身可能是错的，
+    // 后者只是少算。两句分开写，不能混成一句"可能不完整"糊过去。
+    let mismatched = (diagnostics.total_mismatches > 0).then(|| {
+        format!(
+            "⚠️ {} 条读数与来源自报的总量对不上，说明本版本对该来源的字段口径可能有误，显示的数字请勿采信，已记录待修正；",
+            diagnostics.total_mismatches
+        )
+    });
+    let skipped_lines =
+        diagnostics.malformed_lines + diagnostics.unreadable_lines + diagnostics.rejected_events;
+    let skipped = (diagnostics.partial_sources > 0 && skipped_lines > 0).then(|| {
         format!(
             "{} 个会话存在未计入的 JSONL 内容（格式异常 {} 行、文本读取失败 {} 行、身份冲突 {} 条）；",
             diagnostics.partial_sources,
@@ -1521,7 +1534,8 @@ fn coverage_detail(diagnostics: &AdapterDiagnostics, errors: usize) -> String {
     });
     let failed = (errors > 0).then(|| format!("另有 {errors} 个会话未能完成更新；"));
     format!(
-        "{}{}本周期总量仅覆盖成功解析的记录，可能不完整。",
+        "{}{}{}本周期总量仅覆盖成功解析的记录，可能不完整。",
+        mismatched.unwrap_or_default(),
         skipped.unwrap_or_default(),
         failed.unwrap_or_default()
     )
@@ -2962,6 +2976,17 @@ mod tests {
             snapshot.agent_quotas[0].windows.first().map(|w| w.view.remaining_percent).unwrap_or(0.0),
             snapshot.agent_quotas[0].windows.first().map(|w| w.view.source_label.clone()).unwrap_or_default()
         );
+        // 口径自检在真机数据上必须零误报，否则每个用户一打开就看到警告。
+        // 本机 60011 条 Codex 读数已验证 total == input + output。
+        for source in &snapshot.sources {
+            println!("  source {:<18} {}", source.id, source.quality_label);
+            assert!(
+                !source.detail.contains("与来源自报的总量对不上"),
+                "口径自检在真机数据上误报：{} / {}",
+                source.id,
+                source.detail
+            );
+        }
         assert!(!snapshot.is_demo);
         assert!((1..=24).contains(&snapshot.series.len()));
         let expected_last_label = format!("{:02}:00", snapshot.series.len() - 1);

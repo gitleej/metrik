@@ -56,6 +56,11 @@ struct RawTokenUsage {
     output_tokens: i64,
     #[serde(default)]
     reasoning_output_tokens: i64,
+    /// Codex 自报的总量，用作口径自检的判据（见
+    /// `TokenVector::disagrees_with_reported_total`）。本机 60011 条读数
+    /// 恒等于 input + output——reasoning 与缓存读都已含在里面，不另加。
+    #[serde(default)]
+    total_tokens: i64,
 }
 
 #[derive(Deserialize, Default)]
@@ -191,6 +196,10 @@ impl AgentAdapter for CodexAdapter {
                             output: total.output_tokens.max(0),
                             reasoning_output: total.reasoning_output_tokens.max(0),
                         };
+                        // 口径自检对累计快照做，不对增量做：来源报的也是累计值。
+                        if current.disagrees_with_reported_total(total.total_tokens) {
+                            diagnostics.total_mismatches += 1;
+                        }
                         let delta = current.positive_delta(previous.as_ref());
                         // Replayed counters still advance the baseline so the first
                         // live delta only counts the fork's own increment.
@@ -333,6 +342,56 @@ mod tests {
         assert_eq!(deltas, vec![100, 40, 50]);
         assert_eq!(deltas.iter().sum::<i64>(), 190);
         std::fs::remove_file(temp).ok();
+    }
+
+    /// 口径自检：来源自报总量与我们拆出的分量一致时不该报警，不一致时必须
+    /// 记下来并把该来源标为数据不完整。不一致意味着我们对字段语义的理解错了
+    /// （reasoning 是否含在 output、缓存是否含在输入……），这类错不会崩溃、
+    /// 只会显示一个看着合理的错数字。
+    #[test]
+    fn a_reported_total_that_contradicts_our_components_is_flagged() {
+        let write_log = |name: &str, line: &str| {
+            let temp = std::env::temp_dir()
+                .join(format!("metrik-codex-{name}-{}.jsonl", std::process::id()));
+            let mut file = File::create(&temp).unwrap();
+            writeln!(
+                file,
+                r#"{{"type":"session_meta","payload":{{"id":"session-a"}}}}"#
+            )
+            .unwrap();
+            writeln!(file, "{line}").unwrap();
+            drop(file);
+            let metadata = temp.metadata().unwrap();
+            let candidate = SourceCandidate {
+                source_id: "source".into(),
+                path: temp.clone(),
+                size: metadata.len(),
+                mtime_ns: 1,
+            };
+            let parsed = CodexAdapter::with_roots(vec![])
+                .parse(&candidate, i64::MIN)
+                .unwrap();
+            std::fs::remove_file(temp).ok();
+            parsed
+        };
+
+        // 真机口径：total = input + output，reasoning 与缓存读都已含在里面。
+        let agreeing = write_log(
+            "agree",
+            r#"{"timestamp":"2026-07-12T01:00:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":30,"output_tokens":20,"reasoning_output_tokens":8,"total_tokens":120}}}}"#,
+        );
+        assert_eq!(agreeing.diagnostics.total_mismatches, 0);
+        assert!(!agreeing.diagnostics.is_partial());
+        assert_eq!(agreeing.source.events[0].tokens.processed(), 120);
+
+        // 假设来源某天改成"reasoning 另计"：total 变 128 而我们仍按 120 拆。
+        // 数字看着依旧合理，只有和自报总量一比才露馅。
+        let disagreeing = write_log(
+            "disagree",
+            r#"{"timestamp":"2026-07-12T01:00:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":30,"output_tokens":20,"reasoning_output_tokens":8,"total_tokens":128}}}}"#,
+        );
+        assert_eq!(disagreeing.diagnostics.total_mismatches, 1);
+        assert!(disagreeing.diagnostics.is_partial());
     }
 
     #[test]
