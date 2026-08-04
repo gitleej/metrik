@@ -11,6 +11,10 @@ use std::path::PathBuf;
 
 pub struct ClaudeAdapter {
     roots: Vec<PathBuf>,
+    /// 写进账本的 adapter id。用户声明的自定义来源用的是同一套 Claude 兼容
+    /// JSONL 格式，因此共用这套解析，只换 id——多一份复制粘贴的解析器意味着
+    /// 以后修 bug 要修两遍。
+    adapter_id: &'static str,
 }
 
 #[derive(Clone)]
@@ -63,18 +67,30 @@ impl ClaudeAdapter {
         let home = dirs::home_dir().unwrap_or_default();
         Self {
             roots: vec![home.join(".claude").join("projects")],
+            adapter_id: "claude",
+        }
+    }
+
+    /// 用户在设置里声明的 Claude 兼容 JSONL 目录，合并计入 `custom` 槽位。
+    pub fn for_custom_sources(roots: Vec<PathBuf>) -> Self {
+        Self {
+            roots,
+            adapter_id: "custom",
         }
     }
 
     #[cfg(test)]
     fn with_roots(roots: Vec<PathBuf>) -> Self {
-        Self { roots }
+        Self {
+            roots,
+            adapter_id: "claude",
+        }
     }
 }
 
 impl AgentAdapter for ClaudeAdapter {
     fn id(&self) -> &'static str {
-        "claude"
+        self.adapter_id
     }
 
     fn discover(&self, cutoff_ms: i64) -> Vec<SourceCandidate> {
