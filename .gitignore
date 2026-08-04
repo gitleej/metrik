@@ -13,6 +13,7 @@ Thumbs.db
 .agents/
 .codex/
 .claude/
+.zcode/
 .maintainer/
 .worktrees/
 .codex-release-*/
