@@ -32,6 +32,22 @@ impl TokenVector {
         self.input_uncached + self.cache_read + self.cache_write + self.output
     }
 
+    /// 口径自检：把我们拆出来的分量和来源**自己报的总量**比一次。
+    ///
+    /// 读日志算 token 最危险的错法不是崩溃，而是把字段语义理解反了——
+    /// reasoning 是否已含在 output 里、缓存读是否已含在输入里、拿到的是累计
+    /// 还是增量、百分比是已用还是剩余。这类错**不会报错，只会显示一个看着
+    /// 合理的错数字**，用户无从察觉。（真事：广泛使用的 tokscale 假设
+    /// output 不含 reasoning 而分开相加，本机 11 万条 Codex 读数证明它是错的。）
+    ///
+    /// 凡是来源自带总量的，就用它当判据。对不上即记一次诊断，该来源标为
+    /// 「数据不完整」并说明原因——把安静的错变成响亮的错。
+    ///
+    /// `reported_total <= 0` 视为"来源没报"，不参与判定：缺字段不是错。
+    pub fn disagrees_with_reported_total(&self, reported_total: i64) -> bool {
+        reported_total > 0 && self.processed() != reported_total
+    }
+
     pub fn positive_delta(&self, previous: Option<&Self>) -> Self {
         let Some(previous) = previous else {
             return self.clone();
