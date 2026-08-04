@@ -9,25 +9,25 @@ mod engine;
 mod macos;
 mod pricing;
 mod projects;
+mod quota;
 mod schema;
 mod storage;
 mod sync;
 
 use anyhow::{Context, Result};
-use domain::{QuotaSample, UsageProjects, UsageReport, UsageSessions, UsageSnapshot};
+use domain::{UsageProjects, UsageReport, UsageSessions, UsageSnapshot};
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{Manager, State};
 
-type SharedQuotaCache = Arc<Mutex<Option<(Instant, Vec<QuotaSample>)>>>;
-/// 走网络的官方配额（GLM/Kimi）按 adapter 分桶缓存，跨快照持有以限流。
-type SharedHttpQuotaCache = Arc<Mutex<HashMap<&'static str, (Instant, Vec<QuotaSample>)>>>;
+/// 各家官方配额按 adapter 分桶缓存，跨快照持有以限流。取数节奏由各 provider
+/// 自己声明，见 `quota` 模块。
+type SharedQuotaCache = Arc<quota::QuotaCache>;
 
 const DATABASE_FILE_NAME: &str = "metrik.sqlite3";
 const RECOVERY_DATABASE_FILE_NAME: &str = "metrik.recovery.sqlite3";
@@ -38,8 +38,6 @@ struct AppState {
     database_path: PathBuf,
     scan_gate: Arc<Mutex<()>>,
     quota_cache: SharedQuotaCache,
-    claude_quota_cache: SharedQuotaCache,
-    http_quota_cache: SharedHttpQuotaCache,
 }
 
 fn sqlite_sidecar_path(database_path: &Path, suffix: &str) -> PathBuf {
@@ -343,8 +341,6 @@ async fn usage_snapshot(
     let database_path = state.database_path.clone();
     let scan_gate = Arc::clone(&state.scan_gate);
     let quota_cache = Arc::clone(&state.quota_cache);
-    let claude_quota_cache = Arc::clone(&state.claude_quota_cache);
-    let http_quota_cache = Arc::clone(&state.http_quota_cache);
 
     tauri::async_runtime::spawn_blocking(move || {
         let _gate = scan_gate
@@ -354,8 +350,6 @@ async fn usage_snapshot(
             &database_path,
             &period,
             &quota_cache,
-            &claude_quota_cache,
-            &http_quota_cache,
             force.unwrap_or(false),
         )
         .map_err(|error| error.to_string())
@@ -478,23 +472,14 @@ async fn rebuild_local_ledger(
     let database_path = state.database_path.clone();
     let scan_gate = Arc::clone(&state.scan_gate);
     let quota_cache = Arc::clone(&state.quota_cache);
-    let claude_quota_cache = Arc::clone(&state.claude_quota_cache);
-    let http_quota_cache = Arc::clone(&state.http_quota_cache);
 
     tauri::async_runtime::spawn_blocking(move || {
         let _gate = scan_gate
             .lock()
             .map_err(|_| "usage scan lock poisoned".to_owned())?;
         storage::reset_derived_ledger(&database_path).map_err(|error| error.to_string())?;
-        engine::build_snapshot(
-            &database_path,
-            &period,
-            &quota_cache,
-            &claude_quota_cache,
-            &http_quota_cache,
-            false,
-        )
-        .map_err(|error| error.to_string())
+        engine::build_snapshot(&database_path, &period, &quota_cache, false)
+            .map_err(|error| error.to_string())
     })
     .await
     .map_err(|error| format!("local ledger rebuild task failed: {error}"))?
@@ -530,7 +515,7 @@ async fn set_claude_oauth(
 ) -> Result<claude_oauth::ClaudeOauthStatus, String> {
     let database_path = state.database_path.clone();
     let scan_gate = Arc::clone(&state.scan_gate);
-    let claude_quota_cache = Arc::clone(&state.claude_quota_cache);
+    let quota_cache = Arc::clone(&state.quota_cache);
     tauri::async_runtime::spawn_blocking(move || {
         let _gate = scan_gate
             .lock()
@@ -555,8 +540,8 @@ async fn set_claude_oauth(
         // 上一轮的失败原因对新开关无效，留着会指向已经不存在的问题。
         claude_oauth::clear_failure(&connection).map_err(|error| error.to_string())?;
         // 清缓存让下一次快照立即按新开关取数。
-        if let Ok(mut guard) = claude_quota_cache.lock() {
-            *guard = None;
+        if let Ok(mut guard) = quota_cache.lock() {
+            guard.remove("claude");
         }
         Ok(claude_oauth::ClaudeOauth::detected().status(enabled))
     })
@@ -1065,9 +1050,7 @@ pub fn run() {
             app.manage(AppState {
                 database_path,
                 scan_gate: Arc::new(Mutex::new(())),
-                quota_cache: Arc::new(Mutex::new(None)),
-                claude_quota_cache: Arc::new(Mutex::new(None)),
-                http_quota_cache: Arc::new(Mutex::new(HashMap::new())),
+                quota_cache: Arc::new(Mutex::new(HashMap::new())),
             });
             Ok(())
         })

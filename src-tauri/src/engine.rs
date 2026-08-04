@@ -2,18 +2,16 @@ use crate::adapters::{
     AgentAdapter, AntigravityAdapter, ClaudeAdapter, CodexAdapter, KimiAdapter, OpencodeAdapter,
     ScanDiagnostics, SourceCandidate, WorkbuddyAdapter, ZcodeAdapter,
 };
-use crate::app_server;
-use crate::claude_hook::ClaudeHook;
-use crate::claude_oauth::{self, ClaudeOauth};
-use crate::coding_quota;
+use crate::claude_oauth;
 use crate::domain::ProjectReportRow;
 use crate::domain::{
     AgentCost, AgentQuotaView, AgentReportRow, AgentSummary, CostSummary, DayUsage, IndexingView,
-    ModelSummary, ProjectSummary, QuotaSample, QuotaView, SeriesPoint, SessionSummary, SourceView,
-    SyncView, UsageProjects, UsageReport, UsageSessions, UsageSnapshot, AGENT_IDS,
+    ModelSummary, ProjectSummary, QuotaView, SeriesPoint, SessionSummary, SourceView, SyncView,
+    UsageProjects, UsageReport, UsageSessions, UsageSnapshot, AGENT_IDS,
 };
 use crate::pricing;
 use crate::projects::{self, ProjectResolver, Resolution};
+use crate::quota;
 use crate::storage;
 use crate::sync;
 use anyhow::{Context, Result};
@@ -22,7 +20,6 @@ use rusqlite::{params, Connection};
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
-use std::sync::Mutex;
 use std::time::{Duration as StdDuration, Instant};
 
 /// 报告窗口固定为 182 天（26 周），与 `usage_snapshot` 的扫描周期无关。
@@ -162,9 +159,7 @@ fn estimate_usd(model_components: &HashMap<String, TokenComponents>) -> Option<f
 pub fn build_snapshot(
     database_path: &Path,
     period: &str,
-    quota_cache: &Mutex<Option<(Instant, Vec<QuotaSample>)>>,
-    claude_quota_cache: &Mutex<Option<(Instant, Vec<QuotaSample>)>>,
-    http_quota_cache: &Mutex<HashMap<&'static str, (Instant, Vec<QuotaSample>)>>,
+    quota_cache: &quota::QuotaCache,
     force: bool,
 ) -> Result<UsageSnapshot> {
     let mut connection = storage::open_database(database_path)?;
@@ -172,72 +167,8 @@ pub fn build_snapshot(
     let retention_cutoff = now - Duration::days(RETENTION_DAYS).num_milliseconds();
     let report = ingest_sources(&mut connection, retention_cutoff)?;
 
-    // app-server 是 Codex 额度的权威来源：拉到就整体替换，套餐变更后消失的
-    // 窗口（如 prolite 没有 5 小时窗）不得留着旧日志快照冒充当前额度。
-    if let Ok(samples) = cached_live_quota(quota_cache, force) {
-        if !samples.is_empty() {
-            connection.execute("DELETE FROM quota_snapshot WHERE adapter_id = 'codex'", [])?;
-        }
-        for sample in &samples {
-            storage::upsert_quota(&connection, sample)?;
-        }
-    }
-    // Claude 官方额度：用户显式开启 OAuth 来源时优先（账户级合并额度，
-    // 不依赖终端状态栏）；拉取失败或未开启时回落到 statusLine 钩子文件。
-    let oauth_enabled =
-        storage::get_app_setting(&connection, claude_oauth::SETTING_KEY)?.as_deref() == Some("1");
-    let mut claude_samples = Vec::new();
-    if oauth_enabled {
-        // 失败原因必须留档。丢掉 Err 会让"开了直连却没有额度"完全无法自查：
-        // 界面回落到钩子文案，叫用户去开一个他根本不用的 statusLine。
-        // 缓存命中失败时返回的是 Ok(空)，既不清也不覆盖上一条记录。
-        match cached_claude_oauth_quota(claude_quota_cache, force) {
-            Ok(samples) => {
-                if !samples.is_empty() {
-                    claude_oauth::clear_failure(&connection)?;
-                }
-                claude_samples = samples;
-            }
-            Err(error) => claude_oauth::record_failure(&connection, &error.to_string())?,
-        }
-    }
-    if claude_samples.is_empty() {
-        claude_samples = ClaudeHook::detected().quota_samples();
-    }
-    if !claude_samples.is_empty() {
-        // 当前来源是 Claude 配额的唯一事实：整体替换，来源里消失的窗口
-        // （或旧版 primary/secondary 键）不得滞留在展示里。
-        connection.execute("DELETE FROM quota_snapshot WHERE adapter_id = 'claude'", [])?;
-    }
-    for sample in claude_samples {
-        storage::upsert_quota(&connection, &sample)?;
-    }
-
-    // GLM/Kimi 官方配额：与 codex/claude 同型，一次实时 GET，跨快照缓存限流。
-    // 取到才整体替换该 Agent 的窗口；无凭据/失败时保留旧行（会随时效变陈旧），
-    // 绝不写零值或估算冒充。
-    for (adapter_id, fetch) in [
-        (
-            "zcode",
-            coding_quota::fetch_zcode_quota as fn(StdDuration) -> Result<Vec<QuotaSample>>,
-        ),
-        ("kimi", coding_quota::fetch_kimi_quota),
-        ("kimiwork", coding_quota::fetch_kimiwork_quota),
-        ("qoder", coding_quota::fetch_qoder_quota),
-        ("workbuddy", coding_quota::fetch_workbuddy_quota),
-    ] {
-        if let Ok(samples) = cached_coding_quota(http_quota_cache, adapter_id, fetch, force) {
-            if !samples.is_empty() {
-                connection.execute(
-                    "DELETE FROM quota_snapshot WHERE adapter_id = ?1",
-                    [adapter_id],
-                )?;
-                for sample in &samples {
-                    storage::upsert_quota(&connection, sample)?;
-                }
-            }
-        }
-    }
+    // 各家官方额度的取数与落库统一在 quota 模块，见那里的落库语义说明。
+    quota::refresh_all(&connection, quota_cache, force)?;
 
     storage::prune_missing_sources(&mut connection)?;
     storage::prune_old_events(&connection, retention_cutoff)?;
@@ -775,96 +706,6 @@ fn global_event_bounds(connection: &Connection) -> Result<(Option<i64>, Option<i
             |row| Ok((row.get::<_, Option<i64>>(0)?, row.get::<_, Option<i64>>(1)?)),
         )
         .context("failed to calculate ledger event bounds")
-}
-
-fn cached_live_quota(
-    cache: &Mutex<Option<(Instant, Vec<QuotaSample>)>>,
-    force: bool,
-) -> Result<Vec<QuotaSample>> {
-    let mut guard = cache
-        .lock()
-        .map_err(|_| anyhow::anyhow!("quota cache lock poisoned"))?;
-    // force（手动刷新）跳过新鲜缓存的早退，立即尝试拉取；失败路径与常规一致：
-    // 依旧写入失败哨兵并保留库中旧行，绝不因强制刷新而删数据。
-    if !force {
-        if let Some((captured, value)) = guard.as_ref() {
-            let ttl = if value.is_empty() { 240 } else { 60 };
-            if captured.elapsed() < StdDuration::from_secs(ttl) {
-                return Ok(value.clone());
-            }
-        }
-    }
-    match app_server::read_codex_quota(StdDuration::from_secs(4)) {
-        Ok(value) => {
-            *guard = Some((Instant::now(), value.clone()));
-            Ok(value)
-        }
-        Err(error) => {
-            // An unavailable CLI should not make every periodic widget refresh
-            // pay the full process timeout. The empty sentinel uses a longer TTL.
-            *guard = Some((Instant::now(), Vec::new()));
-            Err(error)
-        }
-    }
-}
-
-/// Claude OAuth 官方额度的缓存拉取：成功 120s、失败 300s（限流友好）。
-fn cached_claude_oauth_quota(
-    cache: &Mutex<Option<(Instant, Vec<QuotaSample>)>>,
-    force: bool,
-) -> Result<Vec<QuotaSample>> {
-    let mut guard = cache
-        .lock()
-        .map_err(|_| anyhow::anyhow!("claude quota cache lock poisoned"))?;
-    if !force {
-        if let Some((captured, value)) = guard.as_ref() {
-            let ttl = if value.is_empty() { 300 } else { 120 };
-            if captured.elapsed() < StdDuration::from_secs(ttl) {
-                return Ok(value.clone());
-            }
-        }
-    }
-    match ClaudeOauth::detected().fetch_quota_samples(StdDuration::from_secs(6)) {
-        Ok(value) => {
-            *guard = Some((Instant::now(), value.clone()));
-            Ok(value)
-        }
-        Err(error) => {
-            *guard = Some((Instant::now(), Vec::new()));
-            Err(error)
-        }
-    }
-}
-
-/// GLM/Kimi 等走网络的官方配额缓存拉取：按 adapter 分桶，成功 120s、失败 300s。
-/// adapter 每次快照都重建，故缓存不能放 adapter 里，必须由 engine 层跨快照持有。
-fn cached_coding_quota(
-    cache: &Mutex<HashMap<&'static str, (Instant, Vec<QuotaSample>)>>,
-    adapter_id: &'static str,
-    fetch: fn(StdDuration) -> Result<Vec<QuotaSample>>,
-    force: bool,
-) -> Result<Vec<QuotaSample>> {
-    let mut guard = cache
-        .lock()
-        .map_err(|_| anyhow::anyhow!("coding quota cache lock poisoned"))?;
-    if !force {
-        if let Some((captured, value)) = guard.get(adapter_id) {
-            let ttl = if value.is_empty() { 300 } else { 120 };
-            if captured.elapsed() < StdDuration::from_secs(ttl) {
-                return Ok(value.clone());
-            }
-        }
-    }
-    match fetch(StdDuration::from_secs(6)) {
-        Ok(value) => {
-            guard.insert(adapter_id, (Instant::now(), value.clone()));
-            Ok(value)
-        }
-        Err(error) => {
-            guard.insert(adapter_id, (Instant::now(), Vec::new()));
-            Err(error)
-        }
-    }
 }
 
 /// 按固定的保留期视界摄取日志。需要解析的源按 mtime 倒序排队，在时间预算内尽量
@@ -1712,6 +1553,7 @@ fn bucket_label(period: &str, start: NaiveDate, index: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
 
     fn test_local_time(date: NaiveDate, hour: u32) -> chrono::DateTime<Local> {
         Local
@@ -3102,18 +2944,8 @@ mod tests {
             std::process::id(),
             Utc::now().timestamp_millis()
         ));
-        let quota_cache = Mutex::new(None);
-        let claude_quota_cache = Mutex::new(None);
-        let http_quota_cache = Mutex::new(HashMap::new());
-        let snapshot = build_snapshot(
-            &database,
-            "today",
-            &quota_cache,
-            &claude_quota_cache,
-            &http_quota_cache,
-            false,
-        )
-        .unwrap();
+        let quota_cache = Mutex::new(HashMap::new());
+        let snapshot = build_snapshot(&database, "today", &quota_cache, false).unwrap();
         println!(
             "live snapshot: total={}, codex={}, claude={}, quota_available={}, quota_remaining={:.1}, quota_source={}",
             snapshot.total_tokens,
