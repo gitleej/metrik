@@ -649,7 +649,13 @@ async function configureQoderCookie(cookie) {
 
 async function getClaudeOauthStatus() {
   if (!isTauriRuntime()) {
-    return { demo: true, enabled: false, credentialsPresent: false, scopeOk: false };
+    return {
+      demo: true,
+      enabled: false,
+      credentialsPresent: false,
+      scopeOk: false,
+      expired: false,
+    };
   }
   return invoke("claude_oauth_status");
 }

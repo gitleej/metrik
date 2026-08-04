@@ -23,17 +23,21 @@ use std::time::Duration;
 ///    `Claude Code-credentials-<hash>`。读取经 `security` 命令，token 同样
 ///    只在内存里用一次，不落盘。
 ///
-/// token 失效（401）时调一次官方 CLI `claude auth status --json` 让 Claude Code
-/// 自己刷新，然后重读凭据重试一次。刷新与落盘全由官方客户端完成——本模块
-/// 从不刷新、不写回、不解析该命令的输出。
+/// access token 只活几小时，且只有 Claude Code 自己跑起来才会刷新：真机实测
+/// `claude auth status --json` 退出码 0、报告已登录，钥匙串里的 `expiresAt`
+/// 却纹丝不动（过期十小时后依旧是同一个时刻），而 `claude auth` 下只有
+/// login / logout / status，没有刷新入口。凭据里那把 refreshToken 我们不动：
+/// OAuth 刷新令牌通常一次性，我们换了却不写回，用户真正在用的 Claude Code
+/// 登录就可能被顶掉——为看一个额度数字不值得。
+///
+/// 因此过期即如实说明并回落到 statusLine 钩子。这个功能有个前提：最近用过
+/// Claude Code。设置页把这句写在前面，别让人撞了 401 再猜。
 const CREDENTIALS_FILE: &str = ".credentials.json";
 const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 const BETA_HEADER: &str = "oauth-2025-04-20";
 const REQUIRED_SCOPE: &str = "user:profile";
 /// 用户显式指定 token 的环境变量（与 Claude Code 官方同名）。
 const ENV_TOKEN: &str = "CLAUDE_CODE_OAUTH_TOKEN";
-/// 覆盖 claude 可执行文件位置的环境变量（与 CODEX_BINARY 同一惯例）。
-const ENV_CLI: &str = "CLAUDE_BINARY";
 /// Claude Code 在 macOS 钥匙串里存凭据用的 generic-password service 名。
 /// v2.1.52 起改成 `Claude Code-credentials-<hash>`，哈希不可推导，只能从
 /// 钥匙串条目里找；旧名仍在用，两者都要试。
@@ -128,6 +132,9 @@ pub struct ClaudeOauthStatus {
     pub credentials_present: bool,
     /// token 带 `user:profile` scope（用量端点必需）。
     pub scope_ok: bool,
+    /// token 已过期。过期的凭据同样"存在"，只报 credentials_present 会让
+    /// 设置页写着「凭据可用」而实际每次查询都被拒。
+    pub expired: bool,
     /// 最近一次直连查询失败；开关本身正常时，问题只会出现在这里。
     pub last_failure: Option<ClaudeOauthFailure>,
 }
@@ -276,10 +283,15 @@ impl ClaudeOauth {
         let scope_ok = credentials
             .as_ref()
             .is_some_and(|oauth| oauth.scopes.iter().any(|scope| scope == REQUIRED_SCOPE));
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let expired = credentials
+            .as_ref()
+            .is_some_and(|oauth| oauth.is_expired(now_ms));
         ClaudeOauthStatus {
             enabled,
             credentials_present: credentials.is_some(),
             scope_ok,
+            expired,
             last_failure: None,
         }
     }
@@ -292,64 +304,24 @@ impl ClaudeOauth {
         let Some(credentials) = self.read_credentials() else {
             bail!("本机没有 Claude Code 登录凭据（环境变量、~/.claude/.credentials.json、macOS 钥匙串均未命中）");
         };
-        // 已经过期就先刷新，省掉一次注定 401 的请求。
-        let credentials = if credentials.is_expired(chrono::Utc::now().timestamp_millis()) {
-            self.refresh_credentials().unwrap_or(credentials)
-        } else {
-            credentials
-        };
-        match self.request_usage(&credentials, timeout) {
-            Err(UsageError::Unauthorized) => {
-                // token 失效：让官方 CLI 自己刷新一次再重试。刷新与落盘全由
-                // Claude Code 完成，我们既不解析它的输出也不写回任何凭据。
-                let Some(refreshed) = self.refresh_credentials() else {
-                    bail!("Claude 凭据已失效（401），自动刷新未成功，请重新运行 claude login");
-                };
-                self.request_usage(&refreshed, timeout)
-                    .map_err(|error| match error {
-                        UsageError::Unauthorized => anyhow::anyhow!(
-                            "Claude 凭据已失效（401），刷新后仍被拒绝，请重新运行 claude login"
-                        ),
-                        UsageError::Other(error) => error,
-                    })
-            }
-            Err(UsageError::Other(error)) => Err(error),
-            Ok(samples) => Ok(samples),
+        // 过期就别发那个注定被拒的请求：刷新只有 Claude Code 自己做得到。
+        if credentials.is_expired(chrono::Utc::now().timestamp_millis()) {
+            bail!("Claude 凭据已过期，用一次 Claude Code 即可自动刷新");
         }
-    }
-
-    /// 让官方 CLI 刷新 token（`claude auth status --json`），然后重读凭据。
-    /// 只取"刷新"这个副作用：输出直接丢弃，退出码也不作判据——判据是重读
-    /// 出来的凭据本身。
-    fn refresh_credentials(&self) -> Option<OauthCredentials> {
-        // 单测不碰系统来源，避免读到开发机的真实凭据或起真实进程。
-        if !self.consult_system {
-            return None;
-        }
-        let mut command = claude_cli_command()?;
-        command
-            .args(["auth", "status", "--json"])
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null());
-        let child = command.spawn().ok()?;
-        wait_with_deadline(child, Duration::from_secs(12));
-        self.read_credentials()
+        self.request_usage(&credentials, timeout)
     }
 
     fn request_usage(
         &self,
         credentials: &OauthCredentials,
         timeout: Duration,
-    ) -> std::result::Result<Vec<QuotaSample>, UsageError> {
+    ) -> Result<Vec<QuotaSample>> {
         if !credentials
             .scopes
             .iter()
             .any(|scope| scope == REQUIRED_SCOPE)
         {
-            return Err(UsageError::Other(anyhow::anyhow!(
-                "Claude 凭据缺少 user:profile 权限，无法查询用量。请重新运行 claude login"
-            )));
+            bail!("Claude 凭据缺少 user:profile 权限，无法查询用量。请重新运行 claude login");
         }
         let token = credentials.access_token.clone().unwrap_or_default();
 
@@ -363,15 +335,17 @@ impl ClaudeOauth {
             .call()
             .map_err(|error| match error {
                 // 错误信息里绝不能带请求头（token）。
-                ureq::Error::Status(401, _) => UsageError::Unauthorized,
+                ureq::Error::Status(401, _) => {
+                    anyhow::anyhow!("Claude 凭据被拒（401），请重新运行 claude login")
+                }
                 ureq::Error::Status(429, _) => {
-                    UsageError::Other(anyhow::anyhow!("Claude 用量接口限流（429），稍后自动重试"))
+                    anyhow::anyhow!("Claude 用量接口限流（429），稍后自动重试")
                 }
                 ureq::Error::Status(code, _) => {
-                    UsageError::Other(anyhow::anyhow!("Claude 用量接口返回 HTTP {code}"))
+                    anyhow::anyhow!("Claude 用量接口返回 HTTP {code}")
                 }
                 ureq::Error::Transport(transport) => {
-                    UsageError::Other(anyhow::anyhow!("Claude 用量接口网络错误: {transport}"))
+                    anyhow::anyhow!("Claude 用量接口网络错误: {transport}")
                 }
             })?;
 
@@ -385,84 +359,7 @@ impl ClaudeOauth {
             }
             Ok(samples)
         };
-        parse().map_err(UsageError::Other)
-    }
-}
-
-/// 401 要与其它失败分开：只有它值得刷新后重试一次。
-enum UsageError {
-    Unauthorized,
-    Other(anyhow::Error),
-}
-
-/// 组装调用 claude CLI 的命令。与 `app_server.rs` 定位 codex 的写法同构：
-/// Windows 上 npm 装出来的是 `.cmd` 脚本，得经 cmd.exe 起。
-fn claude_cli_command() -> Option<std::process::Command> {
-    use std::process::Command;
-
-    let explicit = std::env::var_os(ENV_CLI).map(PathBuf::from);
-
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-
-        let npm_script = std::env::var_os("APPDATA")
-            .map(PathBuf::from)
-            .map(|root| root.join("npm").join("claude.cmd"))
-            .filter(|path| path.exists());
-        let script = explicit
-            .or(npm_script)
-            .unwrap_or_else(|| PathBuf::from("claude"));
-        let mut command = Command::new("cmd.exe");
-        command
-            .args(["/D", "/C"])
-            .arg(script)
-            // 不弹控制台窗口。
-            .creation_flags(0x0800_0000);
-        Some(command)
-    }
-
-    #[cfg(not(windows))]
-    {
-        if let Some(path) = explicit {
-            return Some(Command::new(path));
-        }
-        let mut candidates = Vec::new();
-        if let Some(home) = dirs::home_dir() {
-            candidates.extend([
-                home.join(".local/bin/claude"),
-                home.join(".claude/local/claude"),
-                home.join(".npm-global/bin/claude"),
-            ]);
-        }
-        candidates.extend([
-            PathBuf::from("/opt/homebrew/bin/claude"),
-            PathBuf::from("/usr/local/bin/claude"),
-        ]);
-        let found = candidates.into_iter().find(|path| path.exists());
-        // 都没命中就交给 PATH。
-        Some(Command::new(
-            found.unwrap_or_else(|| PathBuf::from("claude")),
-        ))
-    }
-}
-
-/// 等一个子进程结束，超时就连同它一起结束。快照构建持有扫描锁，
-/// 一个吊死的 CLI 会把整次刷新拖住，所以必须有上限。
-fn wait_with_deadline(mut child: std::process::Child, limit: Duration) -> bool {
-    let started = std::time::Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => return status.success(),
-            Ok(None) => {}
-            Err(_) => return false,
-        }
-        if started.elapsed() >= limit {
-            let _ = child.kill();
-            let _ = child.wait();
-            return false;
-        }
-        std::thread::sleep(Duration::from_millis(100));
+        parse()
     }
 }
 
@@ -777,6 +674,53 @@ attributes:
         )
         .unwrap();
         assert!(oauth.status(true).scope_ok);
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 过期凭据不能既报"可用"又每次都被拒：状态要说实话，查询要早退。
+    /// 早退还顺带保证了这条用例不碰网络——过期分支在请求之前。
+    #[test]
+    fn expired_credentials_are_reported_and_short_circuit_the_request() {
+        let dir = std::env::temp_dir().join(format!(
+            "metrik-claude-oauth-expired-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let oauth = ClaudeOauth::with_dir(dir.clone());
+
+        let past = chrono::Utc::now().timestamp_millis() - 60_000;
+        fs::write(
+            dir.join(CREDENTIALS_FILE),
+            format!(
+                r#"{{"claudeAiOauth":{{"accessToken":"sk-test","scopes":["user:profile"],"expiresAt":{past}}}}}"#
+            ),
+        )
+        .unwrap();
+        let status = oauth.status(true);
+        assert!(status.credentials_present);
+        assert!(status.scope_ok);
+        assert!(status.expired);
+
+        let error = oauth
+            .fetch_quota_samples(Duration::from_secs(1))
+            .expect_err("expired credentials must not be sent to the endpoint");
+        assert!(
+            error.to_string().contains("已过期"),
+            "unexpected error: {error}"
+        );
+
+        // 未过期的凭据不该被误判——过期判定只认过去的时刻。
+        let future = chrono::Utc::now().timestamp_millis() + 3_600_000;
+        fs::write(
+            dir.join(CREDENTIALS_FILE),
+            format!(
+                r#"{{"claudeAiOauth":{{"accessToken":"sk-test","scopes":["user:profile"],"expiresAt":{future}}}}}"#
+            ),
+        )
+        .unwrap();
+        assert!(!oauth.status(true).expired);
 
         fs::remove_dir_all(&dir).ok();
     }
