@@ -3,6 +3,7 @@ mod app_server;
 mod claude_hook;
 mod claude_oauth;
 mod coding_quota;
+mod detect;
 mod domain;
 mod engine;
 #[cfg(target_os = "macos")]

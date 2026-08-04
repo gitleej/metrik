@@ -3110,6 +3110,23 @@ html:has(.strip-shell--glass-ink-light) #root {
   line-height: 1.7;
 }
 
+/* 本机没检测到的 Agent：默认收起，但一定可展开手动勾选——检测会误判，
+   不能因此让某个 Agent 变得不可达。 */
+.settings-agent-missing {
+  margin-top: 12px;
+}
+
+.settings-agent-missing summary {
+  color: #55575b;
+  cursor: pointer;
+  font-size: 12.5px;
+  user-select: none;
+}
+
+.settings-agent-missing > ul {
+  margin-top: 10px;
+}
+
 .settings-card {
   padding: 22px 24px;
   background: rgba(251, 251, 250, 0.85);
@@ -4745,6 +4762,7 @@ html:has(.strip-shell--glass-ink-light) #root {
 :root[data-theme="dark"] .settings-about a:hover { color: var(--d-muted); }
 :root[data-theme="dark"] .settings-guide { color: var(--d-muted); }
 :root[data-theme="dark"] .settings-guide summary { color: #7fabef; }
+:root[data-theme="dark"] .settings-agent-missing summary { color: var(--d-muted); }
 :root[data-theme="dark"] .settings-device-list li {
   background: var(--d-raised);
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08);

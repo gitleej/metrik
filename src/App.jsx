@@ -2444,50 +2444,62 @@ function AppearanceCard({ theme, onThemeChange, glassAlpha, onGlassAlpha, glassT
   );
 }
 
-function AgentListColumn({ title, hint, agents, onToggle, onMove }) {
+function AgentListColumn({ title, hint, agents, detected, onToggle, onMove }) {
   // 已选的按显示顺序排前面，未选的按默认顺序垫后。
   const rows = agentIdsInDisplayOrder(agents);
+  // 勾选过的一律留在上面：检测只用于分组，不能把用户自己选的挪进折叠区。
+  // detected 为 null 表示这次拿不到检测结果（加载中、演示数据、旧后端），
+  // 此时不折叠——宁可多列几行，也不能因为不知道就把 Agent 藏起来。
+  const present = detected
+    ? rows.filter((agentId) => agents.includes(agentId) || detected.has(agentId))
+    : rows;
+  const missing = detected ? rows.filter((agentId) => !present.includes(agentId)) : [];
+  const row = (agentId) => {
+    const index = agents.indexOf(agentId);
+    const checked = index >= 0;
+    return (
+      <li key={agentId}>
+        <label>
+          <input
+            type="checkbox"
+            checked={checked}
+            disabled={checked && agents.length === 1}
+            onChange={() => onToggle(agentId)}
+          />
+          <AgentMark agentId={agentId} />
+          <span>{AGENT_META[agentId].label}</span>
+        </label>
+        {checked && (
+          <button
+            type="button"
+            className="settings-agent-move"
+            onClick={() => onMove(agentId)}
+            disabled={index === 0}
+            aria-label={`将 ${AGENT_META[agentId].label} 上移`}
+            title="上移"
+          >
+            ↑
+          </button>
+        )}
+      </li>
+    );
+  };
   return (
     <div className="settings-agent-column">
       <h3>{title}</h3>
       <p className="settings-muted">{hint}</p>
-      <ul className="settings-agent-toggle">
-        {rows.map((agentId) => {
-          const index = agents.indexOf(agentId);
-          const checked = index >= 0;
-          return (
-            <li key={agentId}>
-              <label>
-                <input
-                  type="checkbox"
-                  checked={checked}
-                  disabled={checked && agents.length === 1}
-                  onChange={() => onToggle(agentId)}
-                />
-                <AgentMark agentId={agentId} />
-                <span>{AGENT_META[agentId].label}</span>
-              </label>
-              {checked && (
-                <button
-                  type="button"
-                  className="settings-agent-move"
-                  onClick={() => onMove(agentId)}
-                  disabled={index === 0}
-                  aria-label={`将 ${AGENT_META[agentId].label} 上移`}
-                  title="上移"
-                >
-                  ↑
-                </button>
-              )}
-            </li>
-          );
-        })}
-      </ul>
+      <ul className="settings-agent-toggle">{present.map(row)}</ul>
+      {missing.length > 0 && (
+        <details className="settings-agent-missing">
+          <summary>本机未检测到（{missing.length}）</summary>
+          <ul className="settings-agent-toggle">{missing.map(row)}</ul>
+        </details>
+      )}
     </div>
   );
 }
 
-function AgentsDisplayCard({ widgetAgents, onToggleWidgetAgent, onMoveWidgetAgent, stripAgents, onToggleStripAgent, onMoveStripAgent }) {
+function AgentsDisplayCard({ widgetAgents, onToggleWidgetAgent, onMoveWidgetAgent, stripAgents, onToggleStripAgent, onMoveStripAgent, detectedAgents }) {
   return (
     <div className="settings-card">
       <h2>显示的 Agent</h2>
@@ -2499,6 +2511,7 @@ function AgentsDisplayCard({ widgetAgents, onToggleWidgetAgent, onMoveWidgetAgen
           title={IS_MAC ? "菜单栏、小组件与侧栏" : "小组件与侧栏"}
           hint="完整视图侧栏还会自动补上本周期有用量的 Agent。"
           agents={widgetAgents}
+          detected={detectedAgents}
           onToggle={onToggleWidgetAgent}
           onMove={onMoveWidgetAgent}
         />
@@ -2507,6 +2520,7 @@ function AgentsDisplayCard({ widgetAgents, onToggleWidgetAgent, onMoveWidgetAgen
             title="胶囊条"
             hint={'无配额来源的以 "--" 占格。'}
             agents={stripAgents}
+            detected={detectedAgents}
             onToggle={onToggleStripAgent}
             onMove={onMoveStripAgent}
           />
@@ -2660,7 +2674,7 @@ const SETTINGS_TABS = [
   },
 ];
 
-function SettingsSection({ onSnapshotRefresh, widgetAgents, onToggleWidgetAgent, onMoveWidgetAgent, stripAgents, onToggleStripAgent, onMoveStripAgent, glassAlpha, onGlassAlpha, glassTint, onGlassTint, glassInk, onGlassInk, uiScale, onUiScale, stripScale, onStripScale, theme, onThemeChange, autoUpdateCheck, onAutoUpdateCheck, availableUpdate }) {
+function SettingsSection({ onSnapshotRefresh, widgetAgents, onToggleWidgetAgent, onMoveWidgetAgent, stripAgents, onToggleStripAgent, onMoveStripAgent, detectedAgents, glassAlpha, onGlassAlpha, glassTint, onGlassTint, glassInk, onGlassInk, uiScale, onUiScale, stripScale, onStripScale, theme, onThemeChange, autoUpdateCheck, onAutoUpdateCheck, availableUpdate }) {
   const [settings, setSettings] = useState(null);
   const [directoryInput, setDirectoryInput] = useState("");
   const [busy, setBusy] = useState(false);
@@ -2773,6 +2787,7 @@ function SettingsSection({ onSnapshotRefresh, widgetAgents, onToggleWidgetAgent,
             stripAgents={stripAgents}
             onToggleStripAgent={onToggleStripAgent}
             onMoveStripAgent={onMoveStripAgent}
+            detectedAgents={detectedAgents}
           />
         )}
 
@@ -4590,6 +4605,16 @@ export function App() {
     return snapshot.agents.find((agent) => agent.id === selectedAgent)?.tokens || 0;
   }, [selectedAgent, snapshot]);
 
+  // 本机装了哪些 Agent，供设置里的分组用。拿不到检测结果时返回 null，
+  // 由列表决定不折叠——加载中、演示数据、旧后端都属于"不知道"，
+  // 而不知道时把 Agent 收进折叠区会让用户以为我们不支持它。
+  const detectedAgents = useMemo(() => {
+    if (snapshot.pending || snapshot.loadError) return null;
+    const known = snapshot.agents.filter((agent) => typeof agent.detected === "boolean");
+    if (!known.length) return null;
+    return new Set(known.filter((agent) => agent.detected).map((agent) => agent.id));
+  }, [snapshot]);
+
   // 配额卡只在小组件已勾选展示的 Agent 里轮换（用户明确不想看的不进循环）；
   // 勾选了但配额来源未启用的也保留——"官方配额不可用/设置中开启钩子"的
   // 提示本身是有效信息。widgetAgents 由设置保证非空。
@@ -5080,6 +5105,7 @@ export function App() {
             stripAgents={stripAgents}
             onToggleStripAgent={handleToggleStripAgent}
             onMoveStripAgent={handleMoveStripAgent}
+            detectedAgents={detectedAgents}
             glassAlpha={glassAlpha}
             onGlassAlpha={handleGlassAlpha}
             glassTint={glassTint}

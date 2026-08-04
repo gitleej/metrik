@@ -3,6 +3,7 @@ use crate::adapters::{
     ScanDiagnostics, SourceCandidate, WorkbuddyAdapter, ZcodeAdapter,
 };
 use crate::claude_oauth;
+use crate::detect;
 use crate::domain::ProjectReportRow;
 use crate::domain::{
     AgentCost, AgentQuotaView, AgentReportRow, AgentSummary, CostSummary, DayUsage, IndexingView,
@@ -1014,6 +1015,9 @@ fn query_snapshot_at(
             .collect(),
     };
 
+    // 安装探针只碰文件系统与已配置的凭据，一次快照查一遍即可。
+    let installed = detect::installed_agents();
+
     let mut models: Vec<ModelSummary> = model_totals
         .into_iter()
         .map(|((agent, model), tokens)| ModelSummary {
@@ -1063,6 +1067,9 @@ fn query_snapshot_at(
                     cache_write: comps.cache_write,
                     output: comps.output,
                     share: share(totals[agent]),
+                    // 有用量必然装了；反过来不成立，所以安装痕迹是主判据、
+                    // 用量兜底（Antigravity 没有便宜可靠的安装探针）。
+                    detected: installed.contains(agent) || totals[agent] > 0,
                 }
             })
             .collect(),
