@@ -666,12 +666,11 @@ async fn configure_qoder_cookie(cookie: Option<String>) -> Result<QoderCookieVie
 #[tauri::command]
 async fn sync_settings(state: State<'_, AppState>) -> Result<domain::SyncView, String> {
     let database_path = state.database_path.clone();
-    let scan_gate = Arc::clone(&state.scan_gate);
 
+    // 与会话/项目/分组规则同一惯例：设置页的读取不占扫描锁。占了的话，打开
+    // 设置正好赶上一次扫描，整张同步卡片要等扫描结束才出现——界面看着是
+    // 空的，然后突然长出一截。写连接仍然要保留：首次调用会补写设备身份。
     tauri::async_runtime::spawn_blocking(move || {
-        let _gate = scan_gate
-            .lock()
-            .map_err(|_| "usage scan lock poisoned".to_owned())?;
         let connection =
             storage::open_database(&database_path).map_err(|error| error.to_string())?;
         sync::sync_view(&connection).map_err(|error| error.to_string())
