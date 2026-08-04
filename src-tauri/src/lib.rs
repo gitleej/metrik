@@ -514,7 +514,10 @@ async fn claude_oauth_status(
             .map_err(|error| error.to_string())?
             .as_deref()
             == Some("1");
-        Ok(claude_oauth::ClaudeOauth::detected().status(enabled))
+        let failure = claude_oauth::last_failure(&connection).map_err(|error| error.to_string())?;
+        Ok(claude_oauth::ClaudeOauth::detected()
+            .status(enabled)
+            .with_failure(failure))
     })
     .await
     .map_err(|error| format!("claude oauth status task failed: {error}"))?
@@ -549,6 +552,8 @@ async fn set_claude_oauth(
                 )
                 .map_err(|error| error.to_string())?;
         }
+        // 上一轮的失败原因对新开关无效，留着会指向已经不存在的问题。
+        claude_oauth::clear_failure(&connection).map_err(|error| error.to_string())?;
         // 清缓存让下一次快照立即按新开关取数。
         if let Ok(mut guard) = claude_quota_cache.lock() {
             *guard = None;
