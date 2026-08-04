@@ -38,7 +38,7 @@ import claudeAppIcon from "./assets/claude-app-icon.jpg";
 import kimiAppIcon from "./assets/kimi-app-icon.png";
 import opencodeAppIcon from "./assets/opencode-app-icon.png";
 import qoderAppIcon from "./assets/qoder-app-icon.png";
-import workbuddyAppIcon from "./assets/workbuddy-app-icon.svg";
+import workbuddyAppIcon from "./assets/workbuddy-app-icon.png";
 import zcodeAppIcon from "./assets/zcode-app-icon.png";
 import { glassShellAppearance, nextGlassTint, resolveGlassMode } from "./glassAppearance.js";
 import { QUOTA_LOW_REMAINING, bindingWindow } from "./quotaWindows.js";
@@ -165,7 +165,7 @@ const AGENT_META = {
   workbuddy: {
     // 覆盖腾讯 CodeBuddy Code 与 WorkBuddy 两个同格式来源，展示名从用户口径。
     label: "WorkBuddy",
-    // 品牌紫与 GLM 的 #6a5ae0 几乎同色相，按惯例让位：取空缺的绿色。
+    // 与品牌同色系的绿；也正好避开 GLM 的 #6a5ae0。
     accent: "#3d9c50",
     iconSrc: workbuddyAppIcon,
     iconClass: "agent-icon--workbuddy",
@@ -850,11 +850,12 @@ function Inspector({ snapshot, selectedAgent, onSelectAgent, onOpenSources, widg
   return (
     <aside className="inspector" aria-label="配额与 Agent 明细">
       <div className="quota-groups" aria-label="各 Agent 官方配额">
-        {agentIdsInDisplayOrder(widgetAgents).map((agentId) => {
+        {/* 严格按勾选，顺序即勾选顺序。配额卡是实时状态而非历史用量，没勾就
+            不该冒出来——哪怕它确有官方额度来源。勾了但没有来源的仍占一行，
+            "暂无可靠来源"本身是有效信息。 */}
+        {widgetAgents.filter((agentId) => AGENT_META[agentId]).map((agentId) => {
           const entry = agentQuotaFor(snapshot, agentId);
           const hasData = quotaHasData(entry);
-          // 勾选的 Agent 即使没有配额来源也占一行——"暂无可靠来源"本身是有效信息。
-          if (!hasData && !chosen.has(agentId)) return null;
           const provenanceView = entry.windows?.find((window) => window.view.available)?.view;
           return (
             <section className="quota-group" key={agentId}>
@@ -2971,7 +2972,7 @@ function projectLabel(path) {
   return parts[parts.length - 1] || path;
 }
 
-// 项目归类设置：登记项目根、隐藏目录，列出已有规则并可移除。
+// 添加项目：登记项目根、隐藏目录，列出已有规则并可移除。
 function ProjectRulesCard({ rules, busy, onAddRoot, onRemoveRoot, onRemoveHidden, onClose }) {
   const [draft, setDraft] = useState("");
   const submit = () => {
@@ -2981,10 +2982,10 @@ function ProjectRulesCard({ rules, busy, onAddRoot, onRemoveRoot, onRemoveHidden
     setDraft("");
   };
   return (
-    <section className="rules-card" aria-label="项目归类设置">
+    <section className="rules-card" aria-label="添加项目">
       <header className="rules-card-head">
-        <h2>项目归类</h2>
-        <button type="button" className="rules-close" onClick={onClose} aria-label="收起项目归类设置">
+        <h2>添加项目</h2>
+        <button type="button" className="rules-close" onClick={onClose} aria-label="收起添加项目">
           <X size={14} weight="bold" aria-hidden="true" />
         </button>
       </header>
@@ -3139,8 +3140,10 @@ function ProjectShareDonut({ projects, colorByPath, onOpen }) {
         offset += dash;
         return rendered;
       })}
-      <text x="100" y="96" textAnchor="middle" className="donut-total">{compactTokens(total)}</text>
-      <text x="100" y="114" textAnchor="middle" className="donut-caption">tokens</text>
+      {/* 两行合起来在环心居中：基线放 96/114 时墨迹只到 77.4~114（数字与
+          "tokens" 都没有下伸部），视觉中心落在 95.7，整体偏高约 4px。 */}
+      <text x="100" y="100" textAnchor="middle" className="donut-total">{compactTokens(total)}</text>
+      <text x="100" y="118" textAnchor="middle" className="donut-caption">tokens</text>
     </svg>
   );
 }
@@ -3434,7 +3437,7 @@ ${session.sessionId}`}
           onClick={() => setRulesOpen((open) => !open)}
         >
           <FolderSimple size={13} weight="bold" aria-hidden="true" />
-          项目归类
+          添加项目
         </button>
         <button
           type="button"
@@ -3507,8 +3510,11 @@ ${session.sessionId}`}
                     </button>
                   )}
                   {projects.hiddenTokens > 0 && (
+                    // 这个数把用户隐藏的与内置排除（家目录、下载、系统临时目录）
+                    // 算在一起，所以不能说"已隐藏"——用户把自己的规则删干净了，
+                    // 剩下的内置部分仍会让它显示，读起来像没删掉。
                     <button type="button" onClick={() => setRulesOpen(true)}>
-                      已隐藏 {compactTokens(projects.hiddenTokens)}
+                      未计入项目 {compactTokens(projects.hiddenTokens)}
                     </button>
                   )}
                 </small>
@@ -3836,8 +3842,9 @@ function ReportShareDonut({ agents, totalTokens, weeksCount }) {
           offset += dash;
           return segment;
         })}
-        <text x="100" y="96" textAnchor="middle" className="donut-total">{compactTokens(totalTokens)}</text>
-        <text x="100" y="114" textAnchor="middle" className="donut-caption">{`tokens · 近 ${weeksCount} 周`}</text>
+        {/* 基线与项目环形保持一致，见 ProjectShareDonut 的说明。 */}
+        <text x="100" y="100" textAnchor="middle" className="donut-total">{compactTokens(totalTokens)}</text>
+        <text x="100" y="118" textAnchor="middle" className="donut-caption">{`tokens · 近 ${weeksCount} 周`}</text>
       </svg>
       <ul className="comp-legend">
         {rows.map((agent) => (
