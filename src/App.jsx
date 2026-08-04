@@ -372,6 +372,15 @@ function quotaHasData(entry) {
   return Boolean(entry?.windows?.some((window) => window.view.available));
 }
 
+/// 没有额度数字时该说什么。后端在 note 里带上直连失败的真实原因（凭据过期、
+/// 缺 scope、限流……）；有原因就别再叫用户去开状态栏钩子——他多半已经开了
+/// 直连，而且不用 Claude Code 的人开了钩子也不会有数据。
+function quotaEmptyCopy(entry, agentId, short = false) {
+  if (entry?.note) return short ? "直连查询失败" : "直连查询失败 · 见设置";
+  if (agentId !== "claude") return short ? "官方配额不可用" : "暂无可靠来源";
+  return short ? "设置中开启配额钩子" : "在设置中开启配额钩子后显示";
+}
+
 function shortWindowLabel(key) {
   if (key === "five_hour" || key === "primary") return "5h";
   if (key === "seven_day" || key === "secondary") return "7d";
@@ -861,12 +870,8 @@ function Inspector({ snapshot, selectedAgent, onSelectAgent, onOpenSources, widg
             <section className="quota-group" key={agentId}>
               <header>
                 <strong>{AGENT_META[agentId].label}</strong>
-                <small>
-                  {hasData
-                    ? quotaProvenance(provenanceView)
-                    : agentId === "claude"
-                      ? "在设置中开启配额钩子后显示"
-                      : "暂无可靠来源"}
+                <small title={hasData ? undefined : entry.note || undefined}>
+                  {hasData ? quotaProvenance(provenanceView) : quotaEmptyCopy(entry, agentId)}
                 </small>
               </header>
               {hasData &&
@@ -1639,9 +1644,7 @@ function CompactWidget({
                   ? "窗口已重置，等待刷新"
                   : quotaView.available
                     ? `${formatReset(quotaView.resetsInMinutes)}后重置`
-                    : quotaAgent === "claude"
-                      ? "设置中开启配额钩子"
-                      : "官方配额不可用"}
+                    : quotaEmptyCopy(quotaEntry, quotaAgent, true)}
             </small>
           </button>
         </section>
@@ -2076,6 +2079,15 @@ function ClaudeOauthBlock({ onSnapshotRefresh }) {
                       : "未开启 · 凭据可用"}
               </dd>
             </div>
+            {/* 开关一切正常、却始终没有额度数字时，唯一能解释原因的就是这一行。 */}
+            {status.lastFailure && (
+              <div>
+                <dt>最近失败</dt>
+                <dd>
+                  {status.lastFailure.message} · {formatSyncTime(status.lastFailure.atMs)}
+                </dd>
+              </div>
+            )}
           </dl>
         </>
       )}

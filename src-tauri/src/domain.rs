@@ -261,6 +261,9 @@ pub struct SeriesPoint {
 pub struct AgentQuotaView {
     pub agent: String,
     pub windows: Vec<AgentQuotaWindow>,
+    /// 没有窗口时的原因（目前只有 Claude 直连查询失败会填）。让"没有数字"
+    /// 这件事可自查，而不是笼统地叫用户去开另一个来源。
+    pub note: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]

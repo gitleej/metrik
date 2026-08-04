@@ -35,7 +35,45 @@ const ENV_CONFIG_DIR: &str = "CLAUDE_CONFIG_DIR";
 /// app_setting 里的开关键；"1" 表示用户已显式开启。
 pub const SETTING_KEY: &str = "claude_oauth_quota_enabled";
 
+/// 最近一次直连查询失败的原因。失败被静默吞掉时用户只会看到"没有额度"，
+/// 却拿不到任何可行动的信息（凭据过期？缺 scope？限流？），所以如实留档。
+/// 存的是本模块自己生成的错误文案，不含 token、请求头或响应体。
+const LAST_ERROR_SETTING_KEY: &str = "claude_oauth_last_error";
+
 pub const SOURCE_LABEL: &str = "官方额度（OAuth）";
+
+/// 直连的最近一次失败，供设置页与配额卡如实说明为什么没有数字。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClaudeOauthFailure {
+    pub at_ms: i64,
+    pub message: String,
+}
+
+pub fn record_failure(connection: &rusqlite::Connection, message: &str) -> Result<()> {
+    let failure = ClaudeOauthFailure {
+        at_ms: chrono::Utc::now().timestamp_millis(),
+        message: message.to_owned(),
+    };
+    let raw =
+        serde_json::to_string(&failure).context("failed to serialize claude oauth failure")?;
+    crate::storage::set_app_setting(connection, LAST_ERROR_SETTING_KEY, &raw)
+}
+
+pub fn clear_failure(connection: &rusqlite::Connection) -> Result<()> {
+    crate::storage::set_app_setting(connection, LAST_ERROR_SETTING_KEY, "")
+}
+
+pub fn last_failure(connection: &rusqlite::Connection) -> Result<Option<ClaudeOauthFailure>> {
+    let Some(raw) = crate::storage::get_app_setting(connection, LAST_ERROR_SETTING_KEY)? else {
+        return Ok(None);
+    };
+    if raw.is_empty() {
+        return Ok(None);
+    }
+    // 记录损坏时当作没有记录，不因为一条诊断把设置页打不开。
+    Ok(serde_json::from_str(&raw).ok())
+}
 
 #[derive(Deserialize)]
 struct CredentialsFileShape {
@@ -59,6 +97,15 @@ pub struct ClaudeOauthStatus {
     pub credentials_present: bool,
     /// token 带 `user:profile` scope（用量端点必需）。
     pub scope_ok: bool,
+    /// 最近一次直连查询失败；开关本身正常时，问题只会出现在这里。
+    pub last_failure: Option<ClaudeOauthFailure>,
+}
+
+impl ClaudeOauthStatus {
+    pub fn with_failure(mut self, failure: Option<ClaudeOauthFailure>) -> Self {
+        self.last_failure = failure;
+        self
+    }
 }
 
 #[derive(Deserialize)]
@@ -200,6 +247,7 @@ impl ClaudeOauth {
             enabled,
             credentials_present: credentials.is_some(),
             scope_ok,
+            last_failure: None,
         }
     }
 
@@ -378,6 +426,49 @@ fn parse_iso8601_ms(value: &str) -> Option<i64> {
 mod tests {
     use super::*;
     use std::fs;
+
+    fn memory_ledger() -> rusqlite::Connection {
+        let connection = rusqlite::Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(include_str!("../migrations/001_init.sql"))
+            .unwrap();
+        connection
+    }
+
+    #[test]
+    fn failure_is_recorded_until_a_later_success_clears_it() {
+        let connection = memory_ledger();
+        assert!(last_failure(&connection).unwrap().is_none());
+
+        record_failure(
+            &connection,
+            "Claude 凭据已失效（401），请重新运行 claude login",
+        )
+        .unwrap();
+        let recorded = last_failure(&connection).unwrap().unwrap();
+        assert_eq!(
+            recorded.message,
+            "Claude 凭据已失效（401），请重新运行 claude login"
+        );
+        assert!(recorded.at_ms > 0);
+
+        // 后一次失败覆盖前一次：展示的必须是当前的问题。
+        record_failure(&connection, "Claude 用量接口限流（429），稍后自动重试").unwrap();
+        assert_eq!(
+            last_failure(&connection).unwrap().unwrap().message,
+            "Claude 用量接口限流（429），稍后自动重试"
+        );
+
+        clear_failure(&connection).unwrap();
+        assert!(last_failure(&connection).unwrap().is_none());
+    }
+
+    #[test]
+    fn corrupt_failure_record_reads_as_no_failure() {
+        let connection = memory_ledger();
+        crate::storage::set_app_setting(&connection, LAST_ERROR_SETTING_KEY, "not json").unwrap();
+        assert!(last_failure(&connection).unwrap().is_none());
+    }
 
     #[test]
     fn status_reports_credentials_and_scope() {

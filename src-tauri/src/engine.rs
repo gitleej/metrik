@@ -188,8 +188,17 @@ pub fn build_snapshot(
         storage::get_app_setting(&connection, claude_oauth::SETTING_KEY)?.as_deref() == Some("1");
     let mut claude_samples = Vec::new();
     if oauth_enabled {
-        if let Ok(samples) = cached_claude_oauth_quota(claude_quota_cache, force) {
-            claude_samples = samples;
+        // 失败原因必须留档。丢掉 Err 会让"开了直连却没有额度"完全无法自查：
+        // 界面回落到钩子文案，叫用户去开一个他根本不用的 statusLine。
+        // 缓存命中失败时返回的是 Ok(空)，既不清也不覆盖上一条记录。
+        match cached_claude_oauth_quota(claude_quota_cache, force) {
+            Ok(samples) => {
+                if !samples.is_empty() {
+                    claude_oauth::clear_failure(&connection)?;
+                }
+                claude_samples = samples;
+            }
+            Err(error) => claude_oauth::record_failure(&connection, &error.to_string())?,
         }
     }
     if claude_samples.is_empty() {
@@ -1186,9 +1195,18 @@ fn query_snapshot_at(
         agent_quotas: AGENT_IDS
             .iter()
             .map(|agent| {
+                let windows = load_visible_agent_quota_windows(connection, agent)?;
+                // 只在确实没有可用窗口时才带原因；有数字了就没什么好解释的。
+                let note =
+                    if *agent == "claude" && !windows.iter().any(|window| window.view.available) {
+                        claude_oauth::last_failure(connection)?.map(|failure| failure.message)
+                    } else {
+                        None
+                    };
                 Ok(AgentQuotaView {
                     agent: (*agent).to_owned(),
-                    windows: load_visible_agent_quota_windows(connection, agent)?,
+                    windows,
+                    note,
                 })
             })
             .collect::<Result<Vec<_>>>()?,
