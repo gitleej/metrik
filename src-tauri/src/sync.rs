@@ -62,17 +62,62 @@ fn delete_setting(connection: &Connection, key: &str) -> Result<()> {
     Ok(())
 }
 
-fn device_label() -> String {
+/// 旧兜底名。`HOSTNAME` 是 shell 变量，GUI 启动的 macOS 应用拿不到，于是
+/// 每一台 mac 都叫这个名字——列表里一排「此设备」，而且恰恰没有一台是本机。
+/// 保留常量是为了识别并修掉已经存下来的那些。
+const LEGACY_FALLBACK_LABEL: &str = "此设备";
+const FALLBACK_LABEL: &str = "未命名设备";
+
+/// 主机名里可展示的那一段：去掉域名后缀（macOS 常见的 `.local`），
+/// 空串一律当作没拿到。
+fn short_hostname(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    let head = trimmed.split('.').next().unwrap_or("").trim();
+    (!head.is_empty()).then(|| head.to_owned())
+}
+
+/// unix 的主机名走 `gethostname(3)`：环境变量在 GUI 进程里不可靠，而这个
+/// 系统调用不依赖 shell。
+#[cfg(unix)]
+fn system_hostname() -> Option<String> {
+    // 256 足够容纳 POSIX 的 HOST_NAME_MAX（Linux 64、macOS 255）。
+    let mut buffer = [0_u8; 256];
+    // SAFETY: 传入自有缓冲区与其真实长度；失败返回非零，此时不读缓冲区。
+    let code = unsafe { libc::gethostname(buffer.as_mut_ptr().cast(), buffer.len()) };
+    if code != 0 {
+        return None;
+    }
+    // 找不到 NUL 说明名字塞满了缓冲区、可能被截断（256 > HOST_NAME_MAX，
+    // 实际到不了）。宁可当作没拿到，也不拿一个残缺的名字当设备名。
+    let end = buffer.iter().position(|byte| *byte == 0).unwrap_or(0);
+    short_hostname(&String::from_utf8_lossy(&buffer[..end]))
+}
+
+#[cfg(not(unix))]
+fn system_hostname() -> Option<String> {
     std::env::var("COMPUTERNAME")
-        .or_else(|_| std::env::var("HOSTNAME"))
         .ok()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| "此设备".into())
+        .as_deref()
+        .and_then(short_hostname)
+}
+
+fn device_label() -> String {
+    system_hostname().unwrap_or_else(|| FALLBACK_LABEL.into())
 }
 
 /// 返回（并在首次调用时生成）本机的稳定设备标识与名称。
 pub fn device_identity(connection: &Connection) -> Result<(String, String)> {
     let label = match get_setting(connection, SETTING_DEVICE_LABEL)? {
+        // 旧版本在 macOS 上一律存成「此设备」，而这里只在缺失时才写，所以那个
+        // 名字会一直留着。能算出真名字就顶掉它——只认这一个旧兜底值，用户
+        // 自己改过的名字不碰。
+        Some(value) if value == LEGACY_FALLBACK_LABEL => match system_hostname() {
+            Some(hostname) => {
+                set_setting(connection, SETTING_DEVICE_LABEL, &hostname)?;
+                hostname
+            }
+            None => value,
+        },
         Some(value) => value,
         None => {
             let value = device_label();
@@ -431,6 +476,40 @@ mod tests {
         let second = device_identity(&connection).unwrap();
         assert_eq!(first, second);
         assert_eq!(first.0.len(), 16);
+    }
+
+    #[test]
+    fn hostname_drops_the_domain_suffix_and_rejects_empty() {
+        assert_eq!(
+            short_hostname("guoxiaoyudeMac-mini.local").as_deref(),
+            Some("guoxiaoyudeMac-mini")
+        );
+        assert_eq!(short_hostname("  KEROS-PC  ").as_deref(), Some("KEROS-PC"));
+        assert_eq!(short_hostname("a.b.c").as_deref(), Some("a"));
+        assert!(short_hostname("").is_none());
+        assert!(short_hostname("   ").is_none());
+        assert!(short_hostname(".local").is_none());
+    }
+
+    /// 本机能拿到主机名时，旧版在 macOS 上存下的「此设备」要被顶掉；
+    /// 用户自己改过的名字不受影响。
+    #[test]
+    fn the_legacy_fallback_label_is_repaired_but_a_custom_name_is_kept() {
+        let connection = open_test_db();
+        set_setting(&connection, SETTING_DEVICE_LABEL, LEGACY_FALLBACK_LABEL).unwrap();
+        let (_, label) = device_identity(&connection).unwrap();
+        match system_hostname() {
+            Some(hostname) => {
+                assert_eq!(label, hostname);
+                assert_ne!(label, LEGACY_FALLBACK_LABEL);
+            }
+            // 拿不到主机名时不能把名字弄丢，原样留着。
+            None => assert_eq!(label, LEGACY_FALLBACK_LABEL),
+        }
+
+        let connection = open_test_db();
+        set_setting(&connection, SETTING_DEVICE_LABEL, "书房那台").unwrap();
+        assert_eq!(device_identity(&connection).unwrap().1, "书房那台");
     }
 
     #[test]
