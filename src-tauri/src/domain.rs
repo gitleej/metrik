@@ -299,6 +299,9 @@ pub struct AgentSummary {
     pub cache_write: i64,
     pub output: i64,
     pub share: f64,
+    /// 本机装了这个 Agent：安装痕迹命中，或本周期确有用量（后者兜住没有可靠
+    /// 安装探针的 Agent）。只用于设置里的排序分组，不用于过滤——见 `detect`。
+    pub detected: bool,
 }
 
 /// 周期内按模型聚合的 processed token 用量，按 tokens 降序排列。
