@@ -2187,13 +2187,18 @@ function UpdateBlock({ autoCheck, onAutoCheckChange, availableUpdate }) {
     availableUpdate ? { status: "available", ...availableUpdate } : { status: "idle" },
   );
   // 自动检查在小组件形态就可能发现新版；进设置页时直接呈现，不用再点一次。
+  // 后来的自动检查发现更新的版本时要顶掉手上这一份：否则一直提示第一次发现
+  // 的那个版本，中间发布的都要等装完它才看得见。
   useEffect(() => {
     if (!availableUpdate) return;
-    setState((current) =>
-      current.status === "idle" || current.status === "current"
-        ? { status: "available", ...availableUpdate }
-        : current,
-    );
+    setState((current) => {
+      // 正在检查或下载时不换手上这一份，免得按钮和进度对不上。
+      if (current.status === "checking" || current.status === "installing") return current;
+      if (current.status === "available" && current.version === availableUpdate.version) {
+        return current;
+      }
+      return { status: "available", ...availableUpdate };
+    });
   }, [availableUpdate]);
 
   const check = async () => {
@@ -2222,7 +2227,7 @@ function UpdateBlock({ autoCheck, onAutoCheckChange, availableUpdate }) {
     <div className="settings-subsection">
       <h3>更新</h3>
       <p className="settings-muted">
-        当前版本 {__APP_VERSION__}。每天自动检查一次，新版本以小圆点提示；
+        当前版本 {__APP_VERSION__}。每六小时自动检查一次，新版本以小圆点提示；
         下载与安装由你确认，更新包经签名校验。
       </p>
       <label className="update-autocheck">
@@ -2248,6 +2253,13 @@ function UpdateBlock({ autoCheck, onAutoCheckChange, availableUpdate }) {
                 ? `更新到 ${state.version}`
                 : "检查更新"}
         </button>
+        {/* 有新版待装时主按钮变成"更新到 X"，没有这一个就再也没法重新检查：
+            关掉自动检查的人只能先把旧版装掉，才看得到后面发布的版本。 */}
+        {state.status === "available" && (
+          <button type="button" className="ledger-button ledger-button--secondary" onClick={check}>
+            重新检查
+          </button>
+        )}
       </div>
       {state.status === "current" && (
         <p className="settings-feedback settings-feedback--success" role="status">
@@ -2969,6 +2981,12 @@ function SettingsSection({ onSnapshotRefresh, widgetAgents, onToggleWidgetAgent,
                 >
                   {feedback.message}
                 </p>
+              )}
+
+              {/* 读取未回来时这张卡片是空的，数据一到就整块长出来，看着像界面
+                  抖了一下。先占住位置并说明在读什么。 */}
+              {!settings && !feedback && (
+                <p className="settings-muted" role="status">读取同步设置…</p>
               )}
 
               {settings && !settings.demo && (
@@ -4465,9 +4483,10 @@ export function App() {
         })
         .catch(() => {}); // 静默失败：提醒是尽力而为，不打扰
     };
-    // 错开启动扫描的高峰再查；之后每天一次。
+    // 错开启动扫描的高峰再查；之后每六小时一次。间隔只在应用连续运行时计时，
+    // 而这是个常驻托盘的程序：按天计的话，一天里发布的版本它一个也看不见。
     const startTimer = window.setTimeout(check, 15000);
-    const interval = window.setInterval(check, 24 * 60 * 60 * 1000);
+    const interval = window.setInterval(check, 6 * 60 * 60 * 1000);
     return () => {
       cancelled = true;
       window.clearTimeout(startTimer);
