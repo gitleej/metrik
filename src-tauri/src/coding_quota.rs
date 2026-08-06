@@ -712,7 +712,8 @@ struct GlmCredential {
     region: GlmRegion,
 }
 
-/// GLM key 的全部候选：zcode 的 provider 配置 → 环境变量 → OpenCode `auth.json`。
+/// GLM key 的全部候选：zcode 的 provider 配置 → 环境变量 → 单行明文 key 文件
+/// → OpenCode `auth.json`。
 /// 全部收集、由调用方逐把尝试——不同来源的 key 可能是不同产品的（开放平台 key
 /// 打不通 coding-plan 配额接口），离线分不出真假。
 ///
@@ -749,6 +750,14 @@ fn resolve_glm_credentials() -> Vec<GlmCredential> {
             push(token, GlmRegion::Bigmodel);
         }
     }
+    // 国内 GLM 工具链的单行明文 key 文件，同样按 bigmodel 端点试。
+    for path in glm_plaintext_key_files() {
+        if let Ok(raw) = std::fs::read_to_string(&path) {
+            if let Some(token) = first_key_line(&raw) {
+                push(token, GlmRegion::Bigmodel);
+            }
+        }
+    }
     let opencode = read_opencode_auth();
     if let Some(token) = nonempty(opencode.get("zhipuai-coding-plan")) {
         push(token, GlmRegion::Bigmodel);
@@ -757,6 +766,29 @@ fn resolve_glm_credentials() -> Vec<GlmCredential> {
         push(token, GlmRegion::Zai);
     }
     candidates
+}
+
+/// 国内 GLM 工具链把 key 单独写成一行明文文件的三处落点（取自 CodexBar 的
+/// 凭据来源清单，**未在真机核实**）。读不到就跳过，与其它候选一样逐把尝试。
+fn glm_plaintext_key_files() -> Vec<PathBuf> {
+    let Some(home) = dirs::home_dir() else {
+        return Vec::new();
+    };
+    vec![
+        home.join(".coding-relay").join("glm-api-key"),
+        home.join(".config").join("bigmodel").join("api_key"),
+        home.join(".config").join("zhipu").join("api_key"),
+    ]
+}
+
+/// 单行 key 文件的内容：取首个非空行。这类文件就是"一行一把 key"，
+/// 不做注释识别——真混进别的内容，也只是多试一次请求。
+fn first_key_line(raw: &str) -> Option<String> {
+    raw.trim_start_matches('\u{feff}')
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(str::to_owned)
 }
 
 fn zcode_config_paths() -> Vec<PathBuf> {
@@ -1516,6 +1548,19 @@ mod tests {
         assert_eq!(map.get("zhipuai-coding-plan").unwrap(), "glm-secret");
         assert_eq!(map.get("kimi-for-coding").unwrap(), "sk-kimi-secret");
         assert!(!map.contains_key("blank"), "空 key 过滤掉");
+    }
+
+    #[test]
+    fn first_key_line_takes_leading_nonempty_line() {
+        assert_eq!(
+            first_key_line("\n  abc123.def456  \ntrailing\n").unwrap(),
+            "abc123.def456"
+        );
+        assert_eq!(
+            first_key_line("\u{feff}key-with-bom\n").unwrap(),
+            "key-with-bom"
+        );
+        assert_eq!(first_key_line("   \n\n"), None);
     }
 
     #[test]
