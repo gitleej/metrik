@@ -9,7 +9,7 @@
     <key>CFBundleExecutable</key>
     <string>MetrikWidget</string>
     <key>CFBundleIdentifier</key>
-    <string>app.metrik.desktop.widget-preview.widget</string>
+    <string>app.metrik.desktop.widget</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
@@ -17,7 +17,7 @@
     <key>CFBundlePackageType</key>
     <string>XPC!</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.15.0</string>
+    <string>0.15.1</string>
     <key>CFBundleVersion</key>
     <string>1</string>
     <key>LSMinimumSystemVersion</key>

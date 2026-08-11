@@ -1,13 +1,13 @@
 {
   "name": "metrik",
-  "version": "0.15.0",
+  "version": "0.15.1",
   "private": true,
   "license": "AGPL-3.0-or-later",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "test": "node --test src/platformDetection.test.js src/windowGeometry.test.js src/glassAppearance.test.js src/quotaWindows.test.js",
+    "test": "node --test src/platformDetection.test.js src/windowGeometry.test.js src/glassAppearance.test.js src/quotaWindows.test.js src/macosWidgetBundle.test.js",
     "preview": "vite preview",
     "pricing:update": "node --use-env-proxy scripts/update-pricing.mjs",
     "tauri": "tauri",

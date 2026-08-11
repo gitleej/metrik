@@ -2469,6 +2469,22 @@ function AppearanceCard({ theme, onThemeChange, glassAlpha, onGlassAlpha, glassT
   );
 }
 
+function NativeMacWidgetCard() {
+  if (!IS_MAC) return null;
+  return (
+    <div className="settings-card desktop-widget-setting">
+      <div>
+        <span className="desktop-widget-setting-kicker">macOS</span>
+        <h2>桌面小组件</h2>
+        <p className="settings-muted">
+          在桌面空白处右键“编辑小组件”，搜索 Metrik 后添加。透明材质、圆角和摆放由 macOS 管理。
+        </p>
+      </div>
+      <span className="desktop-widget-native-badge">系统原生</span>
+    </div>
+  );
+}
+
 function AgentListColumn({ title, hint, agents, detected, onToggle, onMove }) {
   // 已选的按显示顺序排前面，未选的按默认顺序垫后。
   const rows = agentIdsInDisplayOrder(agents);
@@ -2905,20 +2921,23 @@ function SettingsSection({ onSnapshotRefresh, widgetAgents, onToggleWidgetAgent,
 
       <div className="settings-grid">
         {activeTab.id === "appearance" && (
-          <AppearanceCard
-            theme={theme}
-            onThemeChange={onThemeChange}
-            glassAlpha={glassAlpha}
-            onGlassAlpha={onGlassAlpha}
-            glassTint={glassTint}
-            onGlassTint={onGlassTint}
-            glassInk={glassInk}
-            onGlassInk={onGlassInk}
-            uiScale={uiScale}
-            onUiScale={onUiScale}
-            stripScale={stripScale}
-            onStripScale={onStripScale}
-          />
+          <>
+            <AppearanceCard
+              theme={theme}
+              onThemeChange={onThemeChange}
+              glassAlpha={glassAlpha}
+              onGlassAlpha={onGlassAlpha}
+              glassTint={glassTint}
+              onGlassTint={onGlassTint}
+              glassInk={glassInk}
+              onGlassInk={onGlassInk}
+              uiScale={uiScale}
+              onUiScale={onUiScale}
+              stripScale={stripScale}
+              onStripScale={onStripScale}
+            />
+            <NativeMacWidgetCard />
+          </>
         )}
 
         {activeTab.id === "display" && (
