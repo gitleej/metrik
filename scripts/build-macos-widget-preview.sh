@@ -57,6 +57,9 @@ ditto "$PROJECT_DIR/WidgetExtension/Info.plist" "$APPEX_BUNDLE/Contents/Info.pli
 /usr/libexec/PlistBuddy \
   -c "Set :CFBundleVersion $PREVIEW_BUILD_NUMBER" \
   "$APPEX_BUNDLE/Contents/Info.plist"
+/usr/libexec/PlistBuddy \
+  -c "Set :CFBundleIdentifier $WIDGET_ID" \
+  "$APPEX_BUNDLE/Contents/Info.plist"
 for asset in \
   chatgpt-app-icon.png \
   claude-app-icon.jpg \

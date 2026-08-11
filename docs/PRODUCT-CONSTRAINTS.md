@@ -105,6 +105,15 @@ change.
 
 - Compact mode is a native menu-bar panel that follows current system
   appearance and material. It is not a floating Windows-style strip.
+- The optional desktop component is a native WidgetKit extension embedded at
+  `Metrik.app/Contents/PlugIns/MetrikWidget.appex`; shipping only its source or
+  a standalone preview host does not count as releasing the feature.
+- WidgetKit owns desktop material, corner shape, placement, tint mode, and
+  accessibility adaptations. Metrik does not paint a second outer card or
+  expose an opacity slider for the system widget.
+- The host and extension share only a compact sanitised snapshot through their
+  App Group. It contains derived totals and quota metadata, never prompts,
+  responses, credentials, or raw source paths.
 - The panel material is system vibrancy from the HUD family, kept in the
   active state because the non-activating panel never becomes key. The
   glass-density slider adjusts a scrim above vibrancy, so blur stays native

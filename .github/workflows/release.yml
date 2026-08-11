@@ -17,11 +17,13 @@ jobs:
           - platform: windows-latest
             args: ""
             rust-targets: ""
+            widget-archs: ""
           # Intel + Apple Silicon 通用包。macOS 尚未实机验收，Release 说明里
           # 必须标明这一点。
           - platform: macos-latest
             args: "--target universal-apple-darwin"
             rust-targets: "aarch64-apple-darwin,x86_64-apple-darwin"
+            widget-archs: "arm64 x86_64"
 
     runs-on: ${{ matrix.platform }}
     steps:
@@ -54,6 +56,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          METRIK_WIDGET_ARCHS: ${{ matrix.widget-archs }}
         with:
           tagName: ${{ github.ref_name }}
           releaseName: Metrik ${{ github.ref_name }}
@@ -61,3 +64,15 @@ jobs:
           prerelease: false
           includeUpdaterJson: true
           args: ${{ matrix.args }}
+
+      - name: Verify WidgetKit extension is embedded
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          app_path="$(find src-tauri/target -path '*/release/bundle/macos/Metrik.app' -type d -print -quit)"
+          test -n "$app_path"
+          test -x "$app_path/Contents/PlugIns/MetrikWidget.appex/Contents/MacOS/MetrikWidget"
+          test -x "$app_path/Contents/Helpers/metrik-widget-publish"
+          test -x "$app_path/Contents/Helpers/metrik-widget-reload"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app_path/Contents/PlugIns/MetrikWidget.appex/Contents/Info.plist")" = "app.metrik.desktop.widget"
+          codesign --verify --deep --strict --verbose=2 "$app_path"
