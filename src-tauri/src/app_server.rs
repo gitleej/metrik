@@ -199,6 +199,14 @@ fn resolve_unix_codex_binary() -> PathBuf {
 
     let mut candidates = Vec::new();
     if let Some(home) = dirs::home_dir() {
+        #[cfg(target_os = "macos")]
+        candidates.extend([
+            home.join("Applications/ChatGPT.app/Contents/Resources/codex"),
+            home.join("Applications/Codex.app/Contents/Resources/codex"),
+            PathBuf::from("/Applications/ChatGPT.app/Contents/Resources/codex"),
+            PathBuf::from("/Applications/Codex.app/Contents/Resources/codex"),
+        ]);
+
         candidates.extend([
             home.join(".local/bin/codex"),
             home.join(".npm-global/bin/codex"),
@@ -241,9 +249,18 @@ fn write_json(stdin: &mut impl Write, value: &Value) -> Result<()> {
 
 fn parse_rate_limits(result: &Value) -> Vec<QuotaSample> {
     let limits = result
-        .get("rateLimitsByLimitId")
-        .and_then(|value| value.get("codex"))
-        .or_else(|| result.get("rateLimits"));
+        // `rateLimits` is the account's canonical active usage window. The
+        // by-limit-id map also carries credit/spend-control records and can
+        // contain a Codex entry whose percentages do not match the account
+        // headline. CodexBar follows this same separation.
+        .get("rateLimits")
+        .filter(|value| !value.is_null())
+        .or_else(|| {
+            result
+                .get("rateLimitsByLimitId")
+                .or_else(|| result.get("rate_limits_by_limit_id"))
+                .and_then(|value| value.get("codex"))
+        });
     let Some(limits) = limits else {
         return Vec::new();
     };
@@ -333,6 +350,36 @@ mod tests {
         assert_eq!(samples.len(), 1);
         assert_eq!(samples[0].window_key, "secondary");
         assert_eq!(samples[0].remaining_percent, 75.0);
+    }
+
+    #[test]
+    fn canonical_account_windows_win_over_the_by_limit_credit_map() {
+        let value = json!({
+            "rateLimits": {
+                "primary": null,
+                "secondary": { "usedPercent": 11, "windowDurationMins": 10080, "resetsAt": 1784506589 }
+            },
+            "rateLimitsByLimitId": {
+                "codex": {
+                    "primary": { "usedPercent": 16, "windowDurationMins": 10080, "resetsAt": 1784506589 },
+                    "secondary": null
+                }
+            }
+        });
+        let samples = parse_rate_limits(&value);
+        assert_eq!(samples.len(), 1);
+        assert_eq!(samples[0].window_key, "secondary");
+        assert_eq!(samples[0].remaining_percent, 89.0);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_prefers_the_chatgpt_bundled_codex_before_package_manager_shims() {
+        let resolved = resolve_unix_codex_binary();
+        let bundled = PathBuf::from("/Applications/ChatGPT.app/Contents/Resources/codex");
+        if bundled.is_file() && std::env::var_os("CODEX_BINARY").is_none() {
+            assert_eq!(resolved, bundled);
+        }
     }
 
     #[cfg(windows)]

@@ -1,11 +1,11 @@
-//! macOS 专属外壳：菜单栏 NSPanel + 独立的完整视图窗口。
+//! macOS 专属外壳：菜单栏 NSPanel + 桌面组件 + 独立的完整视图窗口。
 //!
 //! tauri-nspanel 仍绑在已弃用的 cocoa/objc 上（上游未迁 objc2），它的 panel_delegate!
 //! 宏展开里还带着过时的 cfg(cargo-clippy)。两个 lint 只在本文件关掉，不影响其余代码。
 //!
 //! Windows 上 Metrik 是一个会变形的无边框窗口（小插件 ⇄ 完整视图），带自绘窗口按钮。
-//! macOS 的原生形态不同：菜单栏图标点开一个不抢焦点的面板，完整视图是另一个标准窗口。
-//! NSPanel 的样式掩码与可缩放标准窗口互斥，所以这里是两个窗口，而不是一个窗口变形。
+//! macOS 的原生形态不同：菜单栏图标点开一个不抢焦点的面板；可选桌面组件待在
+//! 普通窗口下方；完整视图是另一个标准窗口。三种原生语义不能由一个窗口变形兼任。
 
 #![allow(deprecated)]
 #![allow(unexpected_cfgs)]
@@ -33,9 +33,26 @@ const MENU_BAR_GAP: f64 = 6.0;
 const SCREEN_MARGIN: f64 = 8.0;
 
 const PANEL_LABEL: &str = "main";
+const DESKTOP_WIDGET_LABEL: &str = "desktop-widget";
 const EXPANDED_LABEL: &str = "expanded";
+const DESKTOP_WIDGET_WIDTH: f64 = 320.0;
+const DESKTOP_WIDGET_HEIGHT: f64 = 312.0;
 const STATUS_ICON_SIZE: u32 = 44;
 const PROVIDER_MARK_SIZE: u32 = 32;
+
+/// 本地视觉验收开关。只在 debug 构建生效，避免为了看桌面层级去改用户持久设置；
+/// release 构建仍严格遵守“默认关闭”。
+#[cfg(debug_assertions)]
+fn desktop_widget_preview_forced() -> bool {
+    std::env::var("METRIK_DESKTOP_WIDGET_PREVIEW")
+        .ok()
+        .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "yes"))
+}
+
+#[cfg(not(debug_assertions))]
+fn desktop_widget_preview_forced() -> bool {
+    false
+}
 
 const CHATGPT_MARK: &[u8] = include_bytes!("../../src/assets/chatgpt-app-icon.png");
 const CLAUDE_MARK: &[u8] = include_bytes!("../../src/assets/claude-app-icon.jpg");
@@ -196,7 +213,13 @@ pub fn setup(app: &mut tauri::App) -> tauri::Result<()> {
     to_menubar_panel(app.app_handle());
     // 菜单栏应用启动时不弹面板，等用户点图标。
     hide_panel(app.app_handle());
-    setup_tray(app)
+    setup_tray(app)?;
+    if desktop_widget_preview_forced() {
+        if let Err(error) = set_desktop_widget_visible(app.app_handle(), true) {
+            eprintln!("Metrik could not open the desktop-widget preview ({error})");
+        }
+    }
+    Ok(())
 }
 
 /// 把 main 窗口换成菜单栏面板：不抢焦点、浮在全屏应用之上、失焦自动收起。
@@ -262,6 +285,70 @@ pub fn resize_panel(app: &AppHandle, width: f64, height: f64) -> Result<(), Stri
     // 不依赖 resize 事件是否已回写 outer_size；直接用目标逻辑宽度计算锚点，
     // 避免卡片/胶囊切换的一帧里仍按旧宽度定位。
     position_panel_with_width(app, Some(width));
+    Ok(())
+}
+
+/// 可选桌面组件是独立窗口：位于普通应用窗口下方、出现在所有桌面空间，
+/// 但仍可在桌面上点击和拖动。关闭设置时只隐藏而不销毁，避免反复创建 WebView。
+pub fn set_desktop_widget_visible(app: &AppHandle, visible: bool) -> Result<(), String> {
+    // debug 验收模式强制保持可见；正常构建与正常启动完全由设置开关决定。
+    let visible = visible || desktop_widget_preview_forced();
+    if let Some(window) = app.get_webview_window(DESKTOP_WIDGET_LABEL) {
+        if visible {
+            window
+                .set_always_on_bottom(true)
+                .map_err(|error| error.to_string())?;
+            window
+                .set_visible_on_all_workspaces(true)
+                .map_err(|error| error.to_string())?;
+            // borderless 透明 NSWindow 的系统阴影仍按矩形外框投射，会在 CSS
+            // 圆角外露出第二层方角。材质自身的单层高光足够，不要这道影子。
+            window
+                .set_shadow(false)
+                .map_err(|error| error.to_string())?;
+            window.show().map_err(|error| error.to_string())?;
+        } else {
+            window.hide().map_err(|error| error.to_string())?;
+        }
+        return Ok(());
+    }
+
+    if !visible {
+        return Ok(());
+    }
+
+    let window = WebviewWindowBuilder::new(
+        app,
+        DESKTOP_WIDGET_LABEL,
+        WebviewUrl::App("index.html?view=desktop-widget".into()),
+    )
+    .title("Metrik Desktop Widget")
+    .inner_size(DESKTOP_WIDGET_WIDTH, DESKTOP_WIDGET_HEIGHT)
+    .min_inner_size(DESKTOP_WIDGET_WIDTH, DESKTOP_WIDGET_HEIGHT)
+    .max_inner_size(DESKTOP_WIDGET_WIDTH, DESKTOP_WIDGET_HEIGHT)
+    .resizable(false)
+    .maximizable(false)
+    .minimizable(false)
+    .decorations(false)
+    .transparent(true)
+    .shadow(false)
+    .always_on_bottom(true)
+    .visible_on_all_workspaces(true)
+    .skip_taskbar(true)
+    .focused(false)
+    .center()
+    .prevent_overflow()
+    .build()
+    .map_err(|error| error.to_string())?;
+
+    // 和菜单栏面板一样跟随系统 appearance；具体玻璃密度由 WebView 的 scrim 调整。
+    let _ = window.set_theme(None);
+    window
+        .set_always_on_bottom(true)
+        .map_err(|error| error.to_string())?;
+    window
+        .set_shadow(false)
+        .map_err(|error| error.to_string())?;
     Ok(())
 }
 
