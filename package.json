@@ -1,6 +1,6 @@
 {
   "name": "metrik",
-  "version": "0.14.10",
+  "version": "0.15.0",
   "private": true,
   "license": "AGPL-3.0-or-later",
   "type": "module",
@@ -12,7 +12,8 @@
     "pricing:update": "node --use-env-proxy scripts/update-pricing.mjs",
     "tauri": "tauri",
     "desktop:dev": "tauri dev",
-    "desktop:build": "tauri build"
+    "desktop:build": "tauri build",
+    "desktop:widget-preview": "zsh scripts/build-macos-widget-preview.sh"
   },
   "dependencies": {
     "@fontsource-variable/geist": "^5.2.9",
