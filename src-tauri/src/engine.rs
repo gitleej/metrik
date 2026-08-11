@@ -184,6 +184,7 @@ pub fn build_snapshot(
 /// refreshing credentials, or calling provider APIs. The macOS host uses this at
 /// launch so WidgetKit can show the last known state immediately; the normal frontend
 /// refresh replaces it with a current snapshot moments later.
+#[cfg(target_os = "macos")]
 pub fn build_cached_snapshot(database_path: &Path, period: &str) -> Result<UsageSnapshot> {
     let connection = storage::open_database_read_only(database_path)?;
     query_snapshot(&connection, period, ScanReport::default())
