@@ -3,11 +3,17 @@ mod app_server;
 mod claude_hook;
 mod claude_oauth;
 mod coding_quota;
+mod custom_sources;
+#[cfg(test)]
+mod custom_sources_e2e;
+mod detect;
 mod domain;
 mod engine;
 #[cfg(target_os = "macos")]
 mod macos;
 mod pricing;
+mod projects;
+mod quota;
 mod schema;
 mod storage;
 mod sync;
@@ -15,20 +21,19 @@ mod sync;
 mod widget_snapshot;
 
 use anyhow::{Context, Result};
-use domain::{QuotaSample, UsageReport, UsageSessions, UsageSnapshot};
+use domain::{UsageProjects, UsageReport, UsageSessions, UsageSnapshot};
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{Manager, State};
 
-type SharedQuotaCache = Arc<Mutex<Option<(Instant, Vec<QuotaSample>)>>>;
-/// 走网络的官方配额（GLM/Kimi）按 adapter 分桶缓存，跨快照持有以限流。
-type SharedHttpQuotaCache = Arc<Mutex<HashMap<&'static str, (Instant, Vec<QuotaSample>)>>>;
+/// 各家官方配额按 adapter 分桶缓存，跨快照持有以限流。取数节奏由各 provider
+/// 自己声明，见 `quota` 模块。
+type SharedQuotaCache = Arc<quota::QuotaCache>;
 
 const DATABASE_FILE_NAME: &str = "metrik.sqlite3";
 const RECOVERY_DATABASE_FILE_NAME: &str = "metrik.recovery.sqlite3";
@@ -39,8 +44,6 @@ struct AppState {
     database_path: PathBuf,
     scan_gate: Arc<Mutex<()>>,
     quota_cache: SharedQuotaCache,
-    claude_quota_cache: SharedQuotaCache,
-    http_quota_cache: SharedHttpQuotaCache,
 }
 
 fn sqlite_sidecar_path(database_path: &Path, suffix: &str) -> PathBuf {
@@ -344,8 +347,6 @@ async fn usage_snapshot(
     let database_path = state.database_path.clone();
     let scan_gate = Arc::clone(&state.scan_gate);
     let quota_cache = Arc::clone(&state.quota_cache);
-    let claude_quota_cache = Arc::clone(&state.claude_quota_cache);
-    let http_quota_cache = Arc::clone(&state.http_quota_cache);
 
     tauri::async_runtime::spawn_blocking(move || {
         let _gate = scan_gate
@@ -355,8 +356,6 @@ async fn usage_snapshot(
             &database_path,
             &period,
             &quota_cache,
-            &claude_quota_cache,
-            &http_quota_cache,
             force.unwrap_or(false),
         )
         .map_err(|error| error.to_string())?;
@@ -402,6 +401,53 @@ async fn usage_sessions(
     .map_err(|error| format!("usage sessions task failed: {error}"))?
 }
 
+/// 只读项目明细：与会话明细同源，按分组规则归并后聚合。
+#[tauri::command]
+async fn usage_projects(
+    period: String,
+    state: State<'_, AppState>,
+) -> Result<UsageProjects, String> {
+    let database_path = state.database_path.clone();
+
+    tauri::async_runtime::spawn_blocking(move || {
+        engine::build_projects(&database_path, &period).map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("usage projects task failed: {error}"))?
+}
+
+/// 读取项目分组规则（手动项目根与隐藏目录）。
+#[tauri::command]
+async fn project_rules(state: State<'_, AppState>) -> Result<projects::ProjectRules, String> {
+    let database_path = state.database_path.clone();
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let connection =
+            storage::open_database_read_only(&database_path).map_err(|error| error.to_string())?;
+        projects::load_rules(&connection).map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("project rules task failed: {error}"))?
+}
+
+/// 保存项目分组规则，返回归一化去重后的结果。只写 `app_setting` 一行，
+/// 不触发扫描；分组在查询层生效，下一次读取即是新规则。
+#[tauri::command]
+async fn set_project_rules(
+    rules: projects::ProjectRules,
+    state: State<'_, AppState>,
+) -> Result<projects::ProjectRules, String> {
+    let database_path = state.database_path.clone();
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let connection =
+            storage::open_database(&database_path).map_err(|error| error.to_string())?;
+        projects::save_rules(&connection, rules).map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("set project rules task failed: {error}"))?
+}
+
 /// 把前端拼好的 CSV 文本写入「下载」目录并返回完整路径。WebView 里的
 /// blob 下载在 Tauri 下不会触发，所以导出必须走这条本地写入通道。
 /// 内容由前端生成，只含账本统计字段，不含对话正文。
@@ -433,6 +479,42 @@ async fn export_csv(file_name: String, content: String) -> Result<String, String
     .map_err(|error| format!("csv export task failed: {error}"))?
 }
 
+/// 用户声明的自定义用量来源。只读，供设置页展示。
+#[tauri::command]
+async fn custom_usage_sources(
+    state: State<'_, AppState>,
+) -> Result<Vec<custom_sources::CustomSource>, String> {
+    let database_path = state.database_path.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let connection =
+            storage::open_database_read_only(&database_path).map_err(|error| error.to_string())?;
+        custom_sources::load(&connection).map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("custom sources task failed: {error}"))?
+}
+
+/// 覆盖式保存。返回归一化后的结果，让界面直接反映实际生效的配置
+/// （去重、去空白后可能与用户输入不同）。
+#[tauri::command]
+async fn set_custom_usage_sources(
+    sources: Vec<custom_sources::CustomSource>,
+    state: State<'_, AppState>,
+) -> Result<Vec<custom_sources::CustomSource>, String> {
+    let database_path = state.database_path.clone();
+    let scan_gate = Arc::clone(&state.scan_gate);
+    tauri::async_runtime::spawn_blocking(move || {
+        let _gate = scan_gate
+            .lock()
+            .map_err(|_| "usage scan lock poisoned".to_owned())?;
+        let connection =
+            storage::open_database(&database_path).map_err(|error| error.to_string())?;
+        custom_sources::save(&connection, sources).map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("set custom sources task failed: {error}"))?
+}
+
 #[tauri::command]
 async fn rebuild_local_ledger(
     period: String,
@@ -441,23 +523,14 @@ async fn rebuild_local_ledger(
     let database_path = state.database_path.clone();
     let scan_gate = Arc::clone(&state.scan_gate);
     let quota_cache = Arc::clone(&state.quota_cache);
-    let claude_quota_cache = Arc::clone(&state.claude_quota_cache);
-    let http_quota_cache = Arc::clone(&state.http_quota_cache);
 
     tauri::async_runtime::spawn_blocking(move || {
         let _gate = scan_gate
             .lock()
             .map_err(|_| "usage scan lock poisoned".to_owned())?;
         storage::reset_derived_ledger(&database_path).map_err(|error| error.to_string())?;
-        engine::build_snapshot(
-            &database_path,
-            &period,
-            &quota_cache,
-            &claude_quota_cache,
-            &http_quota_cache,
-            false,
-        )
-        .map_err(|error| error.to_string())
+        engine::build_snapshot(&database_path, &period, &quota_cache, false)
+            .map_err(|error| error.to_string())
     })
     .await
     .map_err(|error| format!("local ledger rebuild task failed: {error}"))?
@@ -477,7 +550,10 @@ async fn claude_oauth_status(
             .map_err(|error| error.to_string())?
             .as_deref()
             == Some("1");
-        Ok(claude_oauth::ClaudeOauth::detected().status(enabled))
+        let failure = claude_oauth::last_failure(&connection).map_err(|error| error.to_string())?;
+        Ok(claude_oauth::ClaudeOauth::detected()
+            .status(enabled)
+            .with_failure(failure))
     })
     .await
     .map_err(|error| format!("claude oauth status task failed: {error}"))?
@@ -490,7 +566,7 @@ async fn set_claude_oauth(
 ) -> Result<claude_oauth::ClaudeOauthStatus, String> {
     let database_path = state.database_path.clone();
     let scan_gate = Arc::clone(&state.scan_gate);
-    let claude_quota_cache = Arc::clone(&state.claude_quota_cache);
+    let quota_cache = Arc::clone(&state.quota_cache);
     tauri::async_runtime::spawn_blocking(move || {
         let _gate = scan_gate
             .lock()
@@ -512,9 +588,11 @@ async fn set_claude_oauth(
                 )
                 .map_err(|error| error.to_string())?;
         }
+        // 上一轮的失败原因对新开关无效，留着会指向已经不存在的问题。
+        claude_oauth::clear_failure(&connection).map_err(|error| error.to_string())?;
         // 清缓存让下一次快照立即按新开关取数。
-        if let Ok(mut guard) = claude_quota_cache.lock() {
-            *guard = None;
+        if let Ok(mut guard) = quota_cache.lock() {
+            guard.remove("claude");
         }
         Ok(claude_oauth::ClaudeOauth::detected().status(enabled))
     })
@@ -599,12 +677,11 @@ async fn configure_qoder_cookie(cookie: Option<String>) -> Result<QoderCookieVie
 #[tauri::command]
 async fn sync_settings(state: State<'_, AppState>) -> Result<domain::SyncView, String> {
     let database_path = state.database_path.clone();
-    let scan_gate = Arc::clone(&state.scan_gate);
 
+    // 与会话/项目/分组规则同一惯例：设置页的读取不占扫描锁。占了的话，打开
+    // 设置正好赶上一次扫描，整张同步卡片要等扫描结束才出现——界面看着是
+    // 空的，然后突然长出一截。写连接仍然要保留：首次调用会补写设备身份。
     tauri::async_runtime::spawn_blocking(move || {
-        let _gate = scan_gate
-            .lock()
-            .map_err(|_| "usage scan lock poisoned".to_owned())?;
         let connection =
             storage::open_database(&database_path).map_err(|error| error.to_string())?;
         sync::sync_view(&connection).map_err(|error| error.to_string())
@@ -633,274 +710,24 @@ async fn configure_sync(
     .map_err(|error| format!("sync configuration task failed: {error}"))?
 }
 
-/// Windows 的 SWCA Acrylic：与 Win11 的 DWM Acrylic 不同，它接受自定义
-/// tint 颜色，磨砂更通透、可控（CodexBar 式亮玻璃在 Windows 上的对应物）。
-#[cfg(windows)]
-mod swca {
-    use core::ffi::c_void;
+#[tauri::command]
+async fn remove_sync_device(
+    device_id: String,
+    state: State<'_, AppState>,
+) -> Result<domain::SyncView, String> {
+    let database_path = state.database_path.clone();
+    let scan_gate = Arc::clone(&state.scan_gate);
 
-    #[repr(C)]
-    struct AccentPolicy {
-        accent_state: u32,
-        accent_flags: u32,
-        gradient_color: u32,
-        animation_id: u32,
-    }
-
-    #[repr(C)]
-    struct WindowCompositionAttribData {
-        attrib: u32,
-        pv_data: *mut core::ffi::c_void,
-        cb_data: usize,
-    }
-
-    #[repr(C)]
-    struct Margins {
-        left: i32,
-        right: i32,
-        top: i32,
-        bottom: i32,
-    }
-
-    const WCA_ACCENT_POLICY: u32 = 19;
-    const ACCENT_DISABLED: u32 = 0;
-    const ACCENT_ENABLE_BLURBEHIND: u32 = 3;
-    const ACCENT_ENABLE_ACRYLICBLURBEHIND: u32 = 4;
-    const ACCENT_ENABLE_HOSTBACKDROP: u32 = 5;
-    const DWMWA_USE_IMMERSIVE_DARK_MODE: u32 = 20;
-    const DWMWA_SYSTEMBACKDROP_TYPE: u32 = 38;
-    const DWMSBT_NONE: u32 = 1;
-    const DWMSBT_TRANSIENTWINDOW: u32 = 3;
-
-    #[link(name = "kernel32")]
-    extern "system" {
-        fn LoadLibraryA(name: *const u8) -> isize;
-        fn GetProcAddress(module: isize, name: *const u8) -> *const core::ffi::c_void;
-    }
-
-    #[link(name = "dwmapi")]
-    extern "system" {
-        fn DwmSetWindowAttribute(
-            hwnd: isize,
-            attribute: u32,
-            value: *const c_void,
-            value_size: u32,
-        ) -> i32;
-        fn DwmExtendFrameIntoClientArea(hwnd: isize, margins: *const Margins) -> i32;
-    }
-
-    type SetWindowCompositionAttributeFn =
-        unsafe extern "system" fn(isize, *mut WindowCompositionAttribData) -> i32;
-
-    /// 未文档化导出，不在 user32 的导入库里，必须运行时解析。
-    fn set_window_composition_attribute() -> Option<SetWindowCompositionAttributeFn> {
-        unsafe {
-            let module = LoadLibraryA(c"user32.dll".as_ptr().cast());
-            if module == 0 {
-                return None;
-            }
-            let proc = GetProcAddress(module, c"SetWindowCompositionAttribute".as_ptr().cast());
-            if proc.is_null() {
-                None
-            } else {
-                Some(std::mem::transmute::<
-                    *const core::ffi::c_void,
-                    SetWindowCompositionAttributeFn,
-                >(proc))
-            }
-        }
-    }
-
-    fn set_dwm_attribute<T>(hwnd: isize, attribute: u32, value: &T) -> Result<(), String> {
-        let result = unsafe {
-            DwmSetWindowAttribute(
-                hwnd,
-                attribute,
-                value as *const _ as *const c_void,
-                std::mem::size_of::<T>() as u32,
-            )
-        };
-        if result >= 0 {
-            Ok(())
-        } else {
-            Err(format!(
-                "DwmSetWindowAttribute({attribute}) failed with HRESULT 0x{:08X}",
-                result as u32
-            ))
-        }
-    }
-
-    pub fn set_dwm_acrylic(hwnd: isize, dark: bool) -> Result<(), String> {
-        set_dwm_attribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &(dark as u32))?;
-        set_dwm_attribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, &DWMSBT_TRANSIENTWINDOW)
-    }
-
-    /// 原生材质会填满整个方形 HWND；给窗口加 Win11 系统圆角，
-    /// 让玻璃与 CSS 卡片圆角贴合，避免四角露出方形材质。
-    pub fn set_round_corners(hwnd: isize, round: bool) -> Result<(), String> {
-        const DWMWA_WINDOW_CORNER_PREFERENCE: u32 = 33;
-        const DWMWCP_DEFAULT: u32 = 0;
-        const DWMWCP_ROUND: u32 = 2;
-        let preference = if round { DWMWCP_ROUND } else { DWMWCP_DEFAULT };
-        set_dwm_attribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &preference)
-    }
-
-    pub fn clear_dwm_acrylic(hwnd: isize) -> Result<(), String> {
-        set_dwm_attribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, &DWMSBT_NONE)
-    }
-
-    pub fn extend_glass_frame(hwnd: isize, enabled: bool) -> Result<(), String> {
-        let margin = if enabled { -1 } else { 0 };
-        let margins = Margins {
-            left: margin,
-            right: margin,
-            top: margin,
-            bottom: margin,
-        };
-        let result = unsafe { DwmExtendFrameIntoClientArea(hwnd, &margins) };
-        if result >= 0 {
-            Ok(())
-        } else {
-            Err(format!(
-                "DwmExtendFrameIntoClientArea failed with HRESULT 0x{:08X}",
-                result as u32
-            ))
-        }
-    }
-
-    fn set_policy(
-        hwnd: isize,
-        state: u32,
-        flags: u32,
-        tint: Option<[u8; 4]>,
-    ) -> Result<(), String> {
-        let Some(set_attribute) = set_window_composition_attribute() else {
-            return Err("SetWindowCompositionAttribute is unavailable".into());
-        };
-        let color = match tint {
-            Some([r, g, b, a]) => {
-                (r as u32) | ((g as u32) << 8) | ((b as u32) << 16) | ((a as u32) << 24)
-            }
-            None => 0,
-        };
-        let mut policy = AccentPolicy {
-            accent_state: state,
-            accent_flags: flags,
-            gradient_color: color,
-            animation_id: 0,
-        };
-        let mut data = WindowCompositionAttribData {
-            attrib: WCA_ACCENT_POLICY,
-            pv_data: &mut policy as *mut _ as *mut core::ffi::c_void,
-            cb_data: std::mem::size_of::<AccentPolicy>(),
-        };
-        let result = unsafe { set_attribute(hwnd, &mut data) };
-        if result == 0 {
-            Err("SetWindowCompositionAttribute rejected the acrylic policy".into())
-        } else {
-            Ok(())
-        }
-    }
-
-    pub fn set_acrylic(hwnd: isize, tint: Option<[u8; 4]>) -> Result<(), String> {
-        match tint {
-            // Acrylic uses no flags. Flag 2 belongs to the plain BlurBehind path.
-            Some(tint) => set_policy(hwnd, ACCENT_ENABLE_ACRYLICBLURBEHIND, 0, Some(tint)),
-            None => set_policy(hwnd, ACCENT_DISABLED, 0, None),
-        }
-    }
-
-    pub fn set_blur(hwnd: isize, tint: [u8; 4]) -> Result<(), String> {
-        set_policy(hwnd, ACCENT_ENABLE_BLURBEHIND, 2, Some(tint))
-    }
-
-    pub fn enable_host_backdrop(hwnd: isize) -> Result<(), String> {
-        set_policy(hwnd, ACCENT_ENABLE_HOSTBACKDROP, 0, None)
-    }
-}
-
-#[cfg(windows)]
-mod host_backdrop {
-    use std::cell::RefCell;
-
-    use windows::{
-        core::Interface,
-        System::DispatcherQueueController,
-        Win32::{
-            Foundation::HWND,
-            System::WinRT::{
-                Composition::ICompositorDesktopInterop, CreateDispatcherQueueController,
-                DispatcherQueueOptions, DQTAT_COM_STA, DQTYPE_THREAD_CURRENT,
-            },
-        },
-        UI::Composition::{
-            CompositionBackdropBrush, Compositor, Desktop::DesktopWindowTarget, SpriteVisual,
-        },
-    };
-    use windows_numerics::Vector2;
-
-    struct BackdropState {
-        _dispatcher: Option<DispatcherQueueController>,
-        _compositor: Compositor,
-        _target: DesktopWindowTarget,
-        _visual: SpriteVisual,
-        _brush: CompositionBackdropBrush,
-    }
-
-    thread_local! {
-        static BACKDROP: RefCell<Option<BackdropState>> = const { RefCell::new(None) };
-    }
-
-    pub fn enable(hwnd: isize) -> Result<(), String> {
-        BACKDROP.with(|slot| {
-            if slot.borrow().is_some() {
-                return Ok(());
-            }
-
-            let options = DispatcherQueueOptions {
-                dwSize: std::mem::size_of::<DispatcherQueueOptions>() as u32,
-                threadType: DQTYPE_THREAD_CURRENT,
-                apartmentType: DQTAT_COM_STA,
-            };
-            // Tauri's UI thread may already own a dispatcher queue. Keep a newly created
-            // controller alive when creation succeeds; an existing queue is also valid.
-            let dispatcher = unsafe { CreateDispatcherQueueController(options) }.ok();
-            let compositor = Compositor::new().map_err(|error| error.to_string())?;
-            let interop: ICompositorDesktopInterop =
-                compositor.cast().map_err(|error| error.to_string())?;
-            let target = unsafe {
-                interop.CreateDesktopWindowTarget(HWND(hwnd as *mut core::ffi::c_void), false)
-            }
-            .map_err(|error| error.to_string())?;
-            let visual = compositor
-                .CreateSpriteVisual()
-                .map_err(|error| error.to_string())?;
-            visual
-                .SetRelativeSizeAdjustment(Vector2 { X: 1.0, Y: 1.0 })
-                .map_err(|error| error.to_string())?;
-            visual.SetOpacity(0.78).map_err(|error| error.to_string())?;
-            let brush = compositor
-                .CreateHostBackdropBrush()
-                .map_err(|error| error.to_string())?;
-            visual.SetBrush(&brush).map_err(|error| error.to_string())?;
-            target.SetRoot(&visual).map_err(|error| error.to_string())?;
-
-            slot.replace(Some(BackdropState {
-                _dispatcher: dispatcher,
-                _compositor: compositor,
-                _target: target,
-                _visual: visual,
-                _brush: brush,
-            }));
-            Ok(())
-        })
-    }
-
-    pub fn disable() {
-        BACKDROP.with(|slot| {
-            slot.take();
-        });
-    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let _gate = scan_gate
+            .lock()
+            .map_err(|_| "usage scan lock poisoned".to_owned())?;
+        let mut connection =
+            storage::open_database(&database_path).map_err(|error| error.to_string())?;
+        sync::remove_device(&mut connection, &device_id).map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("sync device removal task failed: {error}"))?
 }
 
 /// 无边框窗口（decorations: false）在 Windows 上默认不进任务栏：任务栏按钮
@@ -952,6 +779,39 @@ mod taskbar {
     }
 }
 
+/// Win11 默认给顶层窗口画系统圆角，并沿那条弧描一道边。tao 的 `to_window_styles()`
+/// 无条件加 `WS_CAPTION`（decorations: false 只在 `to_adjusted_window_styles()` 里剥，
+/// 那个只用于算尺寸），所以无边框窗口照样被 DWM 圆角，而 tao/wry/tauri 三层都没有
+/// 设置过这个属性。
+///
+/// DWM 的半径跟系统 DPI 走，`#root` 那条 `--glass-radius` 按物理像素钉死，两者不存在
+/// 能重合的缩放档；再叠上客户区相对窗口的缩进，画面上就是两个同心圆角矩形——四角外
+/// 面多一圈底，暗色档尤其明显。关掉 DWM 这条，`--glass-radius` 才是唯一轮廓。
+///
+/// 只关圆角，不用 `SetWindowRgn`：GDI region 是二值边界，压在 per-pixel alpha 上是硬
+/// 锯齿；而且它在变形与内容测量并发时会短暂沿用旧区域（见 WINDOWS-GLASS-IMPLEMENTATION
+/// 第 7 节）。pogget 用 region 是因为它是不透明窗口，没有 alpha 可用。
+#[cfg(windows)]
+fn disable_system_corner_rounding(hwnd: isize) {
+    use core::ffi::c_void;
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::Graphics::Dwm::{
+        DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND,
+    };
+
+    let handle = HWND(hwnd as *mut c_void);
+    let preference = DWMWCP_DONOTROUND;
+    unsafe {
+        // 失败静默：圆角是装饰，不值得让启动失败。
+        let _ = DwmSetWindowAttribute(
+            handle,
+            DWMWA_WINDOW_CORNER_PREFERENCE,
+            &preference as *const _ as *const c_void,
+            std::mem::size_of_val(&preference) as u32,
+        );
+    }
+}
+
 /// 完整视图要出现在任务栏，小组件不要。调用方负责在隐藏状态下调用并随后重新显示。
 #[tauri::command]
 async fn set_taskbar_button(window: tauri::WebviewWindow, visible: bool) -> Result<(), String> {
@@ -972,70 +832,6 @@ async fn set_taskbar_button(window: tauri::WebviewWindow, visible: bool) -> Resu
         let _ = (&window, visible);
     }
     Ok(())
-}
-
-#[tauri::command]
-async fn set_glass_backdrop(
-    window: tauri::WebviewWindow,
-    enabled: bool,
-    tint: [u8; 4],
-    dark: bool,
-) -> Result<(), String> {
-    #[cfg(windows)]
-    {
-        let hwnd = window.hwnd().map_err(|error| error.to_string())?.0 as isize;
-        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
-        window
-            .run_on_main_thread(move || {
-                let result = if enabled {
-                    let _ = swca::clear_dwm_acrylic(hwnd);
-                    let _ = swca::set_round_corners(hwnd, true);
-                    let host_result = swca::extend_glass_frame(hwnd, true)
-                        .and_then(|_| swca::enable_host_backdrop(hwnd))
-                        .and_then(|_| host_backdrop::enable(hwnd));
-                    match host_result {
-                        Ok(()) => {
-                            eprintln!("[glass] HostBackdrop enabled");
-                            Ok(())
-                        }
-                        Err(host_error) => {
-                            eprintln!("[glass] HostBackdrop failed: {host_error}");
-                            let _ = swca::set_acrylic(hwnd, None);
-                            swca::set_blur(hwnd, tint).or_else(|blur_error| {
-                                swca::set_dwm_acrylic(hwnd, dark).map_err(|dwm_error| {
-                                    format!(
-                                        "HostBackdrop failed: {host_error}; BlurBehind failed: \
-                                         {blur_error}; DWM fallback failed: {dwm_error}"
-                                    )
-                                })
-                            })
-                        }
-                    }
-                } else {
-                    host_backdrop::disable();
-                    let _ = swca::extend_glass_frame(hwnd, false);
-                    let _ = swca::set_round_corners(hwnd, false);
-                    let dwm_result = swca::clear_dwm_acrylic(hwnd);
-                    let swca_result = swca::set_acrylic(hwnd, None);
-                    dwm_result.and(swca_result)
-                };
-                let _ = sender.send(result);
-            })
-            .map_err(|error| error.to_string())?;
-
-        tauri::async_runtime::spawn_blocking(move || {
-            receiver
-                .recv_timeout(std::time::Duration::from_secs(5))
-                .map_err(|error| format!("glass composition task did not finish: {error}"))?
-        })
-        .await
-        .map_err(|error| format!("glass composition task failed: {error}"))?
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = (window, enabled, tint, dark);
-        Err("SWCA acrylic 仅适用于 Windows".into())
-    }
 }
 
 #[tauri::command]
@@ -1257,6 +1053,10 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init());
 
+    // 设置页“关于”里的仓库/邮箱链接用系统浏览器、邮件客户端打开。
+    #[cfg(desktop)]
+    let builder = builder.plugin(tauri_plugin_opener::init());
+
     builder
         .setup(|app| {
             // macOS 是一个菜单栏应用：面板 + 独立完整视图窗口 + template 图标，
@@ -1266,6 +1066,13 @@ pub fn run() {
 
             #[cfg(all(desktop, not(target_os = "macos")))]
             setup_tray(app)?;
+
+            #[cfg(windows)]
+            if let Some(window) = app.get_webview_window("main") {
+                if let Ok(hwnd) = window.hwnd() {
+                    disable_system_corner_rounding(hwnd.0 as isize);
+                }
+            }
 
             let database_path = match (
                 app.path().app_data_dir(),
@@ -1318,9 +1125,7 @@ pub fn run() {
             app.manage(AppState {
                 database_path,
                 scan_gate: Arc::new(Mutex::new(())),
-                quota_cache: Arc::new(Mutex::new(None)),
-                claude_quota_cache: Arc::new(Mutex::new(None)),
-                http_quota_cache: Arc::new(Mutex::new(HashMap::new())),
+                quota_cache: Arc::new(Mutex::new(HashMap::new())),
             });
             Ok(())
         })
@@ -1339,10 +1144,16 @@ pub fn run() {
             usage_snapshot,
             usage_report,
             usage_sessions,
+            usage_projects,
+            project_rules,
+            set_project_rules,
+            custom_usage_sources,
+            set_custom_usage_sources,
             export_csv,
             rebuild_local_ledger,
             sync_settings,
             configure_sync,
+            remove_sync_device,
             claude_hook_status,
             set_claude_hook,
             claude_oauth_status,
@@ -1350,7 +1161,6 @@ pub fn run() {
             qoder_cookie_status,
             configure_qoder_cookie,
             set_taskbar_button,
-            set_glass_backdrop,
             set_native_theme,
             open_expanded_window,
             set_macos_desktop_widget_visible,

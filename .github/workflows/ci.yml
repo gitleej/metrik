@@ -18,7 +18,7 @@ jobs:
     steps:
       # 需要全部 tag 才能判断版本号是否已被占用；PR 检出真实的 head 提交而不是
       # 合并提交，否则 base 上的 tag 永远算祖先，撞车就检测不出来。
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
@@ -77,9 +77,9 @@ jobs:
 
     runs-on: ${{ matrix.platform }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
 

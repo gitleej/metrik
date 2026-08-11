@@ -18,12 +18,20 @@ change.
 - The compact widget prioritizes per-agent official quota windows, including
   remaining percentage and reset countdown. Token analytics belong in the
   expanded view.
-- Compact rows, strip cells, and the WidgetKit focus view have room for one
-  quota number, and it answers “can I use this Agent right now”. Normally that
-  is the shortest available window. When any window reaches 15% remaining or
-  less, the lowest live window takes over, because an exhausted weekly budget
-  blocks the Agent even when the session window looks full. Readings whose
-  reset moment has passed never participate.
+- Compact rows and strip cells have room for one number, and it answers "can I
+  use this agent right now". Normally that is the shortest window (five-hour, or
+  the first ranked window for agents that have no five-hour limit). When any
+  window drops to the low-quota threshold, that window takes over the row,
+  because an exhausted weekly budget blocks the agent no matter how full the
+  session window looks. A reading whose reset moment has already passed
+  describes a finished cycle and is never used as the current value.
+
+- Usage is grouped by project only from the working directory the source itself
+  records (`cwd`, or the session-to-directory mapping the agent maintains). Never
+  infer a project from a log path, a session title, or a workspace ID that has no
+  mapping to a real directory. Usage from a source that reports no directory is
+  counted as unattributed and shown as such; it is never folded into a project or
+  into an "other" bucket.
 
 ## Agent and adapter behavior
 
@@ -54,8 +62,19 @@ change.
 
 ### Windows
 
-- Compact transparency comes from a native whole-window system backdrop. Do not
-  simulate glass by lowering only Metrik's own background opacity.
+- Compact transparency comes from the window's creation-time per-pixel alpha, so
+  the real desktop, its icons, and any window behind Metrik show through. Do not
+  simulate glass by lowering only Metrik's own background opacity, and do not
+  switch DWM materials at runtime. See `WINDOWS-GLASS-IMPLEMENTATION.md`.
+- The compact and strip glass offers three user-selectable tints: a dark HUD
+  tint (default), a bright white frost with dark content, and a clear tint that
+  is as see-through as its foreground allows. The clear tint additionally lets
+  the user pick the text colour, because the two colours need opposite
+  backdrops: dark text rides on a white frost, white text on a thin dark scrim.
+  Pairing white text with a white frost is not offered — it cannot reach a
+  readable contrast on light wallpapers at any density.
+  All tints honor the glass-density slider; the choice is a Windows-only setting
+  because the macOS panel material follows the system.
 - Expanded mode remains opaque and owns its light/dark theme independently.
 - Compact, strip, and expanded forms are reachable from one another in one
   click. Each form remembers its own position and never overwrites another
@@ -86,34 +105,17 @@ change.
 
 - Compact mode is a native menu-bar panel that follows current system
   appearance and material. It is not a floating Windows-style strip.
-- The optional macOS desktop component is a real WidgetKit extension registered
-  in the system widget gallery. It is not a borderless Tauri/WebView window and
-  does not duplicate Windows floating-window behavior.
-- WidgetKit owns the desktop material, corner shape, content margins, desktop
-  placement, tint/rendering mode, and accessibility adaptations. Metrik does
-  not expose an opacity slider for this surface or paint a second outer card.
-- The focus widget prioritizes one Agent's binding official quota window and
-  reset countdown, with local token count secondary. The overview widget shows
-  every supported Agent in a large family (up to six); its large-family anatomy
-  preserves the approved Metrik desktop card: quota dial and today's tokens on
-  top, Agent switcher below, refresh/expanded-view footer last. Unavailable and
-  stale quota keep the same `--` and `~` grammar as the menu bar and compact
-  panel.
-- The host app publishes a compact, versioned, sanitised JSON snapshot through
-  an App Group. The extension never opens the SQLite ledger and the snapshot
-  never contains prompts, responses, credentials, or raw source paths.
 - The panel material is system vibrancy from the HUD family, kept in the
   active state because the non-activating panel never becomes key. The
-  panel's independent 5–96% glass-density slider adjusts a scrim above
-  vibrancy, so blur stays native while density sweeps continuously from airy
-  to near-solid in both light and dark appearance.
+  glass-density slider adjusts a scrim above vibrancy, so blur stays native
+  while density sweeps continuously from airy to near-solid in both light
+  and dark appearance.
 - The panel has a fixed design size (width 320, height follows content). The
   widget-scale setting is a Windows-only concept and is hidden on macOS; the
   panel is part of the system UI and does not scale.
-- Appearance changes made in the separate expanded window (panel density and
-  Agent selection) propagate live to the other webviews via the Tauri event bus
-  — WKWebView storage events do not cross windows. WidgetKit data refresh uses
-  the App Group snapshot contract instead.
+- Appearance changes made in the separate expanded window (glass density)
+  propagate live to the panel webview via the Tauri event bus — WKWebView
+  storage events do not cross windows.
 - Content overlays must remain readable on both light and dark desktops.
 - The menu bar uses Metrik's own minimal grammar: one monochrome provider icon
   plus official remaining percentage for every selected agent, `--` for

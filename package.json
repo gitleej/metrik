@@ -1,19 +1,18 @@
 {
   "name": "metrik",
-  "version": "0.12.8",
+  "version": "0.14.10",
   "private": true,
   "license": "AGPL-3.0-or-later",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "test": "node --test src/platformDetection.test.js src/quotaWindows.test.js src/windowGeometry.test.js",
+    "test": "node --test src/platformDetection.test.js src/windowGeometry.test.js src/glassAppearance.test.js src/quotaWindows.test.js",
     "preview": "vite preview",
     "pricing:update": "node --use-env-proxy scripts/update-pricing.mjs",
     "tauri": "tauri",
     "desktop:dev": "tauri dev",
-    "desktop:build": "tauri build",
-    "desktop:widget-preview": "zsh scripts/build-macos-widget-preview.sh"
+    "desktop:build": "tauri build"
   },
   "dependencies": {
     "@fontsource-variable/geist": "^5.2.9",
@@ -22,6 +21,7 @@
     "@phosphor-icons/react": "^2.1.10",
     "@tauri-apps/api": "^2.11.1",
     "@tauri-apps/plugin-autostart": "^2.5.1",
+    "@tauri-apps/plugin-opener": "^2.5.4",
     "@tauri-apps/plugin-os": "^2.3.2",
     "@tauri-apps/plugin-process": "^2.3.1",
     "@tauri-apps/plugin-updater": "^2.10.1",

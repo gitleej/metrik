@@ -329,7 +329,54 @@ function demoReport() {
       activeDays: activeDays[id],
     })),
     streakDays: 5,
+    projects: [
+      { path: "/Users/alice/work/metrik", base: 8_600_000, delta: 24.5, activeDays: 96 },
+      { path: "/Users/alice/work/api-gateway", base: 4_100_000, delta: -12.8, activeDays: 61 },
+      { path: "/Users/alice/notes", base: 1_400_000, delta: 3.2, activeDays: 38 },
+      { path: "/Users/alice/work/data-pipeline", base: 700_000, delta: null, activeDays: 12 },
+    ].map((spec, index) => {
+      const weekly = Array.from({ length: 26 }, (_, week) => (
+        Math.round(spec.base * Math.max(0.08, 0.55 + 0.45 * Math.sin((week + index * 5) / 3.2) + ((week * 7 + index) % 5) / 24))
+      ));
+      return {
+        path: spec.path,
+        label: spec.path.split("/").filter(Boolean).pop(),
+        tokens: weekly.reduce((sum, value) => sum + value, 0),
+        weekly,
+        recentDeltaPercent: spec.delta,
+        activeDays: spec.activeDays,
+      };
+    }),
   };
+}
+
+// 浏览器演示模式的分组规则存在内存里，预览也能完整走一遍"登记 / 隐藏"流程。
+let demoProjectRules = { roots: [], hidden: [] };
+
+// 演示用原始目录：notes 下有子目录（登记 notes 为项目根后并入），
+// Downloads 命中内置隐藏。
+const DEMO_RAW_PROJECTS = [
+  { path: "/Users/alice/work/metrik", tokens: 48_600_000, usd: 2.14, sessions: 9, agents: ["claude", "codex"], model: "claude-fable-5" },
+  { path: "/Users/alice/work/api-gateway", tokens: 21_300_000, usd: 0.86, sessions: 5, agents: ["codex"], model: "gpt-5.2-codex" },
+  { path: "/Users/alice/notes", tokens: 4_200_000, usd: 0.13, sessions: 2, agents: ["zcode", "claude"], model: "GLM-5.2" },
+  { path: "/Users/alice/notes/drafts", tokens: 2_200_000, usd: 0.06, sessions: 1, agents: ["zcode"], model: "GLM-5.2" },
+  { path: "/Users/alice/Downloads/unzipped-sample", tokens: 900_000, usd: 0.03, sessions: 1, agents: ["codex"], model: "gpt-5.2" },
+];
+
+// 与后端同序的迷你解析器：用户规则最长前缀 → 内置隐藏 → 原样。
+// 返回 null 表示隐藏。演示环境没有 .git 兜底。
+function demoResolve(path) {
+  const within = (p, root) => p === root || p.startsWith(`${root}/`);
+  let best = null;
+  demoProjectRules.roots.forEach((root) => {
+    if (within(path, root) && (!best || root.length > best.length)) best = { length: root.length, path: root, kind: "root" };
+  });
+  demoProjectRules.hidden.forEach((dir) => {
+    if (within(path, dir) && (!best || dir.length > best.length)) best = { length: dir.length, path: dir, kind: "hidden" };
+  });
+  if (best) return best.kind === "root" ? { path: best.path, pinned: true } : null;
+  if (path === "/Users/alice" || path.startsWith("/Users/alice/.") || within(path, "/Users/alice/Downloads")) return null;
+  return { path, pinned: false };
 }
 
 function demoSessions(period = "today") {
@@ -337,16 +384,17 @@ function demoSessions(period = "today") {
   const dayCount = period === "today" ? 1 : period === "week" ? 7 : 30;
   const sessions = [];
   const specs = [
-    { agent: "codex", model: "gpt-5.2-codex", base: 12_400_000, usd: 0.42 },
-    { agent: "claude", model: "claude-fable-5", base: 38_200_000, usd: 1.92 },
-    { agent: "claude", model: "claude-sonnet-5", base: 6_800_000, usd: 0.21 },
-    { agent: "codex", model: "gpt-5.2", base: 3_100_000, usd: 0.11 },
+    { agent: "codex", model: "gpt-5.2-codex", base: 12_400_000, usd: 0.42, rawProject: "/Users/alice/work/api-gateway" },
+    { agent: "claude", model: "claude-fable-5", base: 38_200_000, usd: 1.92, rawProject: "/Users/alice/work/metrik" },
+    { agent: "claude", model: "claude-sonnet-5", base: 6_800_000, usd: 0.21, rawProject: "/Users/alice/Downloads/unzipped-sample" },
+    { agent: "codex", model: "gpt-5.2", base: 3_100_000, usd: 0.11, rawProject: "/Users/alice/notes/drafts" },
   ];
   for (let day = 0; day < Math.min(dayCount, 5); day += 1) {
     specs.forEach((spec, index) => {
       if ((day + index) % 3 === 2) return;
       const end = now - day * 86_400_000 - (index * 2 + 1) * 3_600_000;
       const tokens = Math.round(spec.base * (0.6 + ((day + index) % 4) / 5));
+      const resolved = demoResolve(spec.rawProject);
       sessions.push({
         agent: spec.agent,
         sessionId: `demo-${day}-${index}-${spec.agent}`,
@@ -361,6 +409,8 @@ function demoSessions(period = "today") {
         models: [spec.model],
         usd: spec.usd * (0.6 + ((day + index) % 4) / 5),
         eventCount: 40 + index * 13,
+        project: resolved?.path ?? null,
+        projectLabel: resolved ? resolved.path.split("/").filter(Boolean).pop() : null,
       });
     });
   }
@@ -379,6 +429,133 @@ async function getUsageSessions(period = "today") {
     console.warn("Unable to load usage sessions.", error);
     return { period, sessions: [], totalSessions: 0, truncated: false, isDemo: false, loadError: true };
   }
+}
+
+function demoProjects(period = "today") {
+  const now = Date.now();
+  const merged = new Map();
+  let hiddenTokens = 0;
+  DEMO_RAW_PROJECTS.forEach((spec, index) => {
+    const resolved = demoResolve(spec.path);
+    if (!resolved) {
+      hiddenTokens += spec.tokens;
+      return;
+    }
+    const existing = merged.get(resolved.path) || {
+      path: resolved.path,
+      label: resolved.path.split("/").filter(Boolean).pop(),
+      tokens: 0,
+      usd: 0,
+      sessionCount: 0,
+      eventCount: 0,
+      lastMs: now - (index * 3 + 1) * 3_600_000,
+      agents: [],
+      model: spec.model,
+      pinned: resolved.pinned,
+    };
+    existing.tokens += spec.tokens;
+    existing.usd += spec.usd;
+    existing.sessionCount += spec.sessions;
+    existing.eventCount += spec.sessions * 37;
+    existing.pinned = existing.pinned || resolved.pinned;
+    spec.agents.forEach((agent) => {
+      if (!existing.agents.includes(agent)) existing.agents.push(agent);
+    });
+    merged.set(resolved.path, existing);
+  });
+  const projects = [...merged.values()]
+    .map((project) => ({
+      ...project,
+      inputUncached: Math.round(project.tokens * 0.07),
+      cacheRead: Math.round(project.tokens * 0.82),
+      cacheWrite: Math.round(project.tokens * 0.06),
+      output: Math.round(project.tokens * 0.05),
+    }))
+    .sort((a, b) => b.tokens - a.tokens);
+  return {
+    period,
+    projects,
+    totalProjects: projects.length,
+    truncated: false,
+    unattributedTokens: 1_900_000,
+    unattributedAgents: ["antigravity"],
+    hiddenTokens,
+    isDemo: true,
+    loadError: false,
+  };
+}
+
+async function getUsageProjects(period = "today") {
+  if (!isTauriRuntime()) {
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    return demoProjects(period);
+  }
+  try {
+    return await invoke("usage_projects", { period });
+  } catch (error) {
+    console.warn("Unable to load usage projects.", error);
+    return { period, projects: [], totalProjects: 0, truncated: false, unattributedTokens: 0, unattributedAgents: [], hiddenTokens: 0, isDemo: false, loadError: true };
+  }
+}
+
+function sanitizeDemoRules(rules) {
+  const clean = (list) => [...new Set((list || [])
+    .map((path) => String(path).trim().replace(/\\/g, "/").replace(/\/+$/, ""))
+    .filter(Boolean))];
+  const roots = clean(rules?.roots);
+  return { roots, hidden: clean(rules?.hidden).filter((path) => !roots.includes(path)) };
+}
+
+async function getProjectRules() {
+  if (!isTauriRuntime()) {
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    return { ...demoProjectRules };
+  }
+  try {
+    return await invoke("project_rules");
+  } catch (error) {
+    console.warn("Unable to load project rules.", error);
+    return { roots: [], hidden: [], loadError: true };
+  }
+}
+
+async function setProjectRules(rules) {
+  if (!isTauriRuntime()) {
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    demoProjectRules = sanitizeDemoRules(rules);
+    return { ...demoProjectRules };
+  }
+  return invoke("set_project_rules", { rules });
+}
+
+// 浏览器演示模式的自定义来源存在内存里，预览也能走一遍增删流程。
+let demoCustomSources = [];
+
+async function getCustomSources() {
+  if (!isTauriRuntime()) {
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    return [...demoCustomSources];
+  }
+  try {
+    return await invoke("custom_usage_sources");
+  } catch (error) {
+    console.warn("Unable to load custom usage sources.", error);
+    return [];
+  }
+}
+
+async function setCustomSources(sources) {
+  if (!isTauriRuntime()) {
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    demoCustomSources = (sources || [])
+      .map((source) => ({
+        name: String(source.name || "").trim(),
+        path: String(source.path || "").trim().replace(/\\/g, "/").replace(/\/+$/, ""),
+      }))
+      .filter((source) => source.name && source.path);
+    return [...demoCustomSources];
+  }
+  return invoke("set_custom_usage_sources", { sources });
 }
 
 async function getUsageReport() {
@@ -435,6 +612,13 @@ async function configureSync(directory) {
   return invoke("configure_sync", { directory });
 }
 
+async function removeSyncDevice(deviceId) {
+  if (!isTauriRuntime()) {
+    throw new Error("浏览器演示模式不能删除设备");
+  }
+  return invoke("remove_sync_device", { deviceId });
+}
+
 async function getClaudeHookStatus() {
   if (!isTauriRuntime()) {
     return { demo: true, installed: false, conflict: false, lastDataAtMs: null };
@@ -465,7 +649,13 @@ async function configureQoderCookie(cookie) {
 
 async function getClaudeOauthStatus() {
   if (!isTauriRuntime()) {
-    return { demo: true, enabled: false, credentialsPresent: false, scopeOk: false };
+    return {
+      demo: true,
+      enabled: false,
+      credentialsPresent: false,
+      scopeOk: false,
+      expired: false,
+    };
   }
   return invoke("claude_oauth_status");
 }
@@ -486,10 +676,16 @@ export {
   loadUsageSnapshot as getUsageSnapshot,
   getUsageReport,
   getUsageSessions,
+  getUsageProjects,
+  getProjectRules,
+  setProjectRules,
+  getCustomSources,
+  setCustomSources,
   exportCsvFile,
   rebuildLocalLedger,
   getSyncSettings,
   configureSync,
+  removeSyncDevice,
   getClaudeHookStatus,
   setClaudeHook,
   getClaudeOauthStatus,

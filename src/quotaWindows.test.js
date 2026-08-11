@@ -3,11 +3,12 @@ import test from "node:test";
 
 import { QUOTA_LOW_REMAINING, bindingWindow } from "./quotaWindows.js";
 
+/// 造一个窗口；顺序按后端的 quota_window_rank（five_hour → seven_day → 月度）。
 function windowOf(key, remainingPercent, { resetExpired = false, available = true } = {}) {
   return { key, view: { available, remainingPercent, resetExpired } };
 }
 
-test("5h 还满着但每周快见底时显示每周", () => {
+test("Claude：5h 还满着但每周快见底时，显示每周", () => {
   const picked = bindingWindow([
     windowOf("five_hour", 95),
     windowOf("seven_day", 13),
@@ -15,7 +16,7 @@ test("5h 还满着但每周快见底时显示每周", () => {
   assert.equal(picked.key, "seven_day");
 });
 
-test("两个窗口都充足时稳定显示短窗", () => {
+test("GLM：两个窗口都还满着时显示 5h，不因几个百分点的高低来回跳", () => {
   const picked = bindingWindow([
     windowOf("five_hour", 99),
     windowOf("seven_day", 97),
@@ -23,7 +24,7 @@ test("两个窗口都充足时稳定显示短窗", () => {
   assert.equal(picked.key, "five_hour");
 });
 
-test("较长窗口只是略低时不接管", () => {
+test("较长窗口只是略低时不接管——差值属于噪声", () => {
   const picked = bindingWindow([
     windowOf("five_hour", 80),
     windowOf("seven_day", 40),
@@ -31,7 +32,7 @@ test("较长窗口只是略低时不接管", () => {
   assert.equal(picked.key, "five_hour");
 });
 
-test("越过告急线时长窗接管", () => {
+test("越过告急线才接管", () => {
   const picked = bindingWindow([
     windowOf("five_hour", 80),
     windowOf("seven_day", QUOTA_LOW_REMAINING),
@@ -39,7 +40,7 @@ test("越过告急线时长窗接管", () => {
   assert.equal(picked.key, "seven_day");
 });
 
-test("两个窗口都告急时取剩余更少的窗口", () => {
+test("两个窗口都告急时取更少的那个", () => {
   const picked = bindingWindow([
     windowOf("five_hour", 12),
     windowOf("seven_day", 4),
@@ -47,12 +48,12 @@ test("两个窗口都告急时取剩余更少的窗口", () => {
   assert.equal(picked.key, "seven_day");
 });
 
-test("Codex 没有 5h 窗口时落到每周", () => {
+test("Codex 没有 5h 窗口，落到每周", () => {
   const picked = bindingWindow([windowOf("secondary", 53)]);
   assert.equal(picked.key, "secondary");
 });
 
-test("任一窗口归零就显示该窗口", () => {
+test("任一窗口归零就显示它——那时这个 Agent 已经用不了了", () => {
   const picked = bindingWindow([
     windowOf("five_hour", 100),
     windowOf("seven_day", 0),
@@ -61,7 +62,7 @@ test("任一窗口归零就显示该窗口", () => {
   assert.equal(picked.view.remainingPercent, 0);
 });
 
-test("告急窗口并列时保持短周期优先", () => {
+test("都告急且并列时取周期更短的（列表顺序即周期顺序）", () => {
   const picked = bindingWindow([
     windowOf("five_hour", 5),
     windowOf("seven_day", 5),
@@ -69,7 +70,8 @@ test("告急窗口并列时保持短周期优先", () => {
   assert.equal(picked.key, "five_hour");
 });
 
-test("已过重置点的旧读数不参与比较", () => {
+test("已过重置点的读数属于上一个周期，不参与比较", () => {
+  // Kimi 实测形状：5h/7d 的重置时刻都已过去（读数是 29 小时前的），月度是新的。
   const picked = bindingWindow([
     windowOf("five_hour", 100, { resetExpired: true }),
     windowOf("seven_day", 0, { resetExpired: true }),
@@ -86,7 +88,7 @@ test("没有来源的窗口不参与比较", () => {
   assert.equal(picked.key, "seven_day");
 });
 
-test("全部失效时返回 null", () => {
+test("全部失效时返回 null，由调用方显示「已重置，等待刷新」", () => {
   assert.equal(bindingWindow([windowOf("five_hour", 0, { resetExpired: true })]), null);
   assert.equal(bindingWindow([]), null);
   assert.equal(bindingWindow(undefined), null);

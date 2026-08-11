@@ -27,8 +27,18 @@ struct CodexPayload {
     id: Option<String>,
     forked_from_id: Option<String>,
     model: Option<String>,
+    cwd: Option<String>,
     info: Option<TokenInfo>,
     rate_limits: Option<RateLimits>,
+}
+
+/// 一条待落账的增量：同一轮里模型和工作目录都可能变，所以随事件一起暂存。
+struct PendingEvent {
+    fingerprint: String,
+    timestamp: i64,
+    model: Option<String>,
+    tokens: TokenVector,
+    cwd: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -46,6 +56,11 @@ struct RawTokenUsage {
     output_tokens: i64,
     #[serde(default)]
     reasoning_output_tokens: i64,
+    /// Codex 自报的总量，用作口径自检的判据（见
+    /// `TokenVector::disagrees_with_reported_total`）。本机 60011 条读数
+    /// 恒等于 input + output——reasoning 与缓存读都已含在里面，不另加。
+    #[serde(default)]
+    total_tokens: i64,
 }
 
 #[derive(Deserialize, Default)]
@@ -100,6 +115,9 @@ impl AgentAdapter for CodexAdapter {
             .to_owned();
         let mut session_id = fallback_session;
         let mut current_model: Option<String> = None;
+        // `session_meta.cwd` 是会话起始目录，`turn_context.cwd` 是当轮实际目录
+        // （用户中途换目录时只有后者会变）。按事件发生时的值记录。
+        let mut current_cwd: Option<String> = None;
         let mut previous: Option<TokenVector> = None;
         // Codex Desktop fork/subagent files replay the parent thread's history
         // (including its cumulative token_count events) before the first live
@@ -107,7 +125,7 @@ impl AgentAdapter for CodexAdapter {
         // session, so counting them again would double-count. The replay never
         // contains turn_context lines, so the first turn_context marks live data.
         let mut in_fork_replay = false;
-        let mut pending_events: Vec<(String, i64, Option<String>, TokenVector)> = Vec::new();
+        let mut pending_events: Vec<PendingEvent> = Vec::new();
         let mut quotas = Vec::new();
         let mut diagnostics = ScanDiagnostics::default();
         let track_skipped_lines = candidate.mtime_ns / 1_000_000 >= cutoff_ms;
@@ -146,11 +164,17 @@ impl AgentAdapter for CodexAdapter {
                     if let Some(model) = non_empty(payload.model) {
                         current_model = Some(model);
                     }
+                    if let Some(cwd) = non_empty(payload.cwd) {
+                        current_cwd = Some(cwd);
+                    }
                 }
                 "turn_context" => {
                     in_fork_replay = false;
                     if let Some(model) = non_empty(payload.model) {
                         current_model = Some(model);
+                    }
+                    if let Some(cwd) = non_empty(payload.cwd) {
+                        current_cwd = Some(cwd);
                     }
                 }
                 "event_msg" if payload.payload_type.as_deref() == Some("token_count") => {
@@ -172,6 +196,10 @@ impl AgentAdapter for CodexAdapter {
                             output: total.output_tokens.max(0),
                             reasoning_output: total.reasoning_output_tokens.max(0),
                         };
+                        // 口径自检对累计快照做，不对增量做：来源报的也是累计值。
+                        if current.disagrees_with_reported_total(total.total_tokens) {
+                            diagnostics.total_mismatches += 1;
+                        }
                         let delta = current.positive_delta(previous.as_ref());
                         // Replayed counters still advance the baseline so the first
                         // live delta only counts the fork's own increment.
@@ -186,7 +214,13 @@ impl AgentAdapter for CodexAdapter {
                                 current.reasoning_output
                             );
                             let model = event_model.or_else(|| current_model.clone());
-                            pending_events.push((fingerprint, timestamp, model, delta));
+                            pending_events.push(PendingEvent {
+                                fingerprint,
+                                timestamp,
+                                model,
+                                tokens: delta,
+                                cwd: current_cwd.clone(),
+                            });
                         }
                     }
 
@@ -209,17 +243,18 @@ impl AgentAdapter for CodexAdapter {
 
         let events = pending_events
             .into_iter()
-            .map(|(fingerprint, timestamp, model, tokens)| {
-                let event_key = format!("{session_id}:{fingerprint}");
+            .map(|pending| {
+                let event_key = format!("{session_id}:{}", pending.fingerprint);
                 UsageEvent::new(
                     self.id(),
                     event_key,
-                    timestamp,
+                    pending.timestamp,
                     session_id.clone(),
-                    model,
-                    tokens,
+                    pending.model,
+                    pending.tokens,
                     "cumulative_delta",
                 )
+                .with_project(pending.cwd)
             })
             .collect();
 
@@ -306,6 +341,105 @@ mod tests {
             .collect();
         assert_eq!(deltas, vec![100, 40, 50]);
         assert_eq!(deltas.iter().sum::<i64>(), 190);
+        std::fs::remove_file(temp).ok();
+    }
+
+    /// 口径自检：来源自报总量与我们拆出的分量一致时不该报警，不一致时必须
+    /// 记下来并把该来源标为数据不完整。不一致意味着我们对字段语义的理解错了
+    /// （reasoning 是否含在 output、缓存是否含在输入……），这类错不会崩溃、
+    /// 只会显示一个看着合理的错数字。
+    #[test]
+    fn a_reported_total_that_contradicts_our_components_is_flagged() {
+        let write_log = |name: &str, line: &str| {
+            let temp = std::env::temp_dir()
+                .join(format!("metrik-codex-{name}-{}.jsonl", std::process::id()));
+            let mut file = File::create(&temp).unwrap();
+            writeln!(
+                file,
+                r#"{{"type":"session_meta","payload":{{"id":"session-a"}}}}"#
+            )
+            .unwrap();
+            writeln!(file, "{line}").unwrap();
+            drop(file);
+            let metadata = temp.metadata().unwrap();
+            let candidate = SourceCandidate {
+                source_id: "source".into(),
+                path: temp.clone(),
+                size: metadata.len(),
+                mtime_ns: 1,
+            };
+            let parsed = CodexAdapter::with_roots(vec![])
+                .parse(&candidate, i64::MIN)
+                .unwrap();
+            std::fs::remove_file(temp).ok();
+            parsed
+        };
+
+        // 真机口径：total = input + output，reasoning 与缓存读都已含在里面。
+        let agreeing = write_log(
+            "agree",
+            r#"{"timestamp":"2026-07-12T01:00:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":30,"output_tokens":20,"reasoning_output_tokens":8,"total_tokens":120}}}}"#,
+        );
+        assert_eq!(agreeing.diagnostics.total_mismatches, 0);
+        assert!(!agreeing.diagnostics.is_partial());
+        assert_eq!(agreeing.source.events[0].tokens.processed(), 120);
+
+        // 假设来源某天改成"reasoning 另计"：total 变 128 而我们仍按 120 拆。
+        // 数字看着依旧合理，只有和自报总量一比才露馅。
+        let disagreeing = write_log(
+            "disagree",
+            r#"{"timestamp":"2026-07-12T01:00:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":30,"output_tokens":20,"reasoning_output_tokens":8,"total_tokens":128}}}}"#,
+        );
+        assert_eq!(disagreeing.diagnostics.total_mismatches, 1);
+        assert!(disagreeing.diagnostics.is_partial());
+    }
+
+    #[test]
+    fn events_carry_the_working_directory_in_effect_when_they_happened() {
+        let temp =
+            std::env::temp_dir().join(format!("metrik-codex-cwd-{}.jsonl", std::process::id()));
+        let mut file = File::create(&temp).unwrap();
+        writeln!(
+            file,
+            r#"{{"type":"session_meta","payload":{{"id":"session-a","cwd":"D:\\work\\usage"}}}}"#
+        )
+        .unwrap();
+        writeln!(
+            file,
+            r#"{{"timestamp":"2026-07-12T01:00:00Z","type":"event_msg","payload":{{"type":"token_count","info":{{"total_token_usage":{{"input_tokens":100,"cached_input_tokens":0,"output_tokens":0,"reasoning_output_tokens":0}}}}}}}}"#
+        )
+        .unwrap();
+        // 中途换目录：之后的事件跟着 turn_context 走。
+        writeln!(
+            file,
+            r#"{{"timestamp":"2026-07-12T02:00:00Z","type":"turn_context","payload":{{"cwd":"E:/other"}}}}"#
+        )
+        .unwrap();
+        writeln!(
+            file,
+            r#"{{"timestamp":"2026-07-12T03:00:00Z","type":"event_msg","payload":{{"type":"token_count","info":{{"total_token_usage":{{"input_tokens":180,"cached_input_tokens":0,"output_tokens":0,"reasoning_output_tokens":0}}}}}}}}"#
+        )
+        .unwrap();
+        drop(file);
+        let metadata = temp.metadata().unwrap();
+        let candidate = SourceCandidate {
+            source_id: "source".into(),
+            path: temp.clone(),
+            size: metadata.len(),
+            mtime_ns: 1,
+        };
+
+        let parsed = CodexAdapter::with_roots(vec![])
+            .parse(&candidate, i64::MIN)
+            .unwrap();
+
+        let projects: Vec<Option<&str>> = parsed
+            .source
+            .events
+            .iter()
+            .map(|event| event.project_path.as_deref())
+            .collect();
+        assert_eq!(projects, vec![Some("D:/work/usage"), Some("E:/other")]);
         std::fs::remove_file(temp).ok();
     }
 

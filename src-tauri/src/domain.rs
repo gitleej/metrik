@@ -7,7 +7,10 @@ use std::path::PathBuf;
 /// qoder 是配额-only：Qoder、QoderWork 与 Qoder CLI 共用同一账户级 Credits
 /// 配额来源。Qoder CLI 的本地遥测 token 字段实测为 0，不能作为用量账本来源。
 /// kimiwork 只保留为内部配额来源，窗口合并到 kimi，不作为独立可见 Agent。
-pub const AGENT_IDS: [&str; 8] = [
+/// custom 是用户在设置里自己声明的 Claude 兼容 JSONL 目录的**合并槽位**：
+/// 我们没接的 Agent，只要日志是这个格式，用户指一下就能算进总量，不必等我们
+/// 逐家适配。多个声明来源合并成这一条，各自的名字在「数据统计」里分别列出。
+pub const AGENT_IDS: [&str; 9] = [
     "codex",
     "claude",
     "zcode",
@@ -16,6 +19,7 @@ pub const AGENT_IDS: [&str; 8] = [
     "antigravity",
     "workbuddy",
     "qoder",
+    "custom",
 ];
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -30,6 +34,22 @@ pub struct TokenVector {
 impl TokenVector {
     pub fn processed(&self) -> i64 {
         self.input_uncached + self.cache_read + self.cache_write + self.output
+    }
+
+    /// 口径自检：把我们拆出来的分量和来源**自己报的总量**比一次。
+    ///
+    /// 读日志算 token 最危险的错法不是崩溃，而是把字段语义理解反了——
+    /// reasoning 是否已含在 output 里、缓存读是否已含在输入里、拿到的是累计
+    /// 还是增量、百分比是已用还是剩余。这类错**不会报错，只会显示一个看着
+    /// 合理的错数字**，用户无从察觉。（真事：广泛使用的 tokscale 假设
+    /// output 不含 reasoning 而分开相加，本机 11 万条 Codex 读数证明它是错的。）
+    ///
+    /// 凡是来源自带总量的，就用它当判据。对不上即记一次诊断，该来源标为
+    /// 「数据不完整」并说明原因——把安静的错变成响亮的错。
+    ///
+    /// `reported_total <= 0` 视为"来源没报"，不参与判定：缺字段不是错。
+    pub fn disagrees_with_reported_total(&self, reported_total: i64) -> bool {
+        reported_total > 0 && self.processed() != reported_total
     }
 
     pub fn positive_delta(&self, previous: Option<&Self>) -> Self {
@@ -74,6 +94,12 @@ pub struct UsageEvent {
     pub tokens: TokenVector,
     pub quality: &'static str,
     pub payload_hash: String,
+    /// 事件所属项目的工作目录（各 Agent 的 cwd / session directory）。
+    /// 拿不到就是 None——不从会话名或日志路径反推。
+    /// 刻意不参与 `payload_hash`：它是事件的附带归属，不是计量事实。若参与，
+    /// 现有账本在解析器升级后重扫时会对同一 event_id 算出不同的 hash，而
+    /// 非合并型 adapter（Codex/Kimi 等）遇到 hash 不一致就报身份冲突。
+    pub project_path: Option<String>,
 }
 
 impl UsageEvent {
@@ -107,8 +133,35 @@ impl UsageEvent {
             tokens,
             quality,
             payload_hash,
+            project_path: None,
         }
     }
+
+    /// 附加项目归属；`None` 与空白路径都保持"未归属"。
+    pub fn with_project(mut self, project_path: Option<String>) -> Self {
+        self.project_path = project_path.and_then(|value| normalize_project_path(&value));
+        self
+    }
+}
+
+/// 项目路径的存储形态：反斜杠转正斜杠、去掉尾部分隔符、Windows 盘符统一大写。
+/// 盘符大小写是同一台机器上不同 Agent 之间唯一实测会分叉的地方（`D:\work` 与
+/// `d:/work`）；路径其余部分按各 Agent 报出的原样保留，不做大小写折叠。
+pub fn normalize_project_path(value: &str) -> Option<String> {
+    let mut path = value.trim().replace('\\', "/");
+    while path.len() > 1 && path.ends_with('/') && !path.ends_with(":/") {
+        path.pop();
+    }
+    if path.is_empty() {
+        return None;
+    }
+    let mut chars = path.chars();
+    if let (Some(drive), Some(':')) = (chars.next(), chars.next()) {
+        if drive.is_ascii_alphabetic() {
+            path = format!("{}{}", drive.to_ascii_uppercase(), &path[1..]);
+        }
+    }
+    Some(path)
 }
 
 #[derive(Clone, Debug)]
@@ -228,6 +281,9 @@ pub struct SeriesPoint {
 pub struct AgentQuotaView {
     pub agent: String,
     pub windows: Vec<AgentQuotaWindow>,
+    /// 没有窗口时的原因（目前只有 Claude 直连查询失败会填）。让"没有数字"
+    /// 这件事可自查，而不是笼统地叫用户去开另一个来源。
+    pub note: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -263,6 +319,9 @@ pub struct AgentSummary {
     pub cache_write: i64,
     pub output: i64,
     pub share: f64,
+    /// 本机装了这个 Agent：安装痕迹命中，或本周期确有用量（后者兜住没有可靠
+    /// 安装探针的 Agent）。只用于设置里的排序分组，不用于过滤——见 `detect`。
+    pub detected: bool,
 }
 
 /// 周期内按模型聚合的 processed token 用量，按 tokens 降序排列。
@@ -289,6 +348,21 @@ pub struct UsageReport {
     pub top_models: Vec<ModelSummary>,
     pub agents: Vec<AgentReportRow>,
     pub streak_days: i64,
+    /// 182 天窗口内按项目（分组规则归并后）的走势，token 降序取前若干个。
+    pub projects: Vec<ProjectReportRow>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectReportRow {
+    pub path: String,
+    pub label: String,
+    pub tokens: i64,
+    /// 26 个 7 天桶，最旧在前、以今日结尾，供 sparkline 使用。
+    pub weekly: Vec<i64>,
+    /// 近 7 天相对再前 7 天的变化率（百分比）；前一段为 0 时为 None。
+    pub recent_delta_percent: Option<f64>,
+    pub active_days: i64,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -338,6 +412,54 @@ pub struct SessionSummary {
     /// 按 `pricing` 模块可计价部分求和的估算成本；会话内模型全部未定价时为 None。
     pub usd: Option<f64>,
     pub event_count: i64,
+    /// 该会话内 token 最多的项目（按分组规则归并后的根路径）；
+    /// 事件都没有归属或全部被隐藏时为 None。
+    pub project: Option<String>,
+    /// 项目根的目录名，供列表直接显示。
+    pub project_label: Option<String>,
+}
+
+/// 只读项目明细：按分组规则归并后的项目聚合 `usage_event`，只查询本地账本
+/// 已有数据，绝不触发日志扫描。归属不到的事件不并进任何项目：读不到目录的
+/// 计入 `unattributed_tokens`，命中隐藏规则的计入 `hidden_tokens`，都如实
+/// 单列，不塞进"其他"。
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageProjects {
+    pub period: String,
+    pub projects: Vec<ProjectSummary>,
+    pub total_projects: i64,
+    pub truncated: bool,
+    pub unattributed_tokens: i64,
+    /// 本周期内有用量、但当前版本读不到项目归属的 Agent（如 Antigravity）。
+    pub unattributed_agents: Vec<String>,
+    /// 命中隐藏规则（用户或内置）的用量。
+    pub hidden_tokens: i64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectSummary {
+    /// 项目根目录（归一化后的完整路径；手动登记或 .git 归并的结果）。
+    pub path: String,
+    /// 目录名，用于列表主标题。
+    pub label: String,
+    pub tokens: i64,
+    pub input_uncached: i64,
+    pub cache_read: i64,
+    pub cache_write: i64,
+    pub output: i64,
+    /// 可计价部分的估算成本；项目内模型全部未定价时为 None。
+    pub usd: Option<f64>,
+    pub session_count: i64,
+    pub event_count: i64,
+    pub last_ms: i64,
+    /// 该项目下用过的 Agent，按 token 降序。
+    pub agents: Vec<String>,
+    /// 该项目下 token 最多的模型。
+    pub model: Option<String>,
+    /// 是否命中手动登记的项目根。
+    pub pinned: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]

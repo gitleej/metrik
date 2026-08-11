@@ -32,6 +32,7 @@ struct MessageUsage {
     event_key: String,
     model: Option<String>,
     tokens: TokenVector,
+    cwd: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -45,6 +46,9 @@ struct BuddyRecord {
     status: Option<String>,
     #[serde(rename = "sessionId")]
     session_id: Option<String>,
+    /// 会话工作目录；`~/.codebuddy/projects/<key>` 的目录名是编码后的路径，
+    /// 用行内字段还原真实路径。
+    cwd: Option<String>,
     message: Option<BuddyMessage>,
     #[serde(rename = "providerData")]
     provider_data: Option<BuddyProviderData>,
@@ -289,6 +293,7 @@ impl AgentAdapter for WorkbuddyAdapter {
             if let Some(stored) = messages.get_mut(&key) {
                 stored.tokens.component_max(&tokens);
                 stored.model = stored.model.clone().or(model);
+                stored.cwd = stored.cwd.clone().or(record.cwd);
                 if timestamp >= stored.timestamp {
                     stored.timestamp = timestamp;
                 }
@@ -301,6 +306,7 @@ impl AgentAdapter for WorkbuddyAdapter {
                         event_key: key,
                         model,
                         tokens,
+                        cwd: record.cwd,
                     },
                 );
             }
@@ -319,6 +325,7 @@ impl AgentAdapter for WorkbuddyAdapter {
                     message.tokens,
                     "exact",
                 )
+                .with_project(message.cwd)
             })
             .collect();
         events.sort_by_key(|event| event.occurred_at_ms);
@@ -393,6 +400,7 @@ mod tests {
         assert_eq!(event.tokens.output, 3);
         // processed 与来源的 total_tokens 口径一致（input 已含 cache_read）。
         assert_eq!(event.tokens.processed(), 24486 + 3);
+        assert_eq!(event.project_path.as_deref(), Some("/Users/alice/repo"));
     }
 
     /// 真机转录行（本机 WorkBuddy 桌面版实测，2026-07-21）：

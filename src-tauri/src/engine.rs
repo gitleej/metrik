@@ -2,16 +2,18 @@ use crate::adapters::{
     AgentAdapter, AntigravityAdapter, ClaudeAdapter, CodexAdapter, KimiAdapter, OpencodeAdapter,
     ScanDiagnostics, SourceCandidate, WorkbuddyAdapter, ZcodeAdapter,
 };
-use crate::app_server;
-use crate::claude_hook::ClaudeHook;
-use crate::claude_oauth::{self, ClaudeOauth};
-use crate::coding_quota;
+use crate::claude_oauth;
+use crate::custom_sources;
+use crate::detect;
+use crate::domain::ProjectReportRow;
 use crate::domain::{
     AgentCost, AgentQuotaView, AgentReportRow, AgentSummary, CostSummary, DayUsage, IndexingView,
-    ModelSummary, QuotaSample, QuotaView, SeriesPoint, SessionSummary, SourceView, SyncView,
-    UsageReport, UsageSessions, UsageSnapshot, AGENT_IDS,
+    ModelSummary, ProjectSummary, QuotaView, SeriesPoint, SessionSummary, SourceView, SyncView,
+    UsageProjects, UsageReport, UsageSessions, UsageSnapshot, AGENT_IDS,
 };
 use crate::pricing;
+use crate::projects::{self, ProjectResolver, Resolution};
+use crate::quota;
 use crate::storage;
 use crate::sync;
 use anyhow::{Context, Result};
@@ -20,7 +22,6 @@ use rusqlite::{params, Connection};
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
-use std::sync::Mutex;
 use std::time::{Duration as StdDuration, Instant};
 
 /// 报告窗口固定为 182 天（26 周），与 `usage_snapshot` 的扫描周期无关。
@@ -45,7 +46,7 @@ struct ScanReport {
     errors: HashMap<String, usize>,
     diagnostics: HashMap<String, AdapterDiagnostics>,
     /// adapter 自报的"存在但读不了"的存储形态（见 AgentAdapter::coverage_gaps）。
-    /// 非空 → 该 Agent 标"部分覆盖"，原因原样展示。
+    /// 非空 → 该 Agent 标"数据不完整"，原因原样展示。
     coverage_gaps: HashMap<String, Vec<String>>,
     backfill_pending: usize,
 }
@@ -56,6 +57,8 @@ struct AdapterDiagnostics {
     malformed_lines: usize,
     unreadable_lines: usize,
     rejected_events: usize,
+    /// 口径自检失败：分量和来源自报总量对不上，说明字段语义可能理解错了。
+    total_mismatches: usize,
 }
 
 #[derive(Clone)]
@@ -102,6 +105,7 @@ struct StoredSessionEvent {
     cache_read: i64,
     cache_write: i64,
     output: i64,
+    project: Option<String>,
 }
 
 #[derive(Default)]
@@ -111,14 +115,55 @@ struct SessionAgg {
     totals: TokenComponents,
     event_count: i64,
     model_components: HashMap<String, TokenComponents>,
+    project_tokens: HashMap<String, i64>,
+}
+
+#[derive(Default)]
+struct ProjectAgg {
+    last_ms: i64,
+    totals: TokenComponents,
+    event_count: i64,
+    model_components: HashMap<String, TokenComponents>,
+    agent_tokens: HashMap<String, i64>,
+    sessions: HashSet<(String, String)>,
+    pinned: bool,
+}
+
+/// 项目根路径的展示名：最后一段目录名。
+fn project_label(path: &str) -> String {
+    path.rsplit('/')
+        .find(|part| !part.is_empty())
+        .unwrap_or(path)
+        .to_owned()
+}
+
+/// token 最多者优先、同量按名称定序，返回排好序的名字列表。
+fn ranked_keys(totals: &HashMap<String, i64>) -> Vec<String> {
+    let mut ranked: Vec<(&String, &i64)> = totals.iter().collect();
+    ranked.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
+    ranked.into_iter().map(|(name, _)| name.clone()).collect()
+}
+
+/// 按模型分量求可计价成本；全部模型都没有定价时返回 None。
+fn estimate_usd(model_components: &HashMap<String, TokenComponents>) -> Option<f64> {
+    let mut total = 0.0_f64;
+    let mut priced_any = false;
+    for (model, comps) in model_components {
+        if let Some(price) = pricing::price_for(model) {
+            priced_any = true;
+            total += comps.input_uncached as f64 * price.input / 1_000_000.0
+                + comps.cache_read as f64 * price.cache_read / 1_000_000.0
+                + comps.cache_write as f64 * price.cache_write / 1_000_000.0
+                + comps.output as f64 * price.output / 1_000_000.0;
+        }
+    }
+    priced_any.then_some(total)
 }
 
 pub fn build_snapshot(
     database_path: &Path,
     period: &str,
-    quota_cache: &Mutex<Option<(Instant, Vec<QuotaSample>)>>,
-    claude_quota_cache: &Mutex<Option<(Instant, Vec<QuotaSample>)>>,
-    http_quota_cache: &Mutex<HashMap<&'static str, (Instant, Vec<QuotaSample>)>>,
+    quota_cache: &quota::QuotaCache,
     force: bool,
 ) -> Result<UsageSnapshot> {
     let mut connection = storage::open_database(database_path)?;
@@ -126,63 +171,8 @@ pub fn build_snapshot(
     let retention_cutoff = now - Duration::days(RETENTION_DAYS).num_milliseconds();
     let report = ingest_sources(&mut connection, retention_cutoff)?;
 
-    // app-server 是 Codex 额度的权威来源：拉到就整体替换，套餐变更后消失的
-    // 窗口（如 prolite 没有 5 小时窗）不得留着旧日志快照冒充当前额度。
-    if let Ok(samples) = cached_live_quota(quota_cache, force) {
-        if !samples.is_empty() {
-            connection.execute("DELETE FROM quota_snapshot WHERE adapter_id = 'codex'", [])?;
-        }
-        for sample in &samples {
-            storage::upsert_quota(&connection, sample)?;
-        }
-    }
-    // Claude 官方额度：用户显式开启 OAuth 来源时优先（账户级合并额度，
-    // 不依赖终端状态栏）；拉取失败或未开启时回落到 statusLine 钩子文件。
-    let oauth_enabled =
-        storage::get_app_setting(&connection, claude_oauth::SETTING_KEY)?.as_deref() == Some("1");
-    let mut claude_samples = Vec::new();
-    if oauth_enabled {
-        if let Ok(samples) = cached_claude_oauth_quota(claude_quota_cache, force) {
-            claude_samples = samples;
-        }
-    }
-    if claude_samples.is_empty() {
-        claude_samples = ClaudeHook::detected().quota_samples();
-    }
-    if !claude_samples.is_empty() {
-        // 当前来源是 Claude 配额的唯一事实：整体替换，来源里消失的窗口
-        // （或旧版 primary/secondary 键）不得滞留在展示里。
-        connection.execute("DELETE FROM quota_snapshot WHERE adapter_id = 'claude'", [])?;
-    }
-    for sample in claude_samples {
-        storage::upsert_quota(&connection, &sample)?;
-    }
-
-    // GLM/Kimi 官方配额：与 codex/claude 同型，一次实时 GET，跨快照缓存限流。
-    // 取到才整体替换该 Agent 的窗口；无凭据/失败时保留旧行（会随时效变陈旧），
-    // 绝不写零值或估算冒充。
-    for (adapter_id, fetch) in [
-        (
-            "zcode",
-            coding_quota::fetch_zcode_quota as fn(StdDuration) -> Result<Vec<QuotaSample>>,
-        ),
-        ("kimi", coding_quota::fetch_kimi_quota),
-        ("kimiwork", coding_quota::fetch_kimiwork_quota),
-        ("qoder", coding_quota::fetch_qoder_quota),
-        ("workbuddy", coding_quota::fetch_workbuddy_quota),
-    ] {
-        if let Ok(samples) = cached_coding_quota(http_quota_cache, adapter_id, fetch, force) {
-            if !samples.is_empty() {
-                connection.execute(
-                    "DELETE FROM quota_snapshot WHERE adapter_id = ?1",
-                    [adapter_id],
-                )?;
-                for sample in &samples {
-                    storage::upsert_quota(&connection, sample)?;
-                }
-            }
-        }
-    }
+    // 各家官方额度的取数与落库统一在 quota 模块，见那里的落库语义说明。
+    quota::refresh_all(&connection, quota_cache, force)?;
 
     storage::prune_missing_sources(&mut connection)?;
     storage::prune_old_events(&connection, retention_cutoff)?;
@@ -261,6 +251,7 @@ fn report_at(connection: &Connection, local_now: chrono::DateTime<Local>) -> Res
     }
 
     let streak_days = compute_streak(&day_totals);
+    let projects = report_projects(connection, today, start_ms, end_ms)?;
 
     let days: Vec<DayUsage> = day_totals
         .into_iter()
@@ -308,7 +299,100 @@ fn report_at(connection: &Connection, local_now: chrono::DateTime<Local>) -> Res
         top_models,
         agents,
         streak_days,
+        projects,
     })
+}
+
+const REPORT_PROJECT_LIMIT: usize = 8;
+const REPORT_WEEK_BUCKETS: usize = (REPORT_WINDOW_DAYS / 7) as usize;
+
+/// 报告窗口内按项目的走势。只查本地 `usage_event`（远端同步事件不带项目），
+/// 分组规则与用量页同一套。
+fn report_projects(
+    connection: &Connection,
+    today: NaiveDate,
+    start_ms: i64,
+    end_ms: i64,
+) -> Result<Vec<ProjectReportRow>> {
+    let mut statement = connection.prepare(
+        "SELECT project_path, occurred_at_ms, processed_tokens
+         FROM usage_event
+         WHERE project_path IS NOT NULL
+           AND occurred_at_ms >= ?1 AND occurred_at_ms < ?2",
+    )?;
+    let rows = statement.query_map(params![start_ms, end_ms], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, i64>(2)?,
+        ))
+    })?;
+
+    let mut resolver = ProjectResolver::new(projects::load_rules(connection)?);
+    struct ProjectTrend {
+        tokens: i64,
+        weekly: Vec<i64>,
+        last_seven: i64,
+        previous_seven: i64,
+        active_days: HashSet<NaiveDate>,
+    }
+    let mut trends: HashMap<String, ProjectTrend> = HashMap::new();
+    for row in rows.filter_map(Result::ok) {
+        let (raw, occurred_at_ms, tokens) = row;
+        let Resolution::Project { path, .. } = resolver.resolve(raw.trim()) else {
+            continue;
+        };
+        let Some(local) = Local.timestamp_millis_opt(occurred_at_ms).single() else {
+            continue;
+        };
+        let date = local.date_naive();
+        let days_ago = (today - date).num_days();
+        if !(0..REPORT_WINDOW_DAYS).contains(&days_ago) {
+            continue;
+        }
+        let trend = trends.entry(path).or_insert_with(|| ProjectTrend {
+            tokens: 0,
+            weekly: vec![0; REPORT_WEEK_BUCKETS],
+            last_seven: 0,
+            previous_seven: 0,
+            active_days: HashSet::new(),
+        });
+        trend.tokens += tokens;
+        // 7 天一桶、以今日结尾：最近 7 天进最后一桶，供 sparkline 从旧到新画。
+        let bucket =
+            REPORT_WEEK_BUCKETS - 1 - ((days_ago / 7) as usize).min(REPORT_WEEK_BUCKETS - 1);
+        trend.weekly[bucket] += tokens;
+        if days_ago < 7 {
+            trend.last_seven += tokens;
+        } else if days_ago < 14 {
+            trend.previous_seven += tokens;
+        }
+        trend.active_days.insert(date);
+    }
+
+    let mut projects: Vec<ProjectReportRow> = trends
+        .into_iter()
+        .map(|(path, trend)| ProjectReportRow {
+            label: project_label(&path),
+            tokens: trend.tokens,
+            weekly: trend.weekly,
+            // 前 7 天没有用量时环比没有意义，如实置空。
+            recent_delta_percent: (trend.previous_seven > 0).then(|| {
+                (trend.last_seven - trend.previous_seven) as f64 * 100.0
+                    / trend.previous_seven as f64
+            }),
+            active_days: trend.active_days.len() as i64,
+            path,
+        })
+        .collect();
+    projects.sort_by(|left, right| {
+        right
+            .tokens
+            .cmp(&left.tokens)
+            .then_with(|| left.path.cmp(&right.path))
+    });
+    projects.truncate(REPORT_PROJECT_LIMIT);
+    Ok(projects)
 }
 
 const MAX_SESSIONS: usize = 300;
@@ -339,6 +423,7 @@ fn sessions_at(
     let end_ms = local_now.timestamp_millis() + 1;
 
     let events = load_session_events(connection, start_ms, end_ms)?;
+    let mut resolver = ProjectResolver::new(projects::load_rules(connection)?);
 
     let mut aggregates: HashMap<(String, String), SessionAgg> = HashMap::new();
     for event in events {
@@ -380,6 +465,17 @@ fn sessions_at(
                 .or_default()
                 .add(&comps);
         }
+        // 会话的项目归属走同一套分组规则；命中隐藏的事件不参与判定。
+        if let Some(raw) = event
+            .project
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            if let Resolution::Project { path, .. } = resolver.resolve(raw) {
+                *agg.project_tokens.entry(path).or_default() += comps.processed();
+            }
+        }
     }
 
     let mut sessions: Vec<SessionSummary> = aggregates
@@ -394,18 +490,9 @@ fn sessions_at(
             let model = model_totals.first().map(|(model, _)| model.clone());
             let models = model_totals.into_iter().map(|(model, _)| model).collect();
 
-            let mut usd_total = 0.0_f64;
-            let mut priced_any = false;
-            for (model, comps) in &agg.model_components {
-                if let Some(price) = pricing::price_for(model) {
-                    priced_any = true;
-                    usd_total += comps.input_uncached as f64 * price.input / 1_000_000.0
-                        + comps.cache_read as f64 * price.cache_read / 1_000_000.0
-                        + comps.cache_write as f64 * price.cache_write / 1_000_000.0
-                        + comps.output as f64 * price.output / 1_000_000.0;
-                }
-            }
-            let usd = priced_any.then_some(usd_total);
+            let usd = estimate_usd(&agg.model_components);
+            let project = ranked_keys(&agg.project_tokens).into_iter().next();
+            let project_label = project.as_deref().map(project_label);
 
             SessionSummary {
                 agent,
@@ -421,6 +508,8 @@ fn sessions_at(
                 models,
                 usd,
                 event_count: agg.event_count,
+                project,
+                project_label,
             }
         })
         .collect();
@@ -445,7 +534,8 @@ fn load_session_events(
 ) -> Result<Vec<StoredSessionEvent>> {
     let mut statement = connection.prepare(
         "SELECT adapter_id, session_id, occurred_at_ms, model,
-                input_uncached_tokens, cache_read_tokens, cache_write_tokens, output_tokens
+                input_uncached_tokens, cache_read_tokens, cache_write_tokens, output_tokens,
+                project_path
          FROM usage_event
          WHERE occurred_at_ms >= ?1 AND occurred_at_ms < ?2
          ORDER BY occurred_at_ms",
@@ -460,9 +550,142 @@ fn load_session_events(
             cache_read: row.get(5)?,
             cache_write: row.get(6)?,
             output: row.get(7)?,
+            project: row.get(8)?,
         })
     })?;
     Ok(rows.filter_map(Result::ok).collect())
+}
+
+const MAX_PROJECTS: usize = 200;
+
+/// 只读项目明细：与会话明细同一批事件，只是聚合键换成项目工作目录。
+/// 同样只查本地账本，绝不触发日志扫描。
+pub fn build_projects(database_path: &Path, period: &str) -> Result<UsageProjects> {
+    let connection = storage::open_database_read_only(database_path)?;
+    projects_at(&connection, period, Local::now())
+}
+
+fn projects_at(
+    connection: &Connection,
+    requested_period: &str,
+    local_now: chrono::DateTime<Local>,
+) -> Result<UsageProjects> {
+    let period = match requested_period {
+        "week" | "month" => requested_period,
+        _ => "today",
+    };
+    let today = local_now.date_naive();
+    let start_date = match period {
+        "week" => today - Duration::days(6),
+        "month" => today - Duration::days(29),
+        _ => today,
+    };
+    let start_ms = local_midnight(start_date)?.timestamp_millis();
+    let end_ms = local_now.timestamp_millis() + 1;
+
+    let events = load_session_events(connection, start_ms, end_ms)?;
+    let mut resolver = ProjectResolver::new(projects::load_rules(connection)?);
+
+    let mut aggregates: HashMap<String, ProjectAgg> = HashMap::new();
+    let mut unattributed_tokens = 0_i64;
+    let mut unattributed_agents: HashMap<String, i64> = HashMap::new();
+    let mut hidden_tokens = 0_i64;
+    for event in events {
+        let Some(agent) = AGENT_IDS.iter().find(|agent| **agent == event.adapter) else {
+            continue;
+        };
+        let comps = TokenComponents {
+            input_uncached: event.input_uncached,
+            cache_read: event.cache_read,
+            cache_write: event.cache_write,
+            output: event.output,
+        };
+        let Some(raw) = event
+            .project
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            // 归属不到就如实计为未归属，不并进任何项目、也不造一个"其他"。
+            unattributed_tokens += comps.processed();
+            *unattributed_agents.entry((*agent).to_owned()).or_default() += comps.processed();
+            continue;
+        };
+        let (project, pinned) = match resolver.resolve(raw) {
+            Resolution::Hidden => {
+                hidden_tokens += comps.processed();
+                continue;
+            }
+            Resolution::Project { path, pinned } => (path, pinned),
+        };
+
+        let agg = aggregates.entry(project).or_default();
+        agg.pinned |= pinned;
+        agg.last_ms = agg.last_ms.max(event.timestamp);
+        agg.event_count += 1;
+        agg.totals.add(&comps);
+        *agg.agent_tokens.entry((*agent).to_owned()).or_default() += comps.processed();
+        agg.sessions
+            .insert(((*agent).to_owned(), event.session_id.clone()));
+        if let Some(model) = event
+            .model
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            agg.model_components
+                .entry(model.to_owned())
+                .or_default()
+                .add(&comps);
+        }
+    }
+
+    let mut projects: Vec<ProjectSummary> = aggregates
+        .into_iter()
+        .map(|(path, agg)| ProjectSummary {
+            label: project_label(&path),
+            tokens: agg.totals.processed(),
+            input_uncached: agg.totals.input_uncached,
+            cache_read: agg.totals.cache_read,
+            cache_write: agg.totals.cache_write,
+            output: agg.totals.output,
+            usd: estimate_usd(&agg.model_components),
+            session_count: agg.sessions.len() as i64,
+            event_count: agg.event_count,
+            last_ms: agg.last_ms,
+            agents: ranked_keys(&agg.agent_tokens),
+            model: ranked_keys(
+                &agg.model_components
+                    .iter()
+                    .map(|(model, comps)| (model.clone(), comps.processed()))
+                    .collect(),
+            )
+            .into_iter()
+            .next(),
+            pinned: agg.pinned,
+            path,
+        })
+        .collect();
+
+    projects.sort_by(|left, right| {
+        right
+            .tokens
+            .cmp(&left.tokens)
+            .then_with(|| left.path.cmp(&right.path))
+    });
+    let total_projects = projects.len() as i64;
+    let truncated = projects.len() > MAX_PROJECTS;
+    projects.truncate(MAX_PROJECTS);
+
+    Ok(UsageProjects {
+        period: period.into(),
+        projects,
+        total_projects,
+        truncated,
+        unattributed_tokens,
+        unattributed_agents: ranked_keys(&unattributed_agents),
+        hidden_tokens,
+    })
 }
 
 /// 截至最近一个有数据的日子，向前数连续活跃天数；没有数据返回 0。
@@ -498,99 +721,15 @@ fn global_event_bounds(connection: &Connection) -> Result<(Option<i64>, Option<i
         .context("failed to calculate ledger event bounds")
 }
 
-fn cached_live_quota(
-    cache: &Mutex<Option<(Instant, Vec<QuotaSample>)>>,
-    force: bool,
-) -> Result<Vec<QuotaSample>> {
-    let mut guard = cache
-        .lock()
-        .map_err(|_| anyhow::anyhow!("quota cache lock poisoned"))?;
-    // force（手动刷新）跳过新鲜缓存的早退，立即尝试拉取；失败路径与常规一致：
-    // 依旧写入失败哨兵并保留库中旧行，绝不因强制刷新而删数据。
-    if !force {
-        if let Some((captured, value)) = guard.as_ref() {
-            let ttl = if value.is_empty() { 240 } else { 60 };
-            if captured.elapsed() < StdDuration::from_secs(ttl) {
-                return Ok(value.clone());
-            }
-        }
-    }
-    match app_server::read_codex_quota(StdDuration::from_secs(4)) {
-        Ok(value) => {
-            *guard = Some((Instant::now(), value.clone()));
-            Ok(value)
-        }
-        Err(error) => {
-            // An unavailable CLI should not make every periodic widget refresh
-            // pay the full process timeout. The empty sentinel uses a longer TTL.
-            *guard = Some((Instant::now(), Vec::new()));
-            Err(error)
-        }
-    }
-}
-
-/// Claude OAuth 官方额度的缓存拉取：成功 120s、失败 300s（限流友好）。
-fn cached_claude_oauth_quota(
-    cache: &Mutex<Option<(Instant, Vec<QuotaSample>)>>,
-    force: bool,
-) -> Result<Vec<QuotaSample>> {
-    let mut guard = cache
-        .lock()
-        .map_err(|_| anyhow::anyhow!("claude quota cache lock poisoned"))?;
-    if !force {
-        if let Some((captured, value)) = guard.as_ref() {
-            let ttl = if value.is_empty() { 300 } else { 120 };
-            if captured.elapsed() < StdDuration::from_secs(ttl) {
-                return Ok(value.clone());
-            }
-        }
-    }
-    match ClaudeOauth::detected().fetch_quota_samples(StdDuration::from_secs(6)) {
-        Ok(value) => {
-            *guard = Some((Instant::now(), value.clone()));
-            Ok(value)
-        }
-        Err(error) => {
-            *guard = Some((Instant::now(), Vec::new()));
-            Err(error)
-        }
-    }
-}
-
-/// GLM/Kimi 等走网络的官方配额缓存拉取：按 adapter 分桶，成功 120s、失败 300s。
-/// adapter 每次快照都重建，故缓存不能放 adapter 里，必须由 engine 层跨快照持有。
-fn cached_coding_quota(
-    cache: &Mutex<HashMap<&'static str, (Instant, Vec<QuotaSample>)>>,
-    adapter_id: &'static str,
-    fetch: fn(StdDuration) -> Result<Vec<QuotaSample>>,
-    force: bool,
-) -> Result<Vec<QuotaSample>> {
-    let mut guard = cache
-        .lock()
-        .map_err(|_| anyhow::anyhow!("coding quota cache lock poisoned"))?;
-    if !force {
-        if let Some((captured, value)) = guard.get(adapter_id) {
-            let ttl = if value.is_empty() { 300 } else { 120 };
-            if captured.elapsed() < StdDuration::from_secs(ttl) {
-                return Ok(value.clone());
-            }
-        }
-    }
-    match fetch(StdDuration::from_secs(6)) {
-        Ok(value) => {
-            guard.insert(adapter_id, (Instant::now(), value.clone()));
-            Ok(value)
-        }
-        Err(error) => {
-            guard.insert(adapter_id, (Instant::now(), Vec::new()));
-            Err(error)
-        }
-    }
-}
-
 /// 按固定的保留期视界摄取日志。需要解析的源按 mtime 倒序排队，在时间预算内尽量
 /// 解析；没轮到的记进 `report.backfill_pending`，由界面显式标注为「补齐中」。
 fn ingest_sources(connection: &mut Connection, horizon_ms: i64) -> Result<ScanReport> {
+    // 用户声明的目录走同一套 Claude 兼容 JSONL 解析，合并计入 custom 槽位。
+    // 没声明时 roots 为空，discover 直接返回空，等于没有这个 adapter。
+    let custom_roots: Vec<std::path::PathBuf> = custom_sources::load(connection)?
+        .into_iter()
+        .map(|source| std::path::PathBuf::from(source.path))
+        .collect();
     let adapters: Vec<Box<dyn AgentAdapter>> = vec![
         Box::new(CodexAdapter::detected()),
         Box::new(ClaudeAdapter::detected()),
@@ -599,6 +738,7 @@ fn ingest_sources(connection: &mut Connection, horizon_ms: i64) -> Result<ScanRe
         Box::new(KimiAdapter::detected()),
         Box::new(AntigravityAdapter::detected()),
         Box::new(WorkbuddyAdapter::detected()),
+        Box::new(ClaudeAdapter::for_custom_sources(custom_roots)),
     ];
     let mut report = ScanReport::default();
     let mut queue: Vec<(usize, SourceCandidate)> = Vec::new();
@@ -717,6 +857,7 @@ fn record_scan_diagnostics(
     aggregate.malformed_lines += diagnostics.malformed_lines;
     aggregate.unreadable_lines += diagnostics.unreadable_lines;
     aggregate.rejected_events += diagnostics.rejected_events;
+    aggregate.total_mismatches += diagnostics.total_mismatches;
 }
 
 fn query_snapshot(
@@ -894,6 +1035,11 @@ fn query_snapshot_at(
             .collect(),
     };
 
+    // 安装探针只碰文件系统与已配置的凭据，一次快照查一遍即可。
+    let installed = detect::installed_agents();
+    // 自定义来源没有安装痕迹可探——"声明了"就是"装了"。
+    let declared_custom = !custom_sources::load(connection)?.is_empty();
+
     let mut models: Vec<ModelSummary> = model_totals
         .into_iter()
         .map(|((agent, model), tokens)| ModelSummary {
@@ -916,9 +1062,18 @@ fn query_snapshot_at(
         agent_quotas: AGENT_IDS
             .iter()
             .map(|agent| {
+                let windows = load_visible_agent_quota_windows(connection, agent)?;
+                // 只在确实没有可用窗口时才带原因；有数字了就没什么好解释的。
+                let note =
+                    if *agent == "claude" && !windows.iter().any(|window| window.view.available) {
+                        claude_oauth::last_failure(connection)?.map(|failure| failure.message)
+                    } else {
+                        None
+                    };
                 Ok(AgentQuotaView {
                     agent: (*agent).to_owned(),
-                    windows: load_visible_agent_quota_windows(connection, agent)?,
+                    windows,
+                    note,
                 })
             })
             .collect::<Result<Vec<_>>>()?,
@@ -934,6 +1089,11 @@ fn query_snapshot_at(
                     cache_write: comps.cache_write,
                     output: comps.output,
                     share: share(totals[agent]),
+                    // 有用量必然装了；反过来不成立，所以安装痕迹是主判据、
+                    // 用量兜底（Antigravity 没有便宜可靠的安装探针）。
+                    detected: installed.contains(agent)
+                        || totals[agent] > 0
+                        || (*agent == "custom" && declared_custom),
                 }
             })
             .collect(),
@@ -941,7 +1101,14 @@ fn query_snapshot_at(
         indexing: IndexingView {
             pending: report.backfill_pending,
         },
-        sources: source_views(report, sync::sync_view(connection).ok()),
+        sources: source_views(
+            report,
+            sync::sync_view(connection).ok(),
+            custom_sources::load(connection)?
+                .into_iter()
+                .map(|source| source.name)
+                .collect(),
+        ),
         cost,
     })
 }
@@ -1197,7 +1364,11 @@ fn load_quota(connection: &Connection, adapter_id: &str, window_key: &str) -> Re
     }
 }
 
-fn source_views(report: ScanReport, sync_status: Option<SyncView>) -> Vec<SourceView> {
+fn source_views(
+    report: ScanReport,
+    sync_status: Option<SyncView>,
+    custom_labels: Vec<String>,
+) -> Vec<SourceView> {
     let discovered = |id: &str| report.discovered.get(id).copied().unwrap_or(0);
     let refreshed = |id: &str| report.refreshed.get(id).copied().unwrap_or(0);
     let errors = |id: &str| report.errors.get(id).copied().unwrap_or(0);
@@ -1209,7 +1380,7 @@ fn source_views(report: ScanReport, sync_status: Option<SyncView>) -> Vec<Source
     let codex_partial = codex_diagnostics.partial_sources > 0 || errors("codex") > 0;
     let claude_partial = claude_diagnostics.partial_sources > 0 || errors("claude") > 0;
     // 读不了的存储形态（如 OpenCode 1.2+ 的 SQLite）也是覆盖缺口：
-    // 此时的 0 是"读不到"而非"没用过"，必须标部分覆盖。
+    // 此时的 0 是"读不到"而非"没用过"，必须标数据不完整。
     let opencode_gaps = report
         .coverage_gaps
         .get("opencode")
@@ -1240,7 +1411,7 @@ fn source_views(report: ScanReport, sync_status: Option<SyncView>) -> Vec<Source
             ),
             quality: if codex_partial { "partial" } else { "exact" }.into(),
             quality_label: if codex_partial {
-                "部分覆盖"
+                "数据不完整"
             } else {
                 "精确解析"
             }
@@ -1258,7 +1429,7 @@ fn source_views(report: ScanReport, sync_status: Option<SyncView>) -> Vec<Source
             ),
             quality: if claude_partial { "partial" } else { "exact" }.into(),
             quality_label: if claude_partial {
-                "部分覆盖"
+                "数据不完整"
             } else {
                 "精确解析"
             }
@@ -1281,7 +1452,7 @@ fn source_views(report: ScanReport, sync_status: Option<SyncView>) -> Vec<Source
             }
             .into(),
             quality_label: if diagnostics("zcode").partial_sources > 0 || errors("zcode") > 0 {
-                "部分覆盖"
+                "数据不完整"
             } else {
                 "精确解析"
             }
@@ -1304,7 +1475,7 @@ fn source_views(report: ScanReport, sync_status: Option<SyncView>) -> Vec<Source
             ),
             quality: if opencode_partial { "partial" } else { "exact" }.into(),
             quality_label: if opencode_partial {
-                "部分覆盖"
+                "数据不完整"
             } else {
                 "精确解析"
             }
@@ -1321,7 +1492,7 @@ fn source_views(report: ScanReport, sync_status: Option<SyncView>) -> Vec<Source
                 coverage_detail(&kimi_diagnostics, errors("kimi"))
             ),
             quality: if kimi_partial { "partial" } else { "exact" }.into(),
-            quality_label: if kimi_partial { "部分覆盖" } else { "精确解析" }.into(),
+            quality_label: if kimi_partial { "数据不完整" } else { "精确解析" }.into(),
         },
         SourceView {
             id: "antigravity-live".into(),
@@ -1335,6 +1506,34 @@ fn source_views(report: ScanReport, sync_status: Option<SyncView>) -> Vec<Source
             ),
             quality: "exact".into(),
             quality_label: "精确解析".into(),
+        },
+        SourceView {
+            id: "custom-local".into(),
+            kind: "local".into(),
+            label: "自定义来源".into(),
+            detail: format!(
+                "用户在设置里声明的目录，按 Claude 兼容 JSONL 解析并合并计入「自定义」：{}。发现 {} 个会话，本次更新 {} 个。{}格式不符的目录解析不出事件，如实显示 0，不做猜测。",
+                if custom_labels.is_empty() {
+                    "尚未声明".to_owned()
+                } else {
+                    custom_labels.join("、")
+                },
+                discovered("custom"),
+                refreshed("custom"),
+                coverage_detail(&diagnostics("custom"), errors("custom")),
+            ),
+            quality: if diagnostics("custom").partial_sources > 0 || errors("custom") > 0 {
+                "partial"
+            } else {
+                "exact"
+            }
+            .into(),
+            quality_label: if diagnostics("custom").partial_sources > 0 || errors("custom") > 0 {
+                "数据不完整"
+            } else {
+                "精确解析"
+            }
+            .into(),
         },
         SourceView {
             id: "qoder-quota".into(),
@@ -1362,7 +1561,7 @@ fn source_views(report: ScanReport, sync_status: Option<SyncView>) -> Vec<Source
                 ),
             },
             quality: if failed { "partial" } else { "exact" }.into(),
-            quality_label: if failed { "部分覆盖" } else { "精确解析" }.into(),
+            quality_label: if failed { "数据不完整" } else { "精确解析" }.into(),
         });
     }
 
@@ -1374,7 +1573,17 @@ fn coverage_detail(diagnostics: &AdapterDiagnostics, errors: usize) -> String {
         return String::new();
     }
 
-    let skipped = (diagnostics.partial_sources > 0).then(|| {
+    // 口径校验失败与"内容没读到"性质不同：前者说明读到的数字本身可能是错的，
+    // 后者只是少算。两句分开写，不能混成一句"可能不完整"糊过去。
+    let mismatched = (diagnostics.total_mismatches > 0).then(|| {
+        format!(
+            "⚠️ {} 条读数与来源自报的总量对不上，说明本版本对该来源的字段口径可能有误，显示的数字请勿采信，已记录待修正；",
+            diagnostics.total_mismatches
+        )
+    });
+    let skipped_lines =
+        diagnostics.malformed_lines + diagnostics.unreadable_lines + diagnostics.rejected_events;
+    let skipped = (diagnostics.partial_sources > 0 && skipped_lines > 0).then(|| {
         format!(
             "{} 个会话存在未计入的 JSONL 内容（格式异常 {} 行、文本读取失败 {} 行、身份冲突 {} 条）；",
             diagnostics.partial_sources,
@@ -1385,7 +1594,8 @@ fn coverage_detail(diagnostics: &AdapterDiagnostics, errors: usize) -> String {
     });
     let failed = (errors > 0).then(|| format!("另有 {errors} 个会话未能完成更新；"));
     format!(
-        "{}{}本周期总量仅覆盖成功解析的记录，可能不完整。",
+        "{}{}{}本周期总量仅覆盖成功解析的记录，可能不完整。",
+        mismatched.unwrap_or_default(),
         skipped.unwrap_or_default(),
         failed.unwrap_or_default()
     )
@@ -1424,6 +1634,7 @@ fn bucket_label(period: &str, start: NaiveDate, index: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
 
     fn test_local_time(date: NaiveDate, hour: u32) -> chrono::DateTime<Local> {
         Local
@@ -1523,6 +1734,240 @@ mod tests {
                 ],
             )
             .unwrap();
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn insert_test_project_event(
+        connection: &Connection,
+        event_id: &str,
+        adapter_id: &str,
+        session_id: &str,
+        occurred_at_ms: i64,
+        model: Option<&str>,
+        processed: i64,
+        project_path: Option<&str>,
+    ) {
+        connection
+            .execute(
+                "INSERT INTO usage_event (
+                    event_id, adapter_id, event_key, occurred_at_ms, session_id,
+                    model, input_uncached_tokens, cache_read_tokens,
+                    cache_write_tokens, output_tokens, reasoning_tokens,
+                    processed_tokens, quality, payload_hash, project_path
+                 ) VALUES (?1, ?2, ?1, ?3, ?4, ?5, ?6, 0, 0, 0, 0, ?6, 'exact', ?1, ?7)",
+                params![
+                    event_id,
+                    adapter_id,
+                    occurred_at_ms,
+                    session_id,
+                    model,
+                    processed,
+                    project_path,
+                ],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn projects_aggregate_across_agents_and_keep_unattributed_usage_separate() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(include_str!("../migrations/001_init.sql"))
+            .unwrap();
+        let today = Local::now().date_naive();
+        let local_now = test_local_time(today, 12);
+        let at = |hour: u32| test_local_time(today, hour).timestamp_millis();
+
+        // 路径刻意用不存在的盘符：不命中任何规则、也没有 .git 可找，
+        // 走"按原样呈现"的兜底，结果与真机文件系统无关。
+        // 同一个项目下两个 Agent、三个会话。
+        insert_test_project_event(
+            &connection,
+            "a",
+            "codex",
+            "sess-1",
+            at(8),
+            Some("gpt-5"),
+            100,
+            Some("Z:/metrik-tests/alpha"),
+        );
+        insert_test_project_event(
+            &connection,
+            "b",
+            "codex",
+            "sess-1",
+            at(9),
+            Some("gpt-5"),
+            50,
+            Some("Z:/metrik-tests/alpha"),
+        );
+        insert_test_project_event(
+            &connection,
+            "c",
+            "claude",
+            "sess-2",
+            at(10),
+            Some("claude-sonnet"),
+            30,
+            Some("Z:/metrik-tests/alpha"),
+        );
+        insert_test_project_event(
+            &connection,
+            "d",
+            "codex",
+            "sess-3",
+            at(7),
+            Some("gpt-5"),
+            20,
+            Some("Z:/metrik-tests/beta"),
+        );
+        // 读不到项目归属的用量不并进任何项目。
+        insert_test_project_event(
+            &connection,
+            "e",
+            "antigravity",
+            "cascade-1",
+            at(11),
+            Some("gemini"),
+            7,
+            None,
+        );
+
+        let result = projects_at(&connection, "today", local_now).unwrap();
+
+        assert_eq!(result.total_projects, 2);
+        assert!(!result.truncated);
+        let first = &result.projects[0];
+        assert_eq!(first.path, "Z:/metrik-tests/alpha");
+        assert_eq!(first.label, "alpha");
+        assert_eq!(first.tokens, 180);
+        assert_eq!(first.event_count, 3);
+        assert_eq!(first.session_count, 2);
+        assert_eq!(first.agents, vec!["codex", "claude"]);
+        assert_eq!(first.last_ms, at(10));
+        assert!(!first.pinned);
+        assert_eq!(result.projects[1].path, "Z:/metrik-tests/beta");
+        assert_eq!(result.unattributed_tokens, 7);
+        assert_eq!(result.unattributed_agents, vec!["antigravity"]);
+        assert_eq!(result.hidden_tokens, 0);
+    }
+
+    #[test]
+    fn grouping_rules_merge_subdirectories_and_hide_configured_paths() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(include_str!("../migrations/001_init.sql"))
+            .unwrap();
+        crate::projects::save_rules(
+            &connection,
+            crate::projects::ProjectRules {
+                roots: vec!["Z:/metrik-tests/budget".into()],
+                hidden: vec!["Z:/metrik-tests/scrap".into()],
+            },
+        )
+        .unwrap();
+        let today = Local::now().date_naive();
+        let local_now = test_local_time(today, 12);
+        let at = |hour: u32| test_local_time(today, hour).timestamp_millis();
+
+        // 登记根下的三个子目录归并成一行。
+        for (id, sub, tokens) in [
+            ("a", "Z:/metrik-tests/budget", 100),
+            ("b", "Z:/metrik-tests/budget/data/raw", 40),
+            ("c", "Z:/metrik-tests/budget/data/raw/part1", 10),
+        ] {
+            insert_test_project_event(
+                &connection,
+                id,
+                "claude",
+                "sess-1",
+                at(8),
+                Some("claude-sonnet"),
+                tokens,
+                Some(sub),
+            );
+        }
+        // 隐藏目录下的用量单列，不出现在项目里。
+        insert_test_project_event(
+            &connection,
+            "d",
+            "codex",
+            "sess-2",
+            at(9),
+            Some("gpt-5"),
+            30,
+            Some("Z:/metrik-tests/scrap/tmp"),
+        );
+
+        let result = projects_at(&connection, "today", local_now).unwrap();
+
+        assert_eq!(result.total_projects, 1);
+        let merged = &result.projects[0];
+        assert_eq!(merged.path, "Z:/metrik-tests/budget");
+        assert_eq!(merged.tokens, 150);
+        assert!(merged.pinned);
+        assert_eq!(result.hidden_tokens, 30);
+        assert_eq!(result.unattributed_tokens, 0);
+
+        // 会话明细用同一套规则：sess-1 的项目是归并后的根。
+        let sessions = sessions_at(&connection, "today", local_now).unwrap();
+        let merged_session = sessions
+            .sessions
+            .iter()
+            .find(|session| session.session_id == "sess-1")
+            .unwrap();
+        assert_eq!(
+            merged_session.project.as_deref(),
+            Some("Z:/metrik-tests/budget")
+        );
+        assert_eq!(merged_session.project_label.as_deref(), Some("budget"));
+        // 全部事件被隐藏的会话不带项目标注。
+        let hidden_session = sessions
+            .sessions
+            .iter()
+            .find(|session| session.session_id == "sess-2")
+            .unwrap();
+        assert_eq!(hidden_session.project, None);
+    }
+
+    #[test]
+    fn report_projects_bucket_weekly_trends_with_recent_delta() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(include_str!("../migrations/001_init.sql"))
+            .unwrap();
+        let today = Local::now().date_naive();
+        let local_now = test_local_time(today, 12);
+        let at_days_ago = |days: i64, hour: u32| {
+            test_local_time(today - Duration::days(days), hour).timestamp_millis()
+        };
+
+        // 近 7 天 60、再前 7 天 40 → 环比 +50%；更早的 20 落进更旧的周桶。
+        for (id, days_ago, tokens) in [("a", 1_i64, 60_i64), ("b", 9, 40), ("c", 30, 20)] {
+            insert_test_project_event(
+                &connection,
+                id,
+                "codex",
+                "sess-1",
+                at_days_ago(days_ago, 8),
+                Some("gpt-5"),
+                tokens,
+                Some("Z:/metrik-tests/alpha"),
+            );
+        }
+
+        let report = report_at(&connection, local_now).unwrap();
+
+        assert_eq!(report.projects.len(), 1);
+        let row = &report.projects[0];
+        assert_eq!(row.path, "Z:/metrik-tests/alpha");
+        assert_eq!(row.tokens, 120);
+        assert_eq!(row.weekly.len(), REPORT_WEEK_BUCKETS);
+        assert_eq!(*row.weekly.last().unwrap(), 60);
+        assert_eq!(row.weekly[REPORT_WEEK_BUCKETS - 2], 40);
+        assert_eq!(row.weekly.iter().sum::<i64>(), 120);
+        assert_eq!(row.recent_delta_percent, Some(50.0));
+        assert_eq!(row.active_days, 3);
     }
 
     #[test]
@@ -1884,7 +2329,7 @@ mod tests {
             },
         );
 
-        let views = source_views(report, None);
+        let views = source_views(report, None, Vec::new());
         let codex = views
             .iter()
             .find(|source| source.id == "codex-local")
@@ -1895,7 +2340,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(codex.quality, "partial");
-        assert_eq!(codex.quality_label, "部分覆盖");
+        assert_eq!(codex.quality_label, "数据不完整");
         assert!(codex.detail.contains("格式异常 2 行"));
         assert!(codex.detail.contains("文本读取失败 1 行"));
         assert!(codex.detail.contains("可能不完整"));
@@ -1908,7 +2353,7 @@ mod tests {
         let mut report = ScanReport::default();
         report.errors.insert("claude".into(), 1);
 
-        let views = source_views(report, None);
+        let views = source_views(report, None, Vec::new());
         let claude = views
             .iter()
             .find(|source| source.id == "claude-local")
@@ -1921,21 +2366,21 @@ mod tests {
     #[test]
     fn unreadable_store_marks_opencode_partial_with_the_reason() {
         // OpenCode 1.2+ 的 SQLite 库读不了：0 是"读不到"不是"没用过"，
-        // 必须标部分覆盖并把原因展示出来，不许显示成精确的 0。
+        // 必须标数据不完整并把原因展示出来，不许显示成精确的 0。
         let mut report = ScanReport::default();
         report.coverage_gaps.insert(
             "opencode".into(),
             vec!["检测到 OpenCode 1.2+ 的 SQLite 存储（opencode.db），当前版本尚不支持读取，其中的会话未计入统计".into()],
         );
 
-        let views = source_views(report, None);
+        let views = source_views(report, None, Vec::new());
         let opencode = views
             .iter()
             .find(|source| source.id == "opencode-local")
             .unwrap();
 
         assert_eq!(opencode.quality, "partial");
-        assert_eq!(opencode.quality_label, "部分覆盖");
+        assert_eq!(opencode.quality_label, "数据不完整");
         assert!(opencode.detail.contains("SQLite"));
         assert!(opencode.detail.contains("尚不支持读取"));
     }
@@ -1954,7 +2399,7 @@ mod tests {
             },
         );
 
-        let claude = source_views(report, None)
+        let claude = source_views(report, None, Vec::new())
             .into_iter()
             .find(|source| source.id == "claude-local")
             .unwrap();
@@ -2580,18 +3025,8 @@ mod tests {
             std::process::id(),
             Utc::now().timestamp_millis()
         ));
-        let quota_cache = Mutex::new(None);
-        let claude_quota_cache = Mutex::new(None);
-        let http_quota_cache = Mutex::new(HashMap::new());
-        let snapshot = build_snapshot(
-            &database,
-            "today",
-            &quota_cache,
-            &claude_quota_cache,
-            &http_quota_cache,
-            false,
-        )
-        .unwrap();
+        let quota_cache = Mutex::new(HashMap::new());
+        let snapshot = build_snapshot(&database, "today", &quota_cache, false).unwrap();
         println!(
             "live snapshot: total={}, codex={}, claude={}, quota_available={}, quota_remaining={:.1}, quota_source={}",
             snapshot.total_tokens,
@@ -2601,6 +3036,17 @@ mod tests {
             snapshot.agent_quotas[0].windows.first().map(|w| w.view.remaining_percent).unwrap_or(0.0),
             snapshot.agent_quotas[0].windows.first().map(|w| w.view.source_label.clone()).unwrap_or_default()
         );
+        // 口径自检在真机数据上必须零误报，否则每个用户一打开就看到警告。
+        // 本机 60011 条 Codex 读数已验证 total == input + output。
+        for source in &snapshot.sources {
+            println!("  source {:<18} {}", source.id, source.quality_label);
+            assert!(
+                !source.detail.contains("与来源自报的总量对不上"),
+                "口径自检在真机数据上误报：{} / {}",
+                source.id,
+                source.detail
+            );
+        }
         assert!(!snapshot.is_demo);
         assert!((1..=24).contains(&snapshot.series.len()));
         let expected_last_label = format!("{:02}:00", snapshot.series.len() - 1);
@@ -2609,6 +3055,71 @@ mod tests {
             Some(expected_last_label.as_str())
         );
         std::fs::remove_file(database).ok();
+    }
+
+    /// 在真实日志上核对项目归属的覆盖率：每个 adapter 有多少 token 能落到项目、
+    /// 落到了哪些目录。只读日志，不建账本、不发网络请求。
+    #[test]
+    #[ignore = "reads the current user's local agent logs"]
+    fn live_project_attribution_smoke_test() {
+        let cutoff_ms = Utc::now().timestamp_millis() - 7 * 86_400_000;
+        let adapters: Vec<Box<dyn AgentAdapter>> = vec![
+            Box::new(CodexAdapter::detected()),
+            Box::new(ClaudeAdapter::detected()),
+            Box::new(ZcodeAdapter::detected()),
+            Box::new(OpencodeAdapter::detected()),
+            Box::new(KimiAdapter::detected()),
+            Box::new(WorkbuddyAdapter::detected()),
+        ];
+
+        for adapter in adapters {
+            let mut attributed = 0_i64;
+            let mut unattributed = 0_i64;
+            let mut projects: HashMap<String, i64> = HashMap::new();
+            for candidate in adapter.discover(cutoff_ms) {
+                let Ok(scan) = adapter.parse(&candidate, cutoff_ms) else {
+                    continue;
+                };
+                for event in scan.source.events {
+                    let tokens = event.tokens.processed();
+                    match event.project_path {
+                        Some(path) => {
+                            attributed += tokens;
+                            *projects.entry(path).or_default() += tokens;
+                        }
+                        None => unattributed += tokens,
+                    }
+                }
+            }
+            let total = attributed + unattributed;
+            let share = if total > 0 {
+                attributed as f64 * 100.0 / total as f64
+            } else {
+                0.0
+            };
+            println!(
+                "{}: {total} tokens, {share:.1}% 有项目归属, {} 个原始目录",
+                adapter.id(),
+                projects.len()
+            );
+            // 默认分组规则（无手动规则）下的归并效果。
+            let mut resolver = ProjectResolver::new(crate::projects::ProjectRules::default());
+            let mut grouped: HashMap<String, i64> = HashMap::new();
+            let mut hidden = 0_i64;
+            for (path, tokens) in &projects {
+                match resolver.resolve(path) {
+                    Resolution::Project { path, .. } => *grouped.entry(path).or_default() += tokens,
+                    Resolution::Hidden => hidden += tokens,
+                }
+            }
+            println!(
+                "    默认规则归并后: {} 个项目, 内置隐藏 {hidden}",
+                grouped.len()
+            );
+            for path in ranked_keys(&grouped).into_iter().take(5) {
+                println!("    {path}: {}", grouped[&path]);
+            }
+        }
     }
 
     #[test]

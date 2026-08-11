@@ -1,8 +1,8 @@
 [package]
 name = "metrik"
-version = "0.12.8"
+version = "0.14.10"
 description = "Local-first AI agent usage monitor"
-authors = ["Metrik contributors"]
+authors = ["keros68 <keros68@gmail.com>"]
 edition = "2021"
 license = "AGPL-3.0-or-later"
 
@@ -28,6 +28,7 @@ serde_json = "1"
 sha2 = "0.10"
 tauri = { version = "2", features = ["tray-icon", "image-png", "macos-private-api"] }
 tauri-plugin-autostart = "2.5.1"
+tauri-plugin-opener = "2"
 tauri-plugin-os = "2.3.2"
 tauri-plugin-process = "2.3.1"
 tauri-plugin-updater = "2.10.1"
@@ -47,18 +48,15 @@ libc = "0.2"
 tauri-nspanel = { git = "https://github.com/ahkohd/tauri-nspanel", branch = "v2" }
 
 [target.'cfg(windows)'.dependencies]
+# 只剩任务栏进度按钮用得到。WinRT 合成那几个 feature 和 windows-numerics 是
+# HostBackdrop 留下的，随它一起删了。
 windows = { version = "0.61.3", features = [
-  "System",
-  "UI_Composition",
-  "UI_Composition_Desktop",
   "Win32_Foundation",
+  "Win32_Graphics_Dwm",
   "Win32_System_Com",
-  "Win32_System_WinRT",
-  "Win32_System_WinRT_Composition",
   "Win32_UI_Shell",
   "Win32_UI_WindowsAndMessaging",
 ] }
-windows-numerics = "0.2"
 
 [profile.release]
 codegen-units = 1

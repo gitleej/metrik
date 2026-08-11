@@ -8,6 +8,7 @@ import {
   ArrowsInSimple,
   ArrowsLeftRight,
   ArrowsOutSimple,
+  CaretLeft,
   CaretRight,
   ChartBar,
   ChartLineUp,
@@ -19,13 +20,16 @@ import {
   CornersOut,
   ClockCounterClockwise,
   Database,
+  EyeSlash,
   FileText,
+  FolderSimple,
   FunnelSimple,
   GearSix,
   HardDrives,
   Minus,
   PushPinSimple,
   ShieldCheck,
+  Trash,
   X,
 } from "@phosphor-icons/react";
 import antigravityAppIcon from "./assets/antigravity-app-icon.png";
@@ -34,8 +38,9 @@ import claudeAppIcon from "./assets/claude-app-icon.jpg";
 import kimiAppIcon from "./assets/kimi-app-icon.png";
 import opencodeAppIcon from "./assets/opencode-app-icon.png";
 import qoderAppIcon from "./assets/qoder-app-icon.png";
-import workbuddyAppIcon from "./assets/workbuddy-app-icon.svg";
+import workbuddyAppIcon from "./assets/workbuddy-app-icon.png";
 import zcodeAppIcon from "./assets/zcode-app-icon.png";
+import { glassShellAppearance, nextGlassTint, resolveGlassMode } from "./glassAppearance.js";
 import { QUOTA_LOW_REMAINING, bindingWindow } from "./quotaWindows.js";
 import { horizontalStripTargetWidth } from "./windowGeometry";
 import {
@@ -49,8 +54,14 @@ import {
   getUsageReport,
   exportCsvFile,
   getUsageSessions,
+  getUsageProjects,
+  getProjectRules,
+  setProjectRules,
+  getCustomSources,
+  setCustomSources,
   getUsageSnapshot,
   rebuildLocalLedger,
+  removeSyncDevice,
   setClaudeHook,
 } from "./usageClient";
 import {
@@ -64,6 +75,7 @@ import {
   installUpdate,
   isDesktop,
   isMacPlatform,
+  isWindowsPlatform,
   minimizeWindow,
   onMacAppearance,
   onScaleFactorChanged,
@@ -155,7 +167,7 @@ const AGENT_META = {
   workbuddy: {
     // 覆盖腾讯 CodeBuddy Code 与 WorkBuddy 两个同格式来源，展示名从用户口径。
     label: "WorkBuddy",
-    // 品牌紫与 GLM 的 #6a5ae0 几乎同色相，按惯例让位：取空缺的绿色。
+    // 与品牌同色系的绿；也正好避开 GLM 的 #6a5ae0。
     accent: "#3d9c50",
     iconSrc: workbuddyAppIcon,
     iconClass: "agent-icon--workbuddy",
@@ -167,6 +179,15 @@ const AGENT_META = {
     accent: "#3a7ca5",
     iconSrc: qoderAppIcon,
     iconClass: "agent-icon--qoder",
+  },
+  custom: {
+    // 用户自己声明的 Claude 兼容 JSONL 目录，合并成一条。没有品牌图标，
+    // 用字母牌兜底（AgentMark 已支持）。
+    label: "自定义",
+    // 中性灰蓝：不与任何厂商的品牌色抢，一眼看出它不是某个具体产品。
+    accent: "#6b7280",
+    monogram: "自",
+    iconClass: "agent-icon--custom",
   },
 };
 
@@ -182,16 +203,27 @@ function normalizeVisibleAgentList(agentIds) {
   );
 }
 
+/// 用户在设置里排出的顺序优先，其余按注册表顺序垫后。设置面板、小组件、
+/// 完整视图侧栏共用这一份顺序，改一处四处同步。
+function agentIdsInDisplayOrder(preferred) {
+  return [...preferred, ...AGENT_ORDER.filter((agentId) => !preferred.includes(agentId))];
+}
+
 // 胶囊条首帧尺寸估计：横条一格约 68px 宽；竖条是横条立起来的窄长条，
 // 一格约 54px 高（图标/百分比/进度条纵向堆叠）。
 // 这些常量只用于进入 strip 的第一帧，之后的窗口尺寸由 StripBar 里的
 // 内容测量观察器按真实渲染结果收敛——不同字体/DPI/缩放比例、有无更新点
 // 都不会再裁掉内容（曾因常量与 CSS 脱钩裁掉竖条最后一个按钮）。
-const STRIP_CELL_WIDTH = 68;
+const STRIP_CELL_WIDTH = 58;
 const STRIP_CHROME_WIDTH = IS_MAC ? 76 : 158;
 const STRIP_BAR_HEIGHT = 40;
-const STRIP_VERTICAL_WIDTH = 52;
+// 竖条宽度由 26px 控件槽 + 外壳 padding 定死下限（32px）；42 留 10px 呼吸，
+// 再宽图标和百分比周围就空得发肥。
+const STRIP_VERTICAL_WIDTH = 42;
 const STRIP_VCELL_HEIGHT = 54;
+// 横条宽度的收缩迟滞。一格 58px，所以 6px 远低于「真的少了一个 Agent」，
+// 又高于 DPI/zoom 取整带来的亚像素噪声。
+const STRIP_WIDTH_SHRINK_SLACK = 6;
 const STRIP_VCHROME_HEIGHT = IS_MAC ? 84 : 160;
 
 function stripWindowSize(orientation, count) {
@@ -351,6 +383,15 @@ function quotaHasData(entry) {
   return Boolean(entry?.windows?.some((window) => window.view.available));
 }
 
+/// 没有额度数字时该说什么。后端在 note 里带上直连失败的真实原因（凭据过期、
+/// 缺 scope、限流……）；有原因就别再叫用户去开状态栏钩子——他多半已经开了
+/// 直连，而且不用 Claude Code 的人开了钩子也不会有数据。
+function quotaEmptyCopy(entry, agentId, short = false) {
+  if (entry?.note) return short ? "直连查询失败" : "直连查询失败 · 见设置";
+  if (agentId !== "claude") return short ? "官方配额不可用" : "暂无可靠来源";
+  return short ? "设置中开启配额钩子" : "在设置中开启配额钩子后显示";
+}
+
 function shortWindowLabel(key) {
   if (key === "five_hour" || key === "primary") return "5h";
   if (key === "seven_day" || key === "secondary") return "7d";
@@ -385,9 +426,10 @@ function modelDisplayName(model) {
   return model;
 }
 
-// 小插件每行 Agent 最多展示两个配额窗口：按来源排序取前两个可用窗口
-// （已过期窗口也算有来源，单独走"已重置，等待刷新"样式）；一个都没有时
-// 由调用方渲染 "-- / 暂无可靠来源"，绝不编造数字。
+// 每行 Agent 的 tooltip 列出全部有来源的窗口（已过期窗口也算有来源，单独走
+// "已重置，等待刷新"文案）；一个都没有时由调用方渲染 "-- / 暂无可靠来源"，
+// 绝不编造数字。不能截断：行上显示的是 bindingWindow 挑出来的那个，它可能排在
+// 第三位（Kimi 的月度窗口就是），截断会出现"行上写着月度、tooltip 里没有月度"。
 function compactDisplayWindows(entry) {
   return (entry.windows || []).filter((window) => window.view.available);
 }
@@ -408,8 +450,7 @@ function compactQuotaTooltip(agentId, windows) {
   return [AGENT_META[agentId].label, ...lines].join("\n");
 }
 
-// 胶囊条展示当前真正约束用量的窗口；平时取短窗，任一窗口告急时显示
-// 剩余最少的告急窗口，避免“5h 很满但周额度已经用尽”仍报宽裕数字。
+// 胶囊条一格展示当前真正约束用量的窗口，规则见 quotaWindows.js。
 function stripCellData(entry) {
   const windows = (entry.windows || []).filter(
     (window) => window.view.available && !window.view.resetExpired,
@@ -450,6 +491,7 @@ function quotaSeverity(view) {
   if (!view.available || view.resetExpired) return "";
   const used = quotaUsedPercent(view);
   if (used >= 95) return "critical";
+  // 与 bindingWindow 的"告急"同一条线：越过它，这个窗口才会顶到行首。
   if (used >= 100 - QUOTA_LOW_REMAINING) return "warn";
   return "";
 }
@@ -469,13 +511,12 @@ function quotaPace(view, key) {
 }
 
 function QuotaBarRow({ label, view, windowKey, accent }) {
-  const isSnapshot = view.stale || view.quality === "official_snapshot";
   const severity = quotaSeverity(view);
   const pace = quotaPace(view, windowKey);
   return (
     <>
       <div
-        className={`quota-bar-row ${isSnapshot ? "quota-bar-row--stale" : ""} ${severity ? `quota-bar-row--${severity}` : ""}`}
+        className={`quota-bar-row ${severity ? `quota-bar-row--${severity}` : ""}`}
         style={accent ? { "--quota-accent": accent } : undefined}
       >
         <small>{label}</small>
@@ -505,8 +546,65 @@ function QuotaBarRow({ label, view, windowKey, accent }) {
   );
 }
 
+/// 数据来源状态的文案。完整说明一律进 title。
+/// title + hint 给紧凑卡片底栏；state 给侧栏——那里主标题恒为「数据统计」，
+/// 状态由灯和 state 这一行承担，不把"数据不完整"顶成入口的名字。
+/// "部分覆盖" 这种自造词读者看不懂，直接说清楚哪里不全。
+function sourceStatusCopy(snapshot, loading, partial) {
+  const indexingPending = snapshot.indexing?.pending || 0;
+  if (snapshot.pending) {
+    return {
+      title: "正在读取",
+      hint: "首次扫描",
+      state: "正在读取",
+      detail: "正在读取本机日志，日志库较大时首次扫描需要几分钟。",
+    };
+  }
+  if (snapshot.loadError) {
+    return {
+      title: "读取失败",
+      hint: "点此排查",
+      state: "读取失败",
+      detail: "本机日志读取失败。界面不会用演示数字顶替，点此查看数据来源。",
+    };
+  }
+  if (indexingPending > 0) {
+    return {
+      title: "补齐历史",
+      hint: `还剩 ${indexingPending}`,
+      // 侧栏那行不能换行，只放数字；完整说明走 title 与统计说明抽屉。
+      state: `补齐中 ${indexingPending}`,
+      detail: `正在补齐历史索引，还剩 ${indexingPending} 个日志文件。历史周期的数字尚不完整，会随补齐自动更新。`,
+    };
+  }
+  if (partial) {
+    return {
+      title: "数据不完整",
+      hint: "点此查看",
+      state: "数据不完整",
+      detail: "部分日志未能解析，统计数字少于真实用量。点此查看涉及哪些来源。",
+    };
+  }
+  if (snapshot.isDemo) {
+    return {
+      title: "演示数据",
+      hint: "非真实用量",
+      state: "演示数据",
+      detail: "当前显示的是演示数据，不是本机真实用量。",
+    };
+  }
+  return {
+    title: "数据可追溯",
+    hint: loading ? "更新中" : formatClock(snapshot.generatedAt),
+    state: loading ? "更新中" : `更新于 ${formatClock(snapshot.generatedAt)}`,
+    detail: `每个数字都能追到来源日志。更新于 ${formatClock(snapshot.generatedAt)}。`,
+  };
+}
+
 function Sidebar({ activeNav, onNavChange, snapshot, loading }) {
   const partial = snapshotIsPartial(snapshot);
+  const indexing = (snapshot.indexing?.pending || 0) > 0;
+  const sourceStatus = sourceStatusCopy(snapshot, loading, partial);
   return (
     <aside className="sidebar" aria-label="主导航">
       <div className="wordmark">Metrik</div>
@@ -528,14 +626,18 @@ function Sidebar({ activeNav, onNavChange, snapshot, loading }) {
         ))}
       </nav>
 
+      {/* 这块是数据来源页的入口，主标题恒为「数据统计」；状态由上方的灯和下面
+          那行承担。两行都不换行、高度固定：文案随状态变长会把整条导航顶得上下
+          跳。完整说明放 title。 */}
       <button
         className="source-status"
         type="button"
         onClick={() => onNavChange("sources")}
+        title={sourceStatus.detail}
       >
-        <span className={`status-dot ${loading ? "status-dot--loading" : ""} ${snapshot.loadError ? "status-dot--error" : ""} ${partial ? "status-dot--warning" : ""}`} />
-        <span>{snapshot.pending ? "正在读取本机数据" : snapshot.loadError ? "数据暂不可用" : partial ? "部分覆盖" : snapshot.isDemo ? "演示数据" : "数据可追溯"}</span>
-        <small>{snapshot.pending ? "大型日志库可能需要几分钟" : loading ? "正在更新" : snapshot.loadError ? "未使用演示数字" : partial ? "部分记录未解析，点此查看" : `更新于 ${formatClock(snapshot.generatedAt)}`}</small>
+        <span className={`status-dot ${loading || indexing ? "status-dot--loading" : ""} ${snapshot.loadError ? "status-dot--error" : ""} ${partial && !indexing ? "status-dot--warning" : ""}`} />
+        <span>数据统计</span>
+        <small>{sourceStatus.state}</small>
       </button>
     </aside>
   );
@@ -743,31 +845,44 @@ function AgentMark({ agentId }) {
   );
 }
 
-function Inspector({ snapshot, selectedAgent, onSelectAgent, onOpenSources }) {
+function Inspector({ snapshot, selectedAgent, onSelectAgent, onOpenSources, widgetAgents }) {
   const dataUnavailable = snapshot.pending || snapshot.loadError;
   const partial = snapshotIsPartial(snapshot);
-  // 用得最多的排最上面。后端按注册表顺序返回，那个顺序对读者没有意义。
-  // Array.sort 是稳定的：并列（尤其一堆 0）时保持注册表顺序，不会每次刷新乱跳。
-  const rankedAgents = [...snapshot.agents].sort((left, right) => right.tokens - left.tokens);
+  const chosen = new Set(widgetAgents);
+  // 侧栏两块都只留用户勾选的 Agent，外加本周期确有用量的。勾选的含义是「即使
+  // 为 0 也留一行」，有用量则一律不藏——否则装了七个 Agent 的机器上半屏都是
+  // "0 tokens 0.0%" 的死行，而单靠勾选又会把真实用量从统计软件里抹掉。
+  // 图表、Token 构成、成本估算不受此影响，顶部总量始终等于全部 Agent 之和。
+  const keepsRow = (agent) =>
+    // 数据还没到位时不按用量过滤：那会儿人人都是 0，滤完只剩勾选的两行，
+    // 快照一到又跳回七行。
+    dataUnavailable ||
+    chosen.has(agent.id) ||
+    agent.tokens > 0 ||
+    // 当前用作筛选的那个始终留一行：否则切到它没有用量的周期时行会消失，
+    // 图表还筛着它，却再没有可点的地方把筛选取消掉。
+    agent.id === selectedAgent;
+  const rankedAgents = [...snapshot.agents]
+    .filter(keepsRow)
+    // 用得最多的排最上面。后端按注册表顺序返回，那个顺序对读者没有意义。
+    // Array.sort 是稳定的：并列（尤其一堆 0）时保持注册表顺序，不会每次刷新乱跳。
+    .sort((left, right) => right.tokens - left.tokens);
   return (
     <aside className="inspector" aria-label="配额与 Agent 明细">
       <div className="quota-groups" aria-label="各 Agent 官方配额">
-        {AGENT_ORDER.map((agentId) => {
+        {/* 严格按勾选，顺序即勾选顺序。配额卡是实时状态而非历史用量，没勾就
+            不该冒出来——哪怕它确有官方额度来源。勾了但没有来源的仍占一行，
+            "暂无可靠来源"本身是有效信息。 */}
+        {widgetAgents.filter((agentId) => AGENT_META[agentId]).map((agentId) => {
           const entry = agentQuotaFor(snapshot, agentId);
           const hasData = quotaHasData(entry);
-          // 没有配额来源的可选 Agent 不占版面；Codex 与 Claude 始终显示。
-          if (!hasData && !["codex", "claude"].includes(agentId)) return null;
           const provenanceView = entry.windows?.find((window) => window.view.available)?.view;
           return (
             <section className="quota-group" key={agentId}>
               <header>
                 <strong>{AGENT_META[agentId].label}</strong>
-                <small>
-                  {hasData
-                    ? quotaProvenance(provenanceView)
-                    : agentId === "claude"
-                      ? "在设置中开启配额钩子后显示"
-                      : "暂无可靠来源"}
+                <small title={hasData ? undefined : entry.note || undefined}>
+                  {hasData ? quotaProvenance(provenanceView) : quotaEmptyCopy(entry, agentId)}
                 </small>
               </header>
               {hasData &&
@@ -908,7 +1023,12 @@ function ThemeQuickToggle({ theme, darkTheme, onThemeChange }) {
   );
 }
 
-function WindowActions({ mode, pinned, transparent = false, macMinimal = false, theme, darkTheme, onThemeChange, onToggleMode, onTogglePinned, onToggleTransparent }) {
+function WindowActions({ mode, pinned, transparent = false, glassTint = "dark", macMinimal = false, theme, darkTheme, onThemeChange, onToggleMode, onTogglePinned, onToggleTransparent }) {
+  const glassName = (id) =>
+    GLASS_TINT_OPTIONS.find((option) => option.id === id)?.label || "深色";
+  const glassCurrent = normalizeGlassTint(glassTint);
+  const glassNext = nextGlassTint(glassCurrent);
+  const glassLabel = `${glassName(glassCurrent)} · 点击切为${glassName(glassNext)}`;
   return (
     <div className={`window-actions window-actions--${mode}`} aria-label="窗口操作">
       {mode === "expanded" && (
@@ -950,9 +1070,8 @@ function WindowActions({ mode, pinned, transparent = false, macMinimal = false, 
           type="button"
           className={`window-action ${transparent ? "window-action--active" : ""}`}
           onClick={onToggleTransparent}
-          aria-label={transparent ? "关闭玻璃材质" : "使用玻璃材质"}
-          aria-pressed={transparent}
-          title={transparent ? "关闭玻璃材质" : "玻璃材质"}
+          aria-label={`外观：${glassLabel}`}
+          title={`外观：${glassLabel}`}
         >
           <CircleHalfTilt size={16} weight={transparent ? "fill" : "light"} aria-hidden="true" />
         </button>
@@ -1006,6 +1125,33 @@ function WindowActions({ mode, pinned, transparent = false, macMinimal = false, 
   );
 }
 
+function handleGlassPointerMove(event) {
+  const shell = event.currentTarget;
+  const bounds = shell.getBoundingClientRect();
+  if (!bounds.width || !bounds.height) return;
+  const frame = shell.parentElement?.id === "root" ? shell.parentElement : shell;
+  const x = Math.max(0, Math.min(100, ((event.clientX - bounds.left) / bounds.width) * 100));
+  const y = Math.max(0, Math.min(100, ((event.clientY - bounds.top) / bounds.height) * 100));
+  frame.style.setProperty("--glass-pointer-x", `${x}%`);
+  frame.style.setProperty("--glass-pointer-y", `${y}%`);
+  frame.style.setProperty("--glass-edge-opacity", "1");
+}
+
+function handleGlassPointerLeave(event) {
+  const shell = event.currentTarget;
+  const frame = shell.parentElement?.id === "root" ? shell.parentElement : shell;
+  frame.style.setProperty("--glass-edge-opacity", "0");
+}
+
+function glassPointerProps(enabled) {
+  return enabled
+    ? {
+        onPointerMove: handleGlassPointerMove,
+        onPointerLeave: handleGlassPointerLeave,
+      }
+    : {};
+}
+
 function StripBar({
   snapshot,
   agents,
@@ -1014,6 +1160,8 @@ function StripBar({
   transparent,
   glassAlpha = 0.82,
   glassMode = "css",
+  glassTint = "dark",
+  glassInk = "dark",
   orientation,
   onToggleOrientation,
   onTogglePinned,
@@ -1030,7 +1178,18 @@ function StripBar({
   const dragProps = pinned || IS_MAC ? {} : { "data-tauri-drag-region": true };
   const vertical = orientation === "vertical";
   const OrientationIcon = vertical ? ArrowsLeftRight : ArrowsDownUp;
+  // 透明档的真实桌面背景变化很大，控制图标加粗以稳定识别。
+  const buttonWeight = transparent && glassTint === "clear" ? "bold" : "light";
   const shellRef = useRef(null);
+  const shellAppearance = glassShellAppearance("strip", {
+    transparent,
+    glassMode,
+    glassTint,
+    glassInk,
+    glassAlpha,
+    isMac: IS_MAC,
+    vertical,
+  });
   // 窗口尺寸跟随真实内容（通用方案，替代手写常量）：每次渲染后与视口变化时
   // 复核目标尺寸，差 ≥1px 才调窗；量的是 CSS px，resizeStripWindow 内部统一
   // 乘缩放系数与 DPI。任何字体/DPI/缩放/更新点组合都收敛，不再裁按钮。
@@ -1046,7 +1205,12 @@ function StripBar({
         const targetHeight = measureStripVerticalContent(shell);
         if (!targetHeight) return;
         // 交叉轴是设计常量：竖条恒为 52 宽（方向切换后窗口可能还停在横条宽度）。
-        if (Math.abs(targetHeight - shell.clientHeight) < 1 && shell.clientWidth === STRIP_VERTICAL_WIDTH) return;
+        if (
+          Math.abs(targetHeight - shell.clientHeight) < 1
+          && Math.abs(shell.clientWidth - STRIP_VERTICAL_WIDTH) <= 1
+        ) {
+          return;
+        }
         runLatestWindowCorrection(() =>
           resizeStripWindow({ width: STRIP_VERTICAL_WIDTH, height: Math.ceil(targetHeight) }),
         );
@@ -1055,7 +1219,17 @@ function StripBar({
       const targetWidth = measureStripHorizontalTarget(shell);
       if (!targetWidth) return;
       // 交叉轴是设计常量：横条恒为 40 高。
-      if (Math.abs(targetWidth - shell.clientWidth) < 1 && shell.clientHeight === STRIP_BAR_HEIGHT) return;
+      // 宽度方向做不对称迟滞：变宽立即跟进（否则格子被压到内容以下，图标和
+      // 百分比会叠在一起），变窄要超过一格的余量才动。测量噪声只会让目标略微
+      // 变小，对称的 1px 阈值会让它和调窗形成震荡（双屏用户实拍到持续闪烁）。
+      const widthDelta = targetWidth - shell.clientWidth;
+      if (
+        widthDelta < 1
+        && widthDelta > -STRIP_WIDTH_SHRINK_SLACK
+        && shell.clientHeight === STRIP_BAR_HEIGHT
+      ) {
+        return;
+      }
       runLatestWindowCorrection(() =>
         resizeStripWindow({ width: Math.ceil(targetWidth), height: STRIP_BAR_HEIGHT }),
       );
@@ -1093,10 +1267,12 @@ function StripBar({
   return (
     <main
       ref={shellRef}
-      className={`strip-shell ${vertical ? "strip-shell--vertical" : ""} ${transparent ? "strip-shell--transparent" : ""} ${transparent && glassMode === "css" ? "strip-shell--glass-css" : ""} ${IS_MAC ? "strip-shell--mac" : ""}`}
+      className={shellAppearance.className}
+      data-glass-surface={shellAppearance.trueAlpha ? "true-alpha" : undefined}
       {...dragProps}
+      {...glassPointerProps(shellAppearance.edgeInteractive)}
       style={{
-        ...(transparent ? { "--glass-alpha": glassAlpha } : {}),
+        ...shellAppearance.style,
         ...(pinned ? { cursor: "default" } : {}),
       }}
     >
@@ -1126,11 +1302,10 @@ function StripBar({
           }
           const view = cell.tightest.view;
           const severity = quotaSeverity(view);
-          const isSnapshot = view.stale || view.quality === "official_snapshot";
           return (
             <div
               key={agentId}
-              className={`strip-cell ${isSnapshot ? "strip-cell--stale" : ""} ${severity ? `strip-cell--${severity}` : ""}`}
+              className={`strip-cell ${severity ? `strip-cell--${severity}` : ""}`}
               style={{ "--quota-accent": meta.accent }}
               title={stripTooltip(agentId, cell.windows)}
               {...dragProps}
@@ -1186,7 +1361,7 @@ function StripBar({
             aria-pressed={pinned}
             title={pinned ? "取消固定，恢复拖动" : "固定在当前位置并置顶"}
           >
-            <PushPinSimple size={15} weight={pinned ? "fill" : "light"} aria-hidden="true" />
+            <PushPinSimple size={15} weight={pinned ? "fill" : buttonWeight} aria-hidden="true" />
           </button>
         )}
         <button
@@ -1196,7 +1371,7 @@ function StripBar({
           aria-label={vertical ? "切换为横条" : "切换为竖条"}
           title={vertical ? "切换为横条" : "切换为竖条"}
         >
-          <OrientationIcon size={15} weight="light" aria-hidden="true" />
+          <OrientationIcon size={15} weight={buttonWeight} aria-hidden="true" />
         </button>
         <button
           type="button"
@@ -1205,7 +1380,7 @@ function StripBar({
           aria-label="展开为桌面小插件"
           title="展开为桌面小插件"
         >
-          <ArrowsOutSimple size={15} weight="light" aria-hidden="true" />
+          <ArrowsOutSimple size={15} weight={buttonWeight} aria-hidden="true" />
         </button>
         <button
           type="button"
@@ -1214,7 +1389,7 @@ function StripBar({
           aria-label="打开完整视图"
           title="完整视图"
         >
-          <CornersOut size={15} weight="light" aria-hidden="true" />
+          <CornersOut size={15} weight={buttonWeight} aria-hidden="true" />
         </button>
       </div>
     </main>
@@ -1230,6 +1405,8 @@ function CompactWidget({
   pinned,
   transparent,
   glassMode = "css",
+  glassTint = "dark",
+  glassInk = "dark",
   onPeriodChange,
   onOpenSources,
   onTogglePinned,
@@ -1303,7 +1480,10 @@ function CompactWidget({
         natural = Math.max(COMPACT_LIST_MIN_HEIGHT, Math.ceil(lastRow.bottom - firstRow.top));
       }
       // 非列表部分实测 + 列表自然高 + 4px 余量（1fr 分配与取整的抖动）。
-      const chrome = shell.clientHeight - list.clientHeight;
+      // 用 scrollHeight 兜底：只有一个 Agent 时窗口会收到比内容还矮，底栏被
+      // 裁在可视区外，clientHeight 就量不到它，于是"目标高度"一直等于当前
+      // 高度，卡在底栏永远不显示的稳定错误态。
+      const chrome = Math.max(shell.scrollHeight, shell.clientHeight) - list.clientHeight;
       const target = Math.max(COMPACT_MIN_WINDOW_HEIGHT, Math.round(chrome + natural + 4));
       if (IS_MAC) {
         // macOS 面板顶部锚定菜单栏图标：高度跟随内容（屏幕可用高 - 80 封顶），
@@ -1341,14 +1521,25 @@ function CompactWidget({
   const quotaEntry = agentQuotaFor(snapshot, quotaAgent);
   const quotaWindows = compactQuotaWindows(quotaEntry);
   const quotaView = quotaWindows.find((window) => window.view.available)?.view || UNAVAILABLE_QUOTA;
-  const quotaIsSnapshot = quotaView.stale || quotaView.quality === "official_snapshot";
   const partial = snapshotIsPartial(snapshot);
+  const sourceStatus = sourceStatusCopy(snapshot, loading, partial);
+  const shellAppearance = glassShellAppearance("widget", {
+    transparent,
+    glassMode,
+    glassTint,
+    glassInk,
+    glassAlpha,
+    isMac: IS_MAC,
+    loading,
+  });
 
   return (
     <main
       ref={shellRef}
-      className={`widget-shell ${transparent ? "widget-shell--transparent" : ""} ${transparent && glassMode === "css" ? "widget-shell--glass-css" : ""} ${IS_MAC ? "widget-shell--mac" : ""} ${loading ? "is-loading" : ""}`}
-      style={transparent ? { "--glass-alpha": glassAlpha } : undefined}
+      className={shellAppearance.className}
+      data-glass-surface={shellAppearance.trueAlpha ? "true-alpha" : undefined}
+      {...glassPointerProps(shellAppearance.edgeInteractive)}
+      style={shellAppearance.style}
     >
       <h1 className="sr-only">Metrik Agent 用量桌面小插件</h1>
       <header
@@ -1382,6 +1573,7 @@ function CompactWidget({
           mode="compact"
           pinned={pinned}
           transparent={transparent}
+          glassTint={glassTint}
           macMinimal={IS_MAC}
           onToggleMode={onExpand}
           onTogglePinned={onTogglePinned}
@@ -1432,7 +1624,7 @@ function CompactWidget({
           </div>
 
           <button
-            className={`widget-quota ${quotaIsSnapshot ? "widget-quota--stale" : ""}`}
+            className="widget-quota"
             style={{ "--quota-accent": AGENT_META[quotaAgent].accent }}
             type="button"
             onClick={onCycleQuotaAgent}
@@ -1463,9 +1655,7 @@ function CompactWidget({
                   ? "窗口已重置，等待刷新"
                   : quotaView.available
                     ? `${formatReset(quotaView.resetsInMinutes)}后重置`
-                    : quotaAgent === "claude"
-                      ? "设置中开启配额钩子"
-                      : "官方配额不可用"}
+                    : quotaEmptyCopy(quotaEntry, quotaAgent, true)}
             </small>
           </button>
         </section>
@@ -1480,18 +1670,16 @@ function CompactWidget({
               if (!meta) return null;
               const entry = agentQuotaFor(snapshot, agentId);
               const windows = compactDisplayWindows(entry);
-              // 行内头条窗口与胶囊条同规则；完整窗口明细仍在 tooltip 与焦点卡中。
+              // 行内头条窗口与胶囊条同规则，见 quotaWindows.js；
+              // 完整窗口明细在该行的原生 tooltip 与焦点卡中。
               const headline = bindingWindow(entry.windows) || windows[0] || null;
               const headlineView = headline?.view || null;
               const current = Boolean(headlineView && headlineView.available && !headlineView.resetExpired);
-              const stale = Boolean(
-                headlineView && (headlineView.stale || headlineView.quality === "official_snapshot"),
-              );
               const severity = headlineView ? quotaSeverity(headlineView) : "";
               const remaining = headlineView ? Math.min(100, Math.max(0, headlineView.remainingPercent)) : 0;
               return (
                 <div
-                  className={`widget-agent ${severity ? `widget-agent--${severity}` : ""} ${stale ? "widget-agent--stale" : ""}`}
+                  className={`widget-agent ${severity ? `widget-agent--${severity}` : ""}`}
                   key={agentId}
                   style={{ "--quota-accent": meta.accent }}
                   title={compactQuotaTooltip(agentId, windows)}
@@ -1513,8 +1701,11 @@ function CompactWidget({
                               : "· 暂无可靠来源"}
                     </small>
                   </span>
-                  {/* 展示剩余额度（用户关心的是还能用多少），陈旧快照带 ~ 前缀。 */}
-                  <em>{current ? `${stale ? "~" : ""}${Math.round(remaining)}%` : "--"}</em>
+                  {/* 展示剩余额度（用户关心的是还能用多少）。快照新鲜度不再
+                      影响数字的写法与颜色：那一格已经写着窗口或"已重置，等待
+                      刷新"，再加 ~ 前缀和灰化是重复信息，只会让人以为数字是
+                      估算出来的。 */}
+                  <em>{current ? `${Math.round(remaining)}%` : "--"}</em>
                 </div>
               );
             });
@@ -1522,10 +1713,15 @@ function CompactWidget({
         </section>
 
         <footer className="widget-footer">
-          <button type="button" className={`widget-source ${snapshot.loadError ? "widget-source--error" : ""} ${partial ? "widget-source--warning" : ""}`} onClick={onOpenSources} aria-live="polite">
+          <button
+            type="button"
+            className={`widget-source ${snapshot.loadError ? "widget-source--error" : ""} ${partial ? "widget-source--warning" : ""}`}
+            onClick={onOpenSources}
+            title={sourceStatus.detail}
+          >
             <ShieldCheck size={15} weight="fill" aria-hidden="true" />
-            <span>{snapshot.pending ? "正在读取" : snapshot.loadError ? "数据暂不可用" : partial ? "部分覆盖" : snapshot.isDemo ? "演示数据" : "数据可追溯"}</span>
-            <small>{snapshot.pending ? "请稍候" : loading ? "更新中" : snapshot.loadError ? "未替换" : partial ? "查看说明" : formatClock(snapshot.generatedAt)}</small>
+            <span>{sourceStatus.title}</span>
+            <small>{sourceStatus.hint}</small>
           </button>
           <button
             type="button"
@@ -1540,154 +1736,6 @@ function CompactWidget({
           <button type="button" className="widget-expand" onClick={() => onExpand("expanded")}>
             <span>完整视图</span>
             <ArrowsOutSimple size={16} weight="light" aria-hidden="true" />
-          </button>
-        </footer>
-      </div>
-    </main>
-  );
-}
-
-function desktopWidgetQuota(snapshot, agentId) {
-  const entry = agentQuotaFor(snapshot, agentId);
-  const windows = compactDisplayWindows(entry);
-  const headline = bindingWindow(entry.windows) || windows[0] || null;
-  const view = headline?.view || UNAVAILABLE_QUOTA;
-  const available = Boolean(view.available && !view.resetExpired);
-  return {
-    available,
-    remaining: available ? Math.max(0, Math.min(100, view.remainingPercent)) : null,
-    reset: available ? `${formatReset(view.resetsInMinutes)}后重置` : view.resetExpired
-      ? "已重置，等待刷新"
-      : agentId === "claude"
-        ? "设置中开启配额来源"
-        : "官方配额不可用",
-    stale: Boolean(available && (view.stale || view.quality === "official_snapshot")),
-    windowLabel: headline ? shortWindowLabel(headline.key) : "官方",
-  };
-}
-
-function MacDesktopWidget({
-  snapshot,
-  loading,
-  quotaAgent,
-  widgetAgents,
-  glassAlpha,
-  glassMode,
-  onSelectAgent,
-  onExpand,
-}) {
-  const activeMeta = AGENT_META[quotaAgent];
-  const activeQuota = desktopWidgetQuota(snapshot, quotaAgent);
-  const activeTokens = snapshot.agents.find((agent) => agent.id === quotaAgent)?.tokens || 0;
-  const displayRemaining = activeQuota.available ? Math.round(activeQuota.remaining) : null;
-  const ringProgress = activeQuota.available ? activeQuota.remaining * 0.86 : 0;
-  const availableAgentRows = widgetAgents.filter((agentId) => AGENT_META[agentId]);
-  // 固定 80px 区域内完整呈现用户勾选的 Agent：1–2 个用整行，3–4 个用
-  // 两列，5–6 个用三列。设置语义就是“勾选即显示”，不再隐藏成轮换队列。
-  const agentGridClass = availableAgentRows.length <= 2
-    ? "is-list"
-    : availableAgentRows.length <= 4
-      ? "is-grid is-grid--2"
-      : "is-grid is-grid--3";
-  const partial = snapshotIsPartial(snapshot);
-  const statusLabel = snapshot.pending
-    ? "正在读取"
-    : snapshot.loadError
-      ? "沿用上次数据"
-      : partial
-        ? "部分覆盖"
-        : loading
-          ? "正在更新"
-          : "刚刚更新";
-
-  return (
-    <main
-      className={`desktop-widget-shell desktop-widget-shell--glass ${glassMode === "native" ? "desktop-widget-shell--glass-native" : ""} ${glassMode === "css" ? "desktop-widget-shell--glass-css" : ""} ${loading ? "is-loading" : ""}`}
-      style={{ "--glass-alpha": glassAlpha, "--quota-accent": activeMeta.accent }}
-    >
-      <h1 className="sr-only">Metrik macOS 桌面组件</h1>
-      <header className="desktop-widget-header" data-tauri-drag-region>
-        <div className="desktop-widget-brand" data-tauri-drag-region>
-          <span>Metrik</span>
-          <i
-            className={`status-dot ${loading ? "status-dot--loading" : ""} ${snapshot.loadError ? "status-dot--error" : ""}`}
-            title={statusDotTitle(loading, snapshot.loadError)}
-            aria-hidden="true"
-          />
-        </div>
-      </header>
-
-      <div className="desktop-widget-content">
-        <section className="desktop-widget-focus" aria-label={`${activeMeta.label} 官方额度`}>
-          <div className={`desktop-quota-ring ${activeQuota.stale ? "is-stale" : ""}`}>
-            <svg viewBox="0 0 120 120" aria-hidden="true">
-              <circle className="desktop-quota-ring-track" cx="60" cy="60" r="48" pathLength="100" />
-              <circle
-                className="desktop-quota-ring-value"
-                cx="60"
-                cy="60"
-                r="48"
-                pathLength="100"
-                style={{ strokeDasharray: `${ringProgress} ${100 - ringProgress}` }}
-              />
-            </svg>
-            <div className="desktop-quota-ring-copy">
-              <strong>
-                {activeMeta.label}{activeQuota.available ? ` · ${activeQuota.windowLabel}` : ""}
-              </strong>
-              <span>剩余</span>
-              <div
-                className={displayRemaining != null ? "has-percent" : ""}
-                aria-live="polite"
-                aria-atomic="true"
-              >
-                <em>{activeQuota.stale && displayRemaining != null ? "~" : ""}{displayRemaining ?? "--"}</em>
-                {displayRemaining != null && <small>%</small>}
-              </div>
-              <p>{activeQuota.reset}</p>
-            </div>
-          </div>
-
-          <div className="desktop-widget-tokens">
-            <AgentMark agentId={quotaAgent} />
-            <span>今日</span>
-            <strong>{snapshot.pending || snapshot.loadError ? "--" : compactTokens(activeTokens)}</strong>
-            <small>tokens</small>
-          </div>
-        </section>
-
-        <section className={`desktop-widget-agents ${agentGridClass}`} aria-label="切换 Agent">
-          {availableAgentRows.map((agentId) => {
-            const meta = AGENT_META[agentId];
-            const quota = desktopWidgetQuota(snapshot, agentId);
-            const remaining = quota.available ? Math.round(quota.remaining) : null;
-            return (
-              <button
-                type="button"
-                className={agentId === quotaAgent ? "is-selected" : ""}
-                key={agentId}
-                style={{ "--agent-accent": meta.accent }}
-                aria-pressed={agentId === quotaAgent}
-                onClick={() => onSelectAgent(agentId)}
-                title={`${meta.label} · ${quota.windowLabel} · ${quota.reset}`}
-              >
-                <i aria-hidden="true" />
-                <AgentMark agentId={agentId} />
-                <span>{meta.label}</span>
-                <em>{quota.stale && remaining != null ? "~" : ""}{remaining == null ? "--" : `${remaining}%`}</em>
-              </button>
-            );
-          })}
-        </section>
-
-        <footer className="desktop-widget-footer">
-          <span className={snapshot.loadError || partial ? "is-warning" : ""}>
-            <i aria-hidden="true" />
-            {statusLabel}
-          </span>
-          <button type="button" onClick={onExpand}>
-            完整视图
-            <ArrowsOutSimple size={14} weight="light" aria-hidden="true" />
           </button>
         </footer>
       </div>
@@ -1752,14 +1800,21 @@ function SourceDrawer({ snapshot, onClose, onRebuildLedger, rebuildState }) {
         onMouseDown={(event) => event.stopPropagation()}
       >
         <header>
-          <div>
-            <span className="eyebrow">统计说明</span>
-            <h2 id="source-title">每个数字都有出处</h2>
-          </div>
+          <h2 id="source-title">统计说明</h2>
           <button ref={closeButtonRef} type="button" className="icon-button" onClick={onClose} aria-label="关闭">
             <X size={21} weight="light" />
           </button>
         </header>
+
+        {(snapshot.indexing?.pending || 0) > 0 && (
+          <div className="indexing-note" role="status">
+            <ClockCounterClockwise size={20} weight="light" aria-hidden="true" />
+            <p>
+              正在补齐历史索引，还剩 <strong>{snapshot.indexing.pending}</strong> 个日志文件。
+              历史周期的数字尚不完整，会随补齐自动更新。
+            </p>
+          </div>
+        )}
 
         <div className="source-list">
           {snapshot.sources.map((source) => (
@@ -2000,8 +2055,10 @@ function ClaudeOauthBlock({ onSnapshotRefresh }) {
     <div className="settings-subsection">
       <h3>官方额度直连（OAuth）</h3>
       <p className="settings-muted">
-        备选来源：用本机 Claude Code 已保存的凭据直接查询官方额度（全产品合并值）。
-        凭据只在内存中读取，不存储、不上传；接口失效时自动回落到状态栏钩子。
+        备选来源：用本机 Claude Code 已保存的凭据直接查询官方额度（账户级合并值，约两分钟一刷新），
+        网页版与桌面客户端的消耗同样计入。凭据只在内存中读取，不存储、不上传。
+        前提是最近用过 Claude Code：凭据只活几小时，且只有 Claude Code 自己跑起来才会刷新它，
+        过期后这里回落到状态栏钩子。
       </p>
       <p className="settings-muted">
         ⚠️ 条款风险须知：Anthropic 2026 年 2 月更新的消费者条款禁止在第三方工具中使用 Claude 订阅的
@@ -2028,11 +2085,22 @@ function ClaudeOauthBlock({ onSnapshotRefresh }) {
                   ? "本机未找到 Claude Code 登录凭据（请先在终端运行 claude 登录）"
                   : !status.scopeOk
                     ? "凭据缺少 user:profile 权限，开启后可能查询失败（可运行 claude login 重新登录）"
-                    : status.enabled
-                      ? "已开启 · 凭据可用"
-                      : "未开启 · 凭据可用"}
+                    : status.expired
+                      ? `${status.enabled ? "已开启" : "未开启"} · 凭据已过期，用一次 Claude Code 即可自动刷新`
+                      : status.enabled
+                        ? "已开启 · 凭据可用"
+                        : "未开启 · 凭据可用"}
               </dd>
             </div>
+            {/* 开关一切正常、却始终没有额度数字时，唯一能解释原因的就是这一行。 */}
+            {status.lastFailure && (
+              <div>
+                <dt>最近失败</dt>
+                <dd>
+                  {status.lastFailure.message} · {formatSyncTime(status.lastFailure.atMs)}
+                </dd>
+              </div>
+            )}
           </dl>
         </>
       )}
@@ -2119,13 +2187,18 @@ function UpdateBlock({ autoCheck, onAutoCheckChange, availableUpdate }) {
     availableUpdate ? { status: "available", ...availableUpdate } : { status: "idle" },
   );
   // 自动检查在小组件形态就可能发现新版；进设置页时直接呈现，不用再点一次。
+  // 后来的自动检查发现更新的版本时要顶掉手上这一份：否则一直提示第一次发现
+  // 的那个版本，中间发布的都要等装完它才看得见。
   useEffect(() => {
     if (!availableUpdate) return;
-    setState((current) =>
-      current.status === "idle" || current.status === "current"
-        ? { status: "available", ...availableUpdate }
-        : current,
-    );
+    setState((current) => {
+      // 正在检查或下载时不换手上这一份，免得按钮和进度对不上。
+      if (current.status === "checking" || current.status === "installing") return current;
+      if (current.status === "available" && current.version === availableUpdate.version) {
+        return current;
+      }
+      return { status: "available", ...availableUpdate };
+    });
   }, [availableUpdate]);
 
   const check = async () => {
@@ -2154,7 +2227,7 @@ function UpdateBlock({ autoCheck, onAutoCheckChange, availableUpdate }) {
     <div className="settings-subsection">
       <h3>更新</h3>
       <p className="settings-muted">
-        当前版本 {__APP_VERSION__}。每天自动检查一次，新版本以小圆点提示；
+        当前版本 {__APP_VERSION__}。每六小时自动检查一次，新版本以小圆点提示；
         下载与安装由你确认，更新包经签名校验。
       </p>
       <label className="update-autocheck">
@@ -2180,6 +2253,13 @@ function UpdateBlock({ autoCheck, onAutoCheckChange, availableUpdate }) {
                 ? `更新到 ${state.version}`
                 : "检查更新"}
         </button>
+        {/* 有新版待装时主按钮变成"更新到 X"，没有这一个就再也没法重新检查：
+            关掉自动检查的人只能先把旧版装掉，才看得到后面发布的版本。 */}
+        {state.status === "available" && (
+          <button type="button" className="ledger-button ledger-button--secondary" onClick={check}>
+            重新检查
+          </button>
+        )}
       </div>
       {state.status === "current" && (
         <p className="settings-feedback settings-feedback--success" role="status">
@@ -2198,22 +2278,70 @@ function UpdateBlock({ autoCheck, onAutoCheckChange, availableUpdate }) {
   );
 }
 
+const REPO_URL = "https://github.com/keros68/metrik";
+const AUTHOR_EMAIL = "keros68@gmail.com";
+
+// 桌面端交给系统浏览器/邮件客户端（opener 插件，capability 限定了这两个地址）；
+// 浏览器演示模式退化为普通链接。
+function AboutCard() {
+  const openExternal = async (event, url) => {
+    if (!isDesktop()) return;
+    event.preventDefault();
+    const { openUrl } = await import("@tauri-apps/plugin-opener");
+    await openUrl(url).catch((error) => console.warn("open external link failed:", error));
+  };
+  return (
+    <div className="settings-card settings-about">
+      <h2>关于</h2>
+      <p className="settings-muted">Metrik {__APP_VERSION__}</p>
+      <p className="settings-muted">
+        作者：keros68（
+        <a href={`mailto:${AUTHOR_EMAIL}`} onClick={(event) => openExternal(event, `mailto:${AUTHOR_EMAIL}`)}>
+          {AUTHOR_EMAIL}
+        </a>
+        ）
+      </p>
+      <p className="settings-muted">
+        项目仓库：
+        <a href={REPO_URL} onClick={(event) => openExternal(event, REPO_URL)}>
+          github.com/keros68/metrik
+        </a>
+      </p>
+      <p className="settings-muted">许可证：AGPL-3.0-or-later</p>
+    </div>
+  );
+}
+
 const THEME_OPTIONS = [
   { id: "auto", label: "自动" },
   { id: "light", label: "亮色" },
   { id: "dark", label: "暗色" },
 ];
 
-// 与远端最新版 Windows true-alpha 玻璃保持同一浓度语义。5% 是“只留材质、
-// 几乎不加罩层”，96% 是近实心；不要再把旧版 60% 回退下限带到 macOS。
-// 5% 起点与旧版默认 82% 都必须落在滑杆刻度上；用 1% 步进避免原生
-// range 把 82% 静默吸到 83%，而旁边读数仍显示 82%。
-const GLASS_ALPHA_RANGE = Object.freeze({ min: 0.05, max: 0.96, step: 0.01 });
+// 悬浮形态的窗口圆角，物理像素。10 收到 8：贴着壁纸看，10 的弧偏圆，靠近
+// macOS 大部件而不是任务栏那一排小图标；8 更贴合胶囊的高度。
+const GLASS_RADIUS_PX = 8;
 
-function isGlassAlphaInRange(value) {
-  return Number.isFinite(value)
-    && value >= GLASS_ALPHA_RANGE.min
-    && value <= GLASS_ALPHA_RANGE.max;
+const GLASS_TINT_OPTIONS = [
+  { id: "dark", label: "深色" },
+  { id: "light", label: "浅色" },
+  { id: "clear", label: "透明" },
+];
+
+function normalizeGlassTint(value) {
+  return GLASS_TINT_OPTIONS.some((option) => option.id === value) ? value : "dark";
+}
+
+// 透明档的文字颜色。桌面挂件常见的两种风格：深色字配白霜（Pogget 一路），
+// 或白色字直接压在壁纸上（Rainmeter 一路）。两者需要的底完全相反，所以
+// 选文字颜色实际上也在选罩层，见 glassAppearance.js。
+const GLASS_INK_OPTIONS = [
+  { id: "dark", label: "深色字" },
+  { id: "light", label: "白色字" },
+];
+
+function normalizeGlassInk(value) {
+  return GLASS_INK_OPTIONS.some((option) => option.id === value) ? value : "dark";
 }
 
 function SliderRow({ label, hint, min, max, step, percent, ariaLabel, onChange }) {
@@ -2237,16 +2365,7 @@ function SliderRow({ label, hint, min, max, step, percent, ariaLabel, onChange }
   );
 }
 
-function AppearanceCard({
-  theme,
-  onThemeChange,
-  glassAlpha,
-  onGlassAlpha,
-  uiScale,
-  onUiScale,
-  stripScale,
-  onStripScale,
-}) {
+function AppearanceCard({ theme, onThemeChange, glassAlpha, onGlassAlpha, glassTint, onGlassTint, glassInk, onGlassInk, uiScale, onUiScale, stripScale, onStripScale }) {
   return (
     <div className="settings-card">
       <h2>外观与缩放</h2>
@@ -2266,41 +2385,83 @@ function AppearanceCard({
           </button>
         ))}
       </div>
+      {/* macOS 面板材质跟随系统 vibrancy，不提供组件外观选项；
+          深/浅配色只针对 Windows 的卡片与胶囊。 */}
+      {!IS_MAC && (
+        <div className="settings-subsection">
+          <h3>组件外观</h3>
+          <p className="settings-muted">
+            深色是 HUD 玻璃；浅色是透亮白磨砂；透明会直接透出桌面与后方窗口，并叠加轻霜和边缘高光。
+          </p>
+          <div className="theme-toggle" role="group" aria-label="组件外观">
+            {GLASS_TINT_OPTIONS.map((option) => (
+              <button
+                key={option.id}
+                type="button"
+                className={glassTint === option.id ? "is-selected" : ""}
+                aria-pressed={glassTint === option.id}
+                onClick={() => onGlassTint(option.id)}
+              >
+                {option.label}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+      {!IS_MAC && glassTint === "clear" && (
+        <div className="settings-subsection">
+          <h3>透明档文字</h3>
+          <p className="settings-muted">
+            深色字配白霜，浅色壁纸上最清楚；白色字配一层薄暗罩，接近桌面挂件常见的风格。
+          </p>
+          <div className="theme-toggle" role="group" aria-label="透明档文字">
+            {GLASS_INK_OPTIONS.map((option) => (
+              <button
+                key={option.id}
+                type="button"
+                className={glassInk === option.id ? "is-selected" : ""}
+                aria-pressed={glassInk === option.id}
+                onClick={() => onGlassInk(option.id)}
+              >
+                {option.label}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
       <SliderRow
-        label={IS_MAC ? "菜单栏面板玻璃浓度" : "小组件玻璃浓度"}
-        hint={IS_MAC
-          ? "越低越透、越高越实；5% 只保留菜单栏面板的系统材质。"
-          : "越低越透、越高越实；5% 接近全透明。系统模糊不可用时自动锁定近实心。"}
-        min={GLASS_ALPHA_RANGE.min * 100}
-        max={GLASS_ALPHA_RANGE.max * 100}
-        step={GLASS_ALPHA_RANGE.step * 100}
+        label="玻璃浓度"
+        hint="同时作用于卡片和胶囊；越低越通透，越高越厚实。"
+        min={5}
+        max={96}
+        step={2}
         percent={Math.round(glassAlpha * 100)}
-        ariaLabel={IS_MAC ? "菜单栏面板玻璃浓度百分比" : "小组件玻璃浓度百分比"}
+        ariaLabel="玻璃浓度百分比"
         onChange={onGlassAlpha}
       />
       {/* mac 的菜单栏面板是系统 UI 的一部分，尺寸固定不提供缩放；
           缩放只针对 Windows 的桌面小插件与胶囊条。 */}
       {!IS_MAC && (
         <SliderRow
-          label="小组件缩放"
-          hint="等比缩放桌面小插件；滑杆改动下次进入时生效。"
+          label="卡片缩放"
+          hint="仅调整卡片尺寸；滑杆改动下次进入时生效。"
           min={UI_SCALE_RANGE.min * 100}
           max={UI_SCALE_RANGE.max * 100}
           step={5}
           percent={Math.round(uiScale * 100)}
-          ariaLabel="小组件缩放百分比"
+          ariaLabel="卡片缩放百分比"
           onChange={onUiScale}
         />
       )}
       {!IS_MAC && (
         <SliderRow
-          label="胶囊条缩放"
-          hint="等比缩放胶囊条，与小组件互不影响；下次进入时生效。"
+          label="胶囊缩放"
+          hint="仅调整胶囊尺寸，与卡片互不影响；下次进入时生效。"
           min={UI_SCALE_RANGE.min * 100}
           max={UI_SCALE_RANGE.max * 100}
           step={5}
           percent={Math.round(stripScale * 100)}
-          ariaLabel="胶囊条缩放百分比"
+          ariaLabel="胶囊缩放百分比"
           onChange={onStripScale}
         />
       )}
@@ -2308,79 +2469,74 @@ function AppearanceCard({
   );
 }
 
-function MacDesktopWidgetCard() {
-  return (
-    <div className="settings-card desktop-widget-setting">
-      <div>
-        <span className="desktop-widget-setting-kicker">macOS</span>
-        <h2>桌面小组件</h2>
-        <p className="settings-muted">
-          使用真正的 WidgetKit 小组件，透明材质、圆角与桌面层级都由 macOS 管理。先在桌面右键选择“编辑小组件”，再搜索 Metrik。
-        </p>
-      </div>
-      <span className="desktop-widget-native-badge">系统原生</span>
-    </div>
-  );
-}
-
-function AgentListColumn({ title, hint, agents, onToggle, onMove }) {
+function AgentListColumn({ title, hint, agents, detected, onToggle, onMove }) {
   // 已选的按显示顺序排前面，未选的按默认顺序垫后。
-  const rows = [
-    ...agents,
-    ...AGENT_ORDER.filter((agentId) => !agents.includes(agentId)),
-  ];
+  const rows = agentIdsInDisplayOrder(agents);
+  // 勾选过的一律留在上面：检测只用于分组，不能把用户自己选的挪进折叠区。
+  // detected 为 null 表示这次拿不到检测结果（加载中、演示数据、旧后端），
+  // 此时不折叠——宁可多列几行，也不能因为不知道就把 Agent 藏起来。
+  const present = detected
+    ? rows.filter((agentId) => agents.includes(agentId) || detected.has(agentId))
+    : rows;
+  const missing = detected ? rows.filter((agentId) => !present.includes(agentId)) : [];
+  const row = (agentId) => {
+    const index = agents.indexOf(agentId);
+    const checked = index >= 0;
+    return (
+      <li key={agentId}>
+        <label>
+          <input
+            type="checkbox"
+            checked={checked}
+            disabled={checked && agents.length === 1}
+            onChange={() => onToggle(agentId)}
+          />
+          <AgentMark agentId={agentId} />
+          <span>{AGENT_META[agentId].label}</span>
+        </label>
+        {checked && (
+          <button
+            type="button"
+            className="settings-agent-move"
+            onClick={() => onMove(agentId)}
+            disabled={index === 0}
+            aria-label={`将 ${AGENT_META[agentId].label} 上移`}
+            title="上移"
+          >
+            ↑
+          </button>
+        )}
+      </li>
+    );
+  };
   return (
     <div className="settings-agent-column">
       <h3>{title}</h3>
       <p className="settings-muted">{hint}</p>
-      <ul className="settings-agent-toggle">
-        {rows.map((agentId) => {
-          const index = agents.indexOf(agentId);
-          const checked = index >= 0;
-          return (
-            <li key={agentId}>
-              <label>
-                <input
-                  type="checkbox"
-                  checked={checked}
-                  disabled={checked && agents.length === 1}
-                  onChange={() => onToggle(agentId)}
-                />
-                <AgentMark agentId={agentId} />
-                <span>{AGENT_META[agentId].label}</span>
-              </label>
-              {checked && (
-                <button
-                  type="button"
-                  className="settings-agent-move"
-                  onClick={() => onMove(agentId)}
-                  disabled={index === 0}
-                  aria-label={`将 ${AGENT_META[agentId].label} 上移`}
-                  title="上移"
-                >
-                  ↑
-                </button>
-              )}
-            </li>
-          );
-        })}
-      </ul>
+      <ul className="settings-agent-toggle">{present.map(row)}</ul>
+      {missing.length > 0 && (
+        <details className="settings-agent-missing">
+          <summary>本机未检测到（{missing.length}）</summary>
+          <ul className="settings-agent-toggle">{missing.map(row)}</ul>
+        </details>
+      )}
     </div>
   );
 }
 
-function AgentsDisplayCard({ widgetAgents, onToggleWidgetAgent, onMoveWidgetAgent, stripAgents, onToggleStripAgent, onMoveStripAgent }) {
+function AgentsDisplayCard({ widgetAgents, onToggleWidgetAgent, onMoveWidgetAgent, stripAgents, onToggleStripAgent, onMoveStripAgent, detectedAgents }) {
   return (
     <div className="settings-card">
       <h2>显示的 Agent</h2>
       <p className="settings-muted">
-        勾选即展示（至少保留一个），顺序即显示顺序，↑ 上移。完整视图始终展示全部。
+        勾选即展示（至少保留一个），顺序即显示顺序，↑ 上移。
       </p>
       <div className="settings-agent-columns">
         <AgentListColumn
-          title={IS_MAC ? "菜单栏与小组件" : "小组件"}
-          hint="桌面小插件里的行。"
+          title={IS_MAC ? "菜单栏、小组件与侧栏" : "小组件与侧栏"}
+          hint="完整视图侧栏还会自动补上本周期有用量的 Agent。"
           agents={widgetAgents}
+          detected={detectedAgents}
           onToggle={onToggleWidgetAgent}
           onMove={onMoveWidgetAgent}
         />
@@ -2389,11 +2545,129 @@ function AgentsDisplayCard({ widgetAgents, onToggleWidgetAgent, onMoveWidgetAgen
             title="胶囊条"
             hint={'无配额来源的以 "--" 占格。'}
             agents={stripAgents}
+            detected={detectedAgents}
             onToggle={onToggleStripAgent}
             onMove={onMoveStripAgent}
           />
         )}
       </div>
+    </div>
+  );
+}
+
+/// 自定义用量来源：我们没接的 Agent，只要日志是 Claude 兼容 JSONL，
+/// 用户指一下目录就能算进总量，不必等我们排期。
+function CustomSourcesCard({ onSnapshotRefresh }) {
+  const [sources, setSources] = useState(null);
+  const [nameInput, setNameInput] = useState("");
+  const [pathInput, setPathInput] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [feedback, setFeedback] = useState(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    getCustomSources()
+      .then((value) => {
+        if (!cancelled) setSources(value);
+      })
+      .catch(() => {
+        if (!cancelled) setFeedback({ tone: "error", message: "自定义来源读取失败。" });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const apply = async (next) => {
+    setBusy(true);
+    setFeedback(null);
+    try {
+      // 后端返回归一化后的结果：去重、去空白后可能与输入不同，直接以它为准。
+      const saved = await setCustomSources(next);
+      setSources(saved);
+      onSnapshotRefresh();
+    } catch (error) {
+      setFeedback({ tone: "error", message: `${error}` });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const add = () => {
+    const name = nameInput.trim();
+    const path = pathInput.trim();
+    if (!name || !path) return;
+    apply([...(sources || []), { name, path }]).then(() => {
+      setNameInput("");
+      setPathInput("");
+    });
+  };
+
+  return (
+    <div className="settings-card">
+      <h2>自定义来源</h2>
+      <p className="settings-muted">
+        我们还没适配的 Agent，只要会话日志是 Claude 兼容 JSONL，指定目录后即可计入统计，
+        合并显示为「自定义」。只读取 token 计数，不读对话内容。
+      </p>
+      <p className="settings-muted">
+        格式不符的目录解析不出事件，如实显示 0，不做猜测。各来源的解析情况见「数据统计」。
+      </p>
+      <div className="rules-add">
+        <input
+          value={nameInput}
+          placeholder="显示名"
+          spellCheck={false}
+          onChange={(event) => setNameInput(event.target.value)}
+          aria-label="自定义来源显示名"
+        />
+        <input
+          value={pathInput}
+          placeholder="会话日志目录，递归查找其下的 *.jsonl"
+          spellCheck={false}
+          onChange={(event) => setPathInput(event.target.value)}
+          onKeyDown={(event) => { if (event.key === "Enter") add(); }}
+          aria-label="自定义来源目录"
+        />
+        <button
+          type="button"
+          className="ledger-button"
+          disabled={!nameInput.trim() || !pathInput.trim() || busy}
+          onClick={add}
+        >
+          添加
+        </button>
+      </div>
+      {sources === null ? (
+        <p className="settings-muted">正在读取…</p>
+      ) : sources.length === 0 ? (
+        <p className="settings-muted">还没有自定义来源。</p>
+      ) : (
+        <ul className="settings-device-list">
+          {sources.map((source) => (
+            <li key={source.path}>
+              <span>{source.name}</span>
+              <small title={source.path}>{source.path}</small>
+              <button
+                type="button"
+                className="ledger-button ledger-button--secondary"
+                disabled={busy}
+                onClick={() => apply(sources.filter((item) => item.path !== source.path))}
+              >
+                移除
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      {feedback && (
+        <p
+          className={`settings-feedback settings-feedback--${feedback.tone}`}
+          role={feedback.tone === "error" ? "alert" : "status"}
+        >
+          {feedback.message}
+        </p>
+      )}
     </div>
   );
 }
@@ -2517,10 +2791,16 @@ function QoderQuotaCard({ onSnapshotRefresh }) {
 // 变高，与短卡混排时会把整排撑出大片空白——分页正是为了让它只影响自己那一页。
 const SETTINGS_TABS = [
   {
+    id: "appearance",
+    label: "外观与缩放",
+    title: "外观与缩放",
+    blurb: "完整视图的明暗主题，卡片与胶囊的组件外观、玻璃浓度及独立缩放。",
+  },
+  {
     id: "display",
-    label: "显示",
-    title: "显示与外观",
-    blurb: "选择小组件与胶囊条展示哪些 Agent、以什么顺序，以及完整视图的明暗与各形态的缩放。",
+    label: "Agent 选择",
+    title: "小组件展示的 Agent",
+    blurb: "选择小组件与胶囊条展示哪些 Agent、以什么顺序。",
   },
   {
     id: "sources",
@@ -2536,30 +2816,12 @@ const SETTINGS_TABS = [
   },
 ];
 
-function SettingsSection({
-  onSnapshotRefresh,
-  widgetAgents,
-  onToggleWidgetAgent,
-  onMoveWidgetAgent,
-  stripAgents,
-  onToggleStripAgent,
-  onMoveStripAgent,
-  glassAlpha,
-  onGlassAlpha,
-  uiScale,
-  onUiScale,
-  stripScale,
-  onStripScale,
-  theme,
-  onThemeChange,
-  autoUpdateCheck,
-  onAutoUpdateCheck,
-  availableUpdate,
-}) {
+function SettingsSection({ onSnapshotRefresh, widgetAgents, onToggleWidgetAgent, onMoveWidgetAgent, stripAgents, onToggleStripAgent, onMoveStripAgent, detectedAgents, glassAlpha, onGlassAlpha, glassTint, onGlassTint, glassInk, onGlassInk, uiScale, onUiScale, stripScale, onStripScale, theme, onThemeChange, autoUpdateCheck, onAutoUpdateCheck, availableUpdate }) {
   const [settings, setSettings] = useState(null);
   const [directoryInput, setDirectoryInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [feedback, setFeedback] = useState(null);
+  const [removingDeviceId, setRemovingDeviceId] = useState(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -2596,15 +2858,30 @@ function SettingsSection({
     }
   };
 
-  const [tab, setTab] = useState("display");
+  const removeDevice = async (deviceId) => {
+    setBusy(true);
+    setFeedback(null);
+    try {
+      const next = await removeSyncDevice(deviceId);
+      setSettings(next);
+      setFeedback({ tone: "success", message: "设备已删除，已清除它的同步事件与导出文件。" });
+      onSnapshotRefresh();
+    } catch (error) {
+      setFeedback({ tone: "error", message: `未能删除设备：${error}` });
+    } finally {
+      setBusy(false);
+      setRemovingDeviceId(null);
+    }
+  };
+
+  const [tab, setTab] = useState("appearance");
   const activeTab = SETTINGS_TABS.find((item) => item.id === tab) || SETTINGS_TABS[0];
 
   return (
     <main className="settings-section" aria-labelledby="settings-title">
       <header className="settings-header">
-        <span className="section-kicker">设置</span>
-        <h1 id="settings-title">{activeTab.title}</h1>
-        <p>{activeTab.blurb}</p>
+        <h1 id="settings-title">设置</h1>
+        <p><strong>{activeTab.title}</strong> · {activeTab.blurb}</p>
       </header>
 
       <div className="settings-tabs" role="tablist" aria-label="设置分类">
@@ -2627,34 +2904,37 @@ function SettingsSection({
       )}
 
       <div className="settings-grid">
-        {activeTab.id === "display" && (
-          <>
-            {IS_MAC && (
-              <MacDesktopWidgetCard />
-            )}
-            <AgentsDisplayCard
-              widgetAgents={widgetAgents}
-              onToggleWidgetAgent={onToggleWidgetAgent}
-              onMoveWidgetAgent={onMoveWidgetAgent}
-              stripAgents={stripAgents}
-              onToggleStripAgent={onToggleStripAgent}
-              onMoveStripAgent={onMoveStripAgent}
-            />
-            <AppearanceCard
-              theme={theme}
-              onThemeChange={onThemeChange}
-              glassAlpha={glassAlpha}
-              onGlassAlpha={onGlassAlpha}
-              uiScale={uiScale}
-              onUiScale={onUiScale}
-              stripScale={stripScale}
-              onStripScale={onStripScale}
-            />
-          </>
+        {activeTab.id === "appearance" && (
+          <AppearanceCard
+            theme={theme}
+            onThemeChange={onThemeChange}
+            glassAlpha={glassAlpha}
+            onGlassAlpha={onGlassAlpha}
+            glassTint={glassTint}
+            onGlassTint={onGlassTint}
+            glassInk={glassInk}
+            onGlassInk={onGlassInk}
+            uiScale={uiScale}
+            onUiScale={onUiScale}
+            stripScale={stripScale}
+            onStripScale={onStripScale}
+          />
         )}
 
+        {activeTab.id === "display" && (
+          <AgentsDisplayCard
+            widgetAgents={widgetAgents}
+            onToggleWidgetAgent={onToggleWidgetAgent}
+            onMoveWidgetAgent={onMoveWidgetAgent}
+            stripAgents={stripAgents}
+            onToggleStripAgent={onToggleStripAgent}
+            onMoveStripAgent={onMoveStripAgent}
+            detectedAgents={detectedAgents}
+          />
+        )}
         {activeTab.id === "sources" && (
           <>
+            <CustomSourcesCard onSnapshotRefresh={onSnapshotRefresh} />
             <ClaudeHookCard onSnapshotRefresh={onSnapshotRefresh} />
             <QoderQuotaCard onSnapshotRefresh={onSnapshotRefresh} />
           </>
@@ -2703,6 +2983,12 @@ function SettingsSection({
                 </p>
               )}
 
+              {/* 读取未回来时这张卡片是空的，数据一到就整块长出来，看着像界面
+                  抖了一下。先占住位置并说明在读什么。 */}
+              {!settings && !feedback && (
+                <p className="settings-muted" role="status">读取同步设置…</p>
+              )}
+
               {settings && !settings.demo && (
                 <dl className="settings-status">
                   <div>
@@ -2731,9 +3017,48 @@ function SettingsSection({
                     <ul className="settings-device-list">
                       {settings.devices.map((device) => (
                         <li key={device.id}>
-                          <strong>{device.label}</strong>
-                          <span>{device.id}</span>
-                          <small>{device.events} 条事件 · 导出于 {formatSyncTime(device.exportedAtMs)}</small>
+                          <div className="settings-device-head">
+                            <div className="settings-device-info">
+                              <strong>{device.label}</strong>
+                              <span>{device.id}</span>
+                              <small>{device.events} 条事件 · 导出于 {formatSyncTime(device.exportedAtMs)}</small>
+                            </div>
+                            {removingDeviceId !== device.id && (
+                              <button
+                                type="button"
+                                className="ledger-button ledger-button--secondary settings-device-remove"
+                                disabled={busy || settings?.demo}
+                                onClick={() => setRemovingDeviceId(device.id)}
+                              >
+                                <Trash size={15} weight="light" aria-hidden="true" />
+                                删除
+                              </button>
+                            )}
+                          </div>
+                          {removingDeviceId === device.id && (
+                            <div className="ledger-confirmation" role="group" aria-labelledby={`device-confirm-title-${device.id}`}>
+                              <strong id={`device-confirm-title-${device.id}`}>删除该设备？</strong>
+                              <p>将移除它的同步事件与共享文件夹中的导出文件。若该设备仍在线，会在下次同步后重新出现。</p>
+                              <div className="ledger-confirm-actions">
+                                <button
+                                  type="button"
+                                  className="ledger-button ledger-button--secondary"
+                                  disabled={busy}
+                                  onClick={() => setRemovingDeviceId(null)}
+                                >
+                                  取消
+                                </button>
+                                <button
+                                  type="button"
+                                  className="ledger-button ledger-button--primary"
+                                  disabled={busy}
+                                  onClick={() => removeDevice(device.id)}
+                                >
+                                  {busy ? "正在删除…" : "确认删除"}
+                                </button>
+                              </div>
+                            </div>
+                          )}
                         </li>
                       ))}
                     </ul>
@@ -2746,6 +3071,7 @@ function SettingsSection({
               onAutoUpdateCheck={onAutoUpdateCheck}
               availableUpdate={availableUpdate}
             />
+            <AboutCard />
           </>
         )}
       </div>
@@ -2770,13 +3096,15 @@ function csvEscape(value) {
 
 // 导出只含账本本就存储的统计字段，与隐私边界一致。
 function buildSessionsCsv(sessions) {
-  const header = ["date", "start", "end", "agent", "model", "tokens", "input_uncached", "cache_read", "cache_write", "output", "estimated_usd", "events", "session_id"];
+  const header = ["date", "start", "end", "agent", "model", "project", "project_path", "tokens", "input_uncached", "cache_read", "cache_write", "output", "estimated_usd", "events", "session_id"];
   const rows = sessions.map((session) => [
     new Date(session.endMs).toLocaleDateString("sv-SE"),
     new Date(session.startMs).toLocaleTimeString("zh-CN", { hour12: false }),
     new Date(session.endMs).toLocaleTimeString("zh-CN", { hour12: false }),
     session.agent,
     session.model || "",
+    session.projectLabel || "",
+    session.project || "",
     session.tokens,
     session.inputUncached,
     session.cacheRead,
@@ -2790,9 +3118,7 @@ function buildSessionsCsv(sessions) {
   return `﻿${[header, ...rows].map((row) => row.map(csvEscape).join(",")).join("\r\n")}`;
 }
 
-async function exportSessionsCsv(sessions) {
-  const csv = buildSessionsCsv(sessions);
-  const fileName = `metrik-sessions-${new Date().toLocaleDateString("sv-SE")}.csv`;
+async function saveCsv(fileName, csv) {
   // 桌面端：blob 下载在 Tauri WebView 里不生效，改走后端写入下载目录。
   const savedPath = await exportCsvFile(fileName, csv);
   if (savedPath) return savedPath;
@@ -2808,17 +3134,285 @@ async function exportSessionsCsv(sessions) {
   return null;
 }
 
-function UsageSection({ sessionsState, period }) {
+async function exportSessionsCsv(sessions) {
+  return saveCsv(
+    `metrik-sessions-${new Date().toLocaleDateString("sv-SE")}.csv`,
+    buildSessionsCsv(sessions),
+  );
+}
+
+// 会话行与项目行的项目名只显示目录名，完整路径放 title。
+function projectLabel(path) {
+  const parts = String(path).split("/").filter(Boolean);
+  return parts[parts.length - 1] || path;
+}
+
+// 添加项目：登记项目根、隐藏目录，列出已有规则并可移除。
+function ProjectRulesCard({ rules, busy, onAddRoot, onRemoveRoot, onRemoveHidden, onClose }) {
+  const [draft, setDraft] = useState("");
+  const submit = () => {
+    const value = draft.trim();
+    if (!value) return;
+    onAddRoot(value);
+    setDraft("");
+  };
+  return (
+    <section className="rules-card" aria-label="添加项目">
+      <header className="rules-card-head">
+        <h2>添加项目</h2>
+        <button type="button" className="rules-close" onClick={onClose} aria-label="收起添加项目">
+          <X size={14} weight="bold" aria-hidden="true" />
+        </button>
+      </header>
+      <p>
+        决定哪些目录算作一个项目。默认按 git 仓库根归并，家目录、下载与系统临时目录不列为项目。
+        账本始终记录事件发生时的原始目录，这里只改变展示时的归类，移除后即恢复。
+      </p>
+      <div className="rules-add">
+        <input
+          value={draft}
+          placeholder="登记项目根目录，其下用量归并为一个项目"
+          spellCheck={false}
+          onChange={(event) => setDraft(event.target.value)}
+          onKeyDown={(event) => { if (event.key === "Enter") submit(); }}
+          aria-label="项目根目录路径"
+        />
+        <button type="button" className="ledger-button" disabled={!draft.trim() || busy} onClick={submit}>
+          登记
+        </button>
+      </div>
+      {!rules ? (
+        <p className="settings-muted">正在读取规则…</p>
+      ) : (
+        <>
+          {rules.roots.length > 0 && (
+            <div className="rules-group">
+              <h3>项目根 · 子目录归并到这里</h3>
+              <ul>
+                {rules.roots.map((path) => (
+                  <li key={path}>
+                    <PushPinSimple size={12} weight="fill" aria-hidden="true" />
+                    <span title={path}>{path}</span>
+                    <button type="button" disabled={busy} onClick={() => onRemoveRoot(path)} aria-label={`移除项目根 ${path}`}>
+                      <X size={12} weight="bold" aria-hidden="true" />
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {rules.hidden.length > 0 && (
+            <div className="rules-group">
+              <h3>已隐藏 · 不作为项目展示</h3>
+              <ul>
+                {rules.hidden.map((path) => (
+                  <li key={path}>
+                    <EyeSlash size={12} weight="regular" aria-hidden="true" />
+                    <span title={path}>{path}</span>
+                    <button type="button" disabled={busy} onClick={() => onRemoveHidden(path)} aria-label={`取消隐藏 ${path}`}>
+                      <X size={12} weight="bold" aria-hidden="true" />
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {rules.roots.length === 0 && rules.hidden.length === 0 && (
+            <p className="settings-muted">还没有手动归类。在项目行上点图钉或眼睛，或在上方登记目录。</p>
+          )}
+        </>
+      )}
+    </section>
+  );
+}
+
+const PROJECT_PREVIEW_COUNT = 8;
+
+// 项目分类色：经 CVD/对比度校验的固定顺序（styles.css 里的 --viz-1..6），
+// 按周期内 token 排名前 6 依序分配，之后统一入"其他"灰。颜色跟随项目路径，
+// Agent 筛选不重新分配，避免筛选后颜色跳变。
+const PROJECT_COLOR_COUNT = 6;
+
+function projectColorMap(projects) {
+  const map = new Map();
+  projects.slice(0, PROJECT_COLOR_COUNT).forEach((project, index) => {
+    map.set(project.path, `var(--viz-${index + 1})`);
+  });
+  return map;
+}
+
+// 项目总表导出：与账本口径一致的统计字段。
+function buildProjectsCsv(projects) {
+  const header = ["project", "path", "agents", "model", "tokens", "input_uncached", "cache_read", "cache_write", "output", "estimated_usd", "sessions", "events", "last_used"];
+  const rows = projects.map((project) => [
+    project.label,
+    project.path,
+    project.agents.join(" "),
+    project.model || "",
+    project.tokens,
+    project.inputUncached,
+    project.cacheRead,
+    project.cacheWrite,
+    project.output,
+    project.usd == null ? "" : project.usd.toFixed(4),
+    project.sessionCount,
+    project.eventCount,
+    new Date(project.lastMs).toLocaleString("sv-SE"),
+  ]);
+  return `﻿${[header, ...rows].map((row) => row.map(csvEscape).join(",")).join("\r\n")}`;
+}
+
+async function exportProjectsCsv(projects) {
+  return saveCsv(
+    `metrik-projects-${new Date().toLocaleDateString("sv-SE")}.csv`,
+    buildProjectsCsv(projects),
+  );
+}
+
+// 项目占比环形图：与报告页 Agent 占比同一视觉语言；段间留白 2.5，
+// 点击分段进入对应项目详情。"其他"聚合段不可点。
+function ProjectShareDonut({ projects, colorByPath, onOpen }) {
+  const total = projects.reduce((sum, project) => sum + project.tokens, 0) || 1;
+  const top = projects.slice(0, PROJECT_COLOR_COUNT);
+  const otherTokens = projects.slice(PROJECT_COLOR_COUNT).reduce((sum, project) => sum + project.tokens, 0);
+  const segments = [
+    ...top.map((project) => ({
+      key: project.path,
+      label: project.label,
+      tokens: project.tokens,
+      color: colorByPath.get(project.path),
+      selectable: true,
+    })),
+    ...(otherTokens > 0
+      ? [{ key: "__other", label: "其他", tokens: otherTokens, color: "var(--viz-other)", selectable: false }]
+      : []),
+  ];
+  const radius = 74;
+  const circumference = 2 * Math.PI * radius;
+  let offset = 0;
+  return (
+    <svg className="project-donut" viewBox="0 0 200 200" role="img" aria-label="项目用量占比环形图">
+      {segments.map((segment) => {
+        const dash = (segment.tokens / total) * circumference;
+        const rendered = (
+          <circle
+            key={segment.key}
+            cx="100"
+            cy="100"
+            r={radius}
+            fill="none"
+            stroke={segment.color}
+            strokeWidth="21"
+            strokeDasharray={`${Math.max(0, dash - 2.5)} ${circumference - Math.max(0, dash - 2.5)}`}
+            strokeDashoffset={-offset}
+            transform="rotate(-90 100 100)"
+            className={segment.selectable ? "project-donut-segment" : undefined}
+            onClick={segment.selectable ? () => onOpen(segment.key) : undefined}
+          >
+            <title>{`${segment.label} · ${compactTokens(segment.tokens)} · ${((segment.tokens / total) * 100).toFixed(1)}%`}</title>
+          </circle>
+        );
+        offset += dash;
+        return rendered;
+      })}
+      {/* 两行合起来在环心居中：基线放 96/114 时墨迹只到 77.4~114（数字与
+          "tokens" 都没有下伸部），视觉中心落在 95.7，整体偏高约 4px。 */}
+      <text x="100" y="100" textAnchor="middle" className="donut-total">{compactTokens(total)}</text>
+      <text x="100" y="118" textAnchor="middle" className="donut-caption">tokens</text>
+    </svg>
+  );
+}
+
+// 用量页：项目列表 → 点击进入单个项目的会话明细（层级下钻，不再同屏堆两个列表）。
+// detail 为 null 时是项目列表；{ type:"project", path } 是项目详情；
+// { type:"unattributed" } 是读不到目录的会话。
+function UsageSection({ projectsState, sessionsState, period, onRulesChanged }) {
   const [agentFilter, setAgentFilter] = useState("all");
   const [modelFilter, setModelFilter] = useState("all");
+  const [detail, setDetail] = useState(null);
+  const [showAllProjects, setShowAllProjects] = useState(false);
   const [copiedId, setCopiedId] = useState(null);
-  const [exportNote, setExportNote] = useState(null);
-  const handleExport = async (sessions) => {
+  const [note, setNote] = useState(null);
+  const [rulesOpen, setRulesOpen] = useState(false);
+  const [rules, setRules] = useState(null);
+  const [rulesBusy, setRulesBusy] = useState(false);
+
+  useEffect(() => {
+    if (rulesOpen && rules == null) {
+      getProjectRules().then((loaded) => setRules(loaded.loadError ? { roots: [], hidden: [] } : loaded));
+    }
+  }, [rulesOpen, rules]);
+
+  const projects = projectsState?.data;
+  const sessionsData = sessionsState?.data;
+  const colorByPath = useMemo(
+    () => projectColorMap(projects?.projects || []),
+    [projects],
+  );
+
+  // 正在看的项目因规则变更或换周期消失时，退回列表。
+  useEffect(() => {
+    if (detail?.type !== "project" || !projects || projects.loadError) return;
+    if (!projects.projects.some((project) => project.path === detail.path)) {
+      setDetail(null);
+    }
+  }, [detail, projects]);
+
+  const openDetail = (next) => {
+    setModelFilter("all");
+    setNote(null);
+    setDetail(next);
+  };
+
+  const applyRules = async (next) => {
+    setRulesBusy(true);
     try {
-      const savedPath = await exportSessionsCsv(sessions);
-      setExportNote(savedPath ? `已导出到 ${savedPath}` : "已开始下载");
+      const saved = await setProjectRules(next);
+      setRules(saved);
+      onRulesChanged();
     } catch (error) {
-      setExportNote(`导出失败：${error}`);
+      setNote({ text: `规则保存失败：${error}` });
+    } finally {
+      setRulesBusy(false);
+    }
+  };
+  const currentRules = async () => {
+    if (rules) return rules;
+    const loaded = await getProjectRules();
+    return loaded.loadError ? { roots: [], hidden: [] } : loaded;
+  };
+  const pinProject = async (path) => {
+    const current = await currentRules();
+    await applyRules({ ...current, roots: [...current.roots, path] });
+  };
+  const removeRoot = async (path) => {
+    const current = await currentRules();
+    await applyRules({ ...current, roots: current.roots.filter((item) => item !== path) });
+  };
+  const removeHidden = async (path) => {
+    const current = await currentRules();
+    await applyRules({ ...current, hidden: current.hidden.filter((item) => item !== path) });
+  };
+  // 登记与取消登记同一颗按钮：图钉状态可逆，按钮也不会中途从 DOM 消失。
+  const togglePin = (project) => (
+    project.pinned ? removeRoot(project.path) : pinProject(project.path)
+  );
+  // 隐藏会让这一行消失，就地留一个撤销入口；规则面板仍是长期的恢复位置。
+  const hideProject = async (project) => {
+    const current = await currentRules();
+    await applyRules({ ...current, hidden: [...current.hidden, project.path] });
+    setNote({
+      text: `已隐藏 ${project.label}`,
+      undo: () => removeHidden(project.path),
+    });
+  };
+
+  const noteExport = async (task) => {
+    try {
+      const savedPath = await task();
+      setNote({ text: savedPath ? `已导出到 ${savedPath}` : "已开始下载" });
+    } catch (error) {
+      setNote({ text: `导出失败：${error}` });
     }
   };
   const copySessionId = (sessionId) => {
@@ -2828,55 +3422,181 @@ function UsageSection({ sessionsState, period }) {
     }).catch(() => {});
   };
 
-  if (!sessionsState || sessionsState.status === "loading") {
+  const loading = !projectsState || projectsState.status === "loading"
+    || !sessionsState || sessionsState.status === "loading";
+  if (loading) {
     return (
       <main className="usage-section" aria-busy="true">
         <header className="settings-header">
-          <span className="section-kicker">用量</span>
-          <h1>正在读取会话明细</h1>
-          <p>只读取已索引的账本，不触发新的日志扫描。</p>
+          <h1>用量</h1>
+          <p>正在读取用量明细。只读取已索引的账本，不触发新的日志扫描。</p>
         </header>
       </main>
     );
   }
-  const data = sessionsState.data;
-  if (!data || data.loadError) {
+  if (!projects || projects.loadError || !sessionsData || sessionsData.loadError) {
     return (
       <main className="usage-section">
         <header className="settings-header">
-          <span className="section-kicker">用量</span>
-          <h1>会话明细暂不可用</h1>
-          <p>本地账本读取失败；没有用演示数字替代。请稍后重试。</p>
+          <h1>用量</h1>
+          <p>本地账本读取失败，明细暂不可用；没有用演示数字替代。请稍后重试。</p>
         </header>
       </main>
     );
   }
 
-  const models = [...new Set(data.sessions.map((session) => session.model).filter(Boolean))];
-  const filtered = data.sessions.filter((session) =>
-    (agentFilter === "all" || session.agent === agentFilter)
-    && (modelFilter === "all" || session.model === modelFilter));
-  const groups = [];
-  filtered.forEach((session) => {
-    const label = sessionDayLabel(session.endMs);
-    const group = groups[groups.length - 1];
-    if (group && group.label === label) group.sessions.push(session);
-    else groups.push({ label, sessions: [session] });
-  });
   const timeRange = (session) => {
     const fmt = (ms) => new Date(ms).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false });
     return `${fmt(session.startMs)}–${fmt(session.endMs)}`;
   };
 
+  const sessionGroups = (sessions) => {
+    const groups = [];
+    sessions.forEach((session) => {
+      const label = sessionDayLabel(session.endMs);
+      const group = groups[groups.length - 1];
+      if (group && group.label === label) group.sessions.push(session);
+      else groups.push({ label, sessions: [session] });
+    });
+    return groups;
+  };
+
+  const renderSessionRows = (groups) => groups.map((group) => (
+    <section className="session-group" key={group.label} aria-label={group.label}>
+      <h3>{group.label}</h3>
+      {group.sessions.map((session) => {
+        const meta = AGENT_META[session.agent];
+        return (
+          <article className="session-row" key={`${session.agent}-${session.sessionId}`}>
+            <i className="model-dot" style={{ backgroundColor: meta?.accent || "#74767a" }} aria-hidden="true" />
+            <div className="session-copy">
+              <strong>
+                {timeRange(session)} · {meta?.label || session.agent}
+                {session.model ? ` · ${session.model}` : ""}
+              </strong>
+              <small>
+                {compactTokens(session.tokens)} tokens
+                {session.usd != null ? ` · ≈${formatUsd(session.usd)}` : " · 未计价"}
+                {` · ${session.eventCount} 次记录`}
+                {` · 缓存读 ${session.tokens ? Math.round((session.cacheRead / session.tokens) * 100) : 0}%`}
+              </small>
+            </div>
+            <button
+              type="button"
+              className={`session-id-chip ${copiedId === session.sessionId ? "session-id-chip--copied" : ""}`}
+              onClick={() => copySessionId(session.sessionId)}
+              title={`复制会话 ID（可用于 resume 等操作）
+${session.sessionId}`}
+            >
+              {copiedId === session.sessionId
+                ? <Check size={12} weight="bold" aria-hidden="true" />
+                : <Copy size={12} weight="light" aria-hidden="true" />}
+              <span>{session.sessionId.length > 14 ? `${session.sessionId.slice(0, 12)}…` : session.sessionId}</span>
+            </button>
+            <em>{compactTokens(session.tokens)}</em>
+          </article>
+        );
+      })}
+    </section>
+  ));
+
+  // ── 项目详情视图 ──
+  if (detail) {
+    const detailMeta = detail.type === "project"
+      ? projects.projects.find((project) => project.path === detail.path)
+      : null;
+    const scoped = sessionsData.sessions.filter((session) => (
+      detail.type === "project" ? session.project === detail.path : !session.project
+    ));
+    const models = [...new Set(scoped.map((session) => session.model).filter(Boolean))];
+    const filtered = scoped.filter((session) => modelFilter === "all" || session.model === modelFilter);
+    const groups = sessionGroups(filtered);
+    const title = detail.type === "project" ? (detailMeta?.label || projectLabel(detail.path)) : "未归类会话";
+
+    return (
+      <main className="usage-section" aria-labelledby="usage-title">
+        <header className="settings-header">
+          <button type="button" className="detail-back" onClick={() => openDetail(null)}>
+            <CaretLeft size={12} weight="bold" aria-hidden="true" />
+            项目列表
+          </button>
+          <h1 id="usage-title">
+            {detail.type === "project" && (
+              <i
+                className="project-title-dot"
+                style={{ backgroundColor: colorByPath.get(detail.path) || "var(--viz-other)" }}
+                aria-hidden="true"
+              />
+            )}
+            {title}
+          </h1>
+          <p>
+            {detail.type === "project" ? (
+              <>
+                {detail.path}
+                {detailMeta ? ` · ${detailMeta.agents.map((id) => AGENT_META[id]?.label || id).join("、")}` : ""}
+                {` · ${scoped.length} 个会话`}
+                {detailMeta?.usd != null ? ` · 估算 ≈${formatUsd(detailMeta.usd)}` : ""}
+              </>
+            ) : (
+              <>这些会话的来源不带工作目录（如 Antigravity），无法归入项目。{` ${scoped.length} 个会话。`}</>
+            )}
+          </p>
+        </header>
+
+        <div className="usage-toolbar">
+          <select value={modelFilter} onChange={(event) => setModelFilter(event.target.value)} aria-label="按模型筛选">
+            <option value="all">全部模型</option>
+            {models.map((model) => <option key={model} value={model}>{model}</option>)}
+          </select>
+          <button
+            type="button"
+            className="ledger-button usage-toolbar-end"
+            disabled={!filtered.length}
+            onClick={() => noteExport(() => exportSessionsCsv(filtered))}
+          >
+            导出会话 CSV（{filtered.length}）
+          </button>
+        </div>
+
+        {note && (
+        <p className="usage-note" role="status">
+          {note.text}
+          {note.undo && (
+            <button
+              type="button"
+              disabled={rulesBusy}
+              onClick={() => { setNote(null); note.undo(); }}
+            >
+              撤销
+            </button>
+          )}
+        </p>
+      )}
+        {groups.length === 0 && <p className="settings-muted">本周期内没有可显示的会话。</p>}
+        {groups.length > 0 && <div className="report-card session-board">{renderSessionRows(groups)}</div>}
+      </main>
+    );
+  }
+
+  // ── 项目列表视图 ──
+  const filteredProjects = projects.projects.filter((project) =>
+    agentFilter === "all" || project.agents.includes(agentFilter));
+  const visibleProjects = showAllProjects
+    ? filteredProjects
+    : filteredProjects.slice(0, PROJECT_PREVIEW_COUNT);
+  const maxTokens = filteredProjects.reduce((max, project) => Math.max(max, project.tokens), 0);
+  const unattributedLabel = (projects.unattributedAgents || [])
+    .map((id) => AGENT_META[id]?.label || id)
+    .join("、");
+
   return (
     <main className="usage-section" aria-labelledby="usage-title">
       <header className="settings-header">
-        <span className="section-kicker">用量</span>
-        <h1 id="usage-title">会话明细</h1>
+        <h1 id="usage-title">用量</h1>
         <p>
-          {PERIODS.find((item) => item.id === period)?.label}内 {data.totalSessions} 个会话
-          {data.truncated ? "（仅显示最近 300 个）" : ""}。成本为按公开 API 价格的估算，非账单。
-          {data.isDemo ? " 当前为浏览器演示数据。" : ""}
+          <strong>项目</strong> · {PERIODS.find((item) => item.id === period)?.label}内 {projects.totalProjects} 个项目、{sessionsData.totalSessions} 个会话，点击项目查看会话明细。成本为按公开 API 价格的估算，非账单。
+          {sessionsData.isDemo ? " 当前为浏览器演示数据。" : ""}
         </p>
       </header>
 
@@ -2885,58 +3605,182 @@ function UsageSection({ sessionsState, period }) {
           <option value="all">全部 Agent</option>
           {AGENT_ORDER.map((id) => <option key={id} value={id}>{AGENT_META[id].label}</option>)}
         </select>
-        <select value={modelFilter} onChange={(event) => setModelFilter(event.target.value)} aria-label="按模型筛选">
-          <option value="all">全部模型</option>
-          {models.map((model) => <option key={model} value={model}>{model}</option>)}
-        </select>
-        <button type="button" className="ledger-button" disabled={!filtered.length} onClick={() => handleExport(filtered)}>
-          导出 CSV（{filtered.length}）
+        <button
+          type="button"
+          className={`ledger-button rules-toggle ${rulesOpen ? "rules-toggle--open" : ""}`}
+          aria-expanded={rulesOpen}
+          onClick={() => setRulesOpen((open) => !open)}
+        >
+          <FolderSimple size={13} weight="bold" aria-hidden="true" />
+          添加项目
+        </button>
+        <button
+          type="button"
+          className="ledger-button"
+          disabled={!filteredProjects.length}
+          onClick={() => noteExport(() => exportProjectsCsv(filteredProjects))}
+        >
+          导出 CSV（{filteredProjects.length}）
         </button>
       </div>
 
-      {exportNote && <p className="settings-muted" role="status">{exportNote}</p>}
-
-      {groups.length === 0 && (
-        <p className="settings-muted">当前筛选条件下没有会话。</p>
+      {note && (
+        <p className="usage-note" role="status">
+          {note.text}
+          {note.undo && (
+            <button
+              type="button"
+              disabled={rulesBusy}
+              onClick={() => { setNote(null); note.undo(); }}
+            >
+              撤销
+            </button>
+          )}
+        </p>
       )}
 
-      {groups.map((group) => (
-        <section className="session-group" key={group.label} aria-label={group.label}>
-          <h2>{group.label}</h2>
-          {group.sessions.map((session) => {
-            const meta = AGENT_META[session.agent];
-            return (
-              <article className="session-row" key={`${session.agent}-${session.sessionId}`}>
-                <i className="model-dot" style={{ backgroundColor: meta?.accent || "#74767a" }} aria-hidden="true" />
-                <div className="session-copy">
-                  <strong>
-                    {timeRange(session)} · {meta?.label || session.agent}
-                    {session.model ? ` · ${session.model}` : ""}
-                  </strong>
-                  <small>
-                    {compactTokens(session.tokens)} tokens
-                    {session.usd != null ? ` · ≈${formatUsd(session.usd)}` : " · 未计价"}
-                    {` · ${session.eventCount} 次记录`}
-                    {` · 缓存读 ${session.tokens ? Math.round((session.cacheRead / session.tokens) * 100) : 0}%`}
-                  </small>
-                </div>
-                <button
-                  type="button"
-                  className={`session-id-chip ${copiedId === session.sessionId ? "session-id-chip--copied" : ""}`}
-                  onClick={() => copySessionId(session.sessionId)}
-                  title={`复制会话 ID（可用于 resume 等操作）\n${session.sessionId}`}
-                >
-                  {copiedId === session.sessionId
-                    ? <Check size={12} weight="bold" aria-hidden="true" />
-                    : <Copy size={12} weight="light" aria-hidden="true" />}
-                  <span>{session.sessionId.length > 14 ? `${session.sessionId.slice(0, 12)}…` : session.sessionId}</span>
-                </button>
-                <em>{compactTokens(session.tokens)}</em>
-              </article>
-            );
-          })}
-        </section>
-      ))}
+      {rulesOpen && (
+        <ProjectRulesCard
+          rules={rules}
+          busy={rulesBusy}
+          onAddRoot={pinProject}
+          onRemoveRoot={removeRoot}
+          onRemoveHidden={removeHidden}
+          onClose={() => setRulesOpen(false)}
+        />
+      )}
+
+      <section className="report-card project-board" aria-label="项目汇总">
+        {projects.projects.length > 0 && (
+          <div className="project-overview">
+            <ProjectShareDonut
+              projects={projects.projects}
+              colorByPath={colorByPath}
+              onOpen={(path) => openDetail({ type: "project", path })}
+            />
+            <div className="project-overview-figures">
+              {/* token 总量在环心；这里放成本这另一维度，同一个数不出现两次。 */}
+              {(() => {
+                const priced = projects.projects.filter((project) => project.usd != null);
+                if (!priced.length) {
+                  return (
+                    <>
+                      <strong>{projects.totalProjects}</strong>
+                      <span>个项目 · 未计价</span>
+                    </>
+                  );
+                }
+                return (
+                  <>
+                    <strong>≈{formatUsd(priced.reduce((sum, project) => sum + project.usd, 0))}</strong>
+                    <span>{projects.totalProjects} 个项目 · 估算成本</span>
+                  </>
+                );
+              })()}
+              {(projects.unattributedTokens > 0 || projects.hiddenTokens > 0) && (
+                <small>
+                  {projects.unattributedTokens > 0 && (
+                    <button type="button" onClick={() => openDetail({ type: "unattributed" })}>
+                      读不到目录 {compactTokens(projects.unattributedTokens)}{unattributedLabel ? `（${unattributedLabel}）` : ""}
+                    </button>
+                  )}
+                  {projects.hiddenTokens > 0 && (
+                    // 这个数把用户隐藏的与内置排除（家目录、下载、系统临时目录）
+                    // 算在一起，所以不能说"已隐藏"——用户把自己的规则删干净了，
+                    // 剩下的内置部分仍会让它显示，读起来像没删掉。
+                    <button type="button" onClick={() => setRulesOpen(true)}>
+                      未计入项目 {compactTokens(projects.hiddenTokens)}
+                    </button>
+                  )}
+                </small>
+              )}
+            </div>
+          </div>
+        )}
+        {visibleProjects.length === 0 && (
+          <p className="settings-muted">
+            {projects.totalProjects === 0
+              ? "本周期内没有带项目归属的用量。"
+              : "当前筛选条件下没有项目。"}
+          </p>
+        )}
+        {visibleProjects.map((project) => (
+          <article
+            className="project-row"
+            key={project.path}
+            onClick={(event) => {
+              if (event.target.closest?.(".project-actions")) return;
+              openDetail({ type: "project", path: project.path });
+            }}
+            role="button"
+            tabIndex={0}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" || event.key === " ") {
+                event.preventDefault();
+                openDetail({ type: "project", path: project.path });
+              }
+            }}
+          >
+            <div className="session-copy">
+              <strong title={project.path}>{project.label}</strong>
+              <small>
+                {project.agents.map((id) => AGENT_META[id]?.label || id).join(" · ")}
+                {project.model ? ` · ${modelDisplayName(project.model)}` : ""}
+                {` · ${project.sessionCount} 个会话`}
+                {project.usd != null ? ` · ≈${formatUsd(project.usd)}` : " · 未计价"}
+              </small>
+              <span className="project-bar" aria-hidden="true">
+                <i
+                  style={{
+                    width: `${maxTokens ? Math.max(2, (project.tokens / maxTokens) * 100) : 0}%`,
+                    background: colorByPath.get(project.path),
+                  }}
+                />
+              </span>
+            </div>
+            {/* 操作区整体阻断冒泡：按钮若在点击途中卸载，mouseup 会落到行上误触发进入详情。 */}
+            <div
+              className={`project-actions ${project.pinned ? "project-actions--pinned" : ""}`}
+              onClick={(event) => event.stopPropagation()}
+              onMouseDown={(event) => event.stopPropagation()}
+            >
+              <button
+                type="button"
+                className={project.pinned ? "is-active" : ""}
+                disabled={rulesBusy}
+                aria-pressed={project.pinned}
+                title={project.pinned
+                  ? `取消登记：${project.path} 下的子目录恢复各自成行`
+                  : `登记为项目根：${project.path} 下的子目录都归并到这一行`}
+                aria-label={project.pinned
+                  ? `取消登记项目根 ${project.label}`
+                  : `把 ${project.label} 登记为项目根`}
+                onClick={() => togglePin(project)}
+              >
+                <PushPinSimple size={13} weight={project.pinned ? "fill" : "regular"} aria-hidden="true" />
+              </button>
+              <button
+                type="button"
+                disabled={rulesBusy}
+                title={`隐藏 ${project.path}：其用量不再作为项目展示，可在项目归类里恢复`}
+                aria-label={`隐藏项目 ${project.label}`}
+                onClick={() => hideProject(project)}
+              >
+                <EyeSlash size={13} weight="regular" aria-hidden="true" />
+              </button>
+            </div>
+            <span className="project-open" aria-hidden="true">
+              <CaretRight size={13} weight="bold" />
+            </span>
+            <em>{compactTokens(project.tokens)}</em>
+          </article>
+        ))}
+        {filteredProjects.length > PROJECT_PREVIEW_COUNT && (
+          <button type="button" className="project-expand" onClick={() => setShowAllProjects((value) => !value)}>
+            {showAllProjects ? "收起" : `显示全部 ${filteredProjects.length} 个项目`}
+          </button>
+        )}
+      </section>
     </main>
   );
 }
@@ -3050,12 +3894,29 @@ function smoothPath(points) {
 }
 
 function ReportTrendChart({ weeks }) {
+  // viewBox 宽度跟随容器实测宽度，缩放系数恒为 1：图表始终占满整行，
+  // 刻度字号也不再随窗口忽大忽小。固定 620 时，宽窗口下按高度约束缩放，
+  // 只画得出 720px，左右各空几百像素。
+  const hostRef = useRef(null);
+  const [width, setWidth] = useState(620);
+  useLayoutEffect(() => {
+    const host = hostRef.current;
+    if (!host) return undefined;
+    const apply = (value) => setWidth(Math.max(420, Math.round(value)));
+    apply(host.clientWidth);
+    const observer = new ResizeObserver((entries) => {
+      const rect = entries[0]?.contentRect;
+      if (rect) apply(rect.width);
+    });
+    observer.observe(host);
+    return () => observer.disconnect();
+  }, []);
+
   const agents = AGENT_ORDER.filter((id) => weeks.some((week) => (week.byAgent[id] || 0) > 0));
   if (!agents.length) {
-    return <p className="settings-muted">所选时间段内没有已索引的用量。</p>;
+    return <p className="settings-muted" ref={hostRef}>所选时间段内没有已索引的用量。</p>;
   }
   const max = Math.max(1, ...weeks.flatMap((week) => agents.map((id) => week.byAgent[id] || 0)));
-  const width = 620;
   const height = 210;
   const pad = { top: 12, right: 8, bottom: 22, left: 8 };
   const x = (index) => pad.left + (index / Math.max(1, weeks.length - 1)) * (width - pad.left - pad.right);
@@ -3067,7 +3928,7 @@ function ReportTrendChart({ weeks }) {
   const gridValues = [max / 2, max];
 
   return (
-    <div>
+    <div ref={hostRef}>
       <svg
         className="report-trend"
         viewBox={`0 0 ${width} ${height}`}
@@ -3156,8 +4017,9 @@ function ReportShareDonut({ agents, totalTokens, weeksCount }) {
           offset += dash;
           return segment;
         })}
-        <text x="100" y="96" textAnchor="middle" className="donut-total">{compactTokens(totalTokens)}</text>
-        <text x="100" y="114" textAnchor="middle" className="donut-caption">{`tokens · 近 ${weeksCount} 周`}</text>
+        {/* 基线与项目环形保持一致，见 ProjectShareDonut 的说明。 */}
+        <text x="100" y="100" textAnchor="middle" className="donut-total">{compactTokens(totalTokens)}</text>
+        <text x="100" y="118" textAnchor="middle" className="donut-caption">{`tokens · 近 ${weeksCount} 周`}</text>
       </svg>
       <ul className="comp-legend">
         {rows.map((agent) => (
@@ -3176,10 +4038,42 @@ const REPORT_VIEWS = [
   { id: "heatmap", label: "热力图" },
   { id: "trend", label: "周趋势" },
   { id: "share", label: "构成" },
+  { id: "projects", label: "项目" },
 ];
 
 // 周趋势/构成的统计时间段档位；热力图固定 26 周日历不参与。
 const REPORT_RANGE_WEEKS = [4, 8, 13, 26];
+
+// 26 周走势的迷你条图：每根竖条一个周桶，与热力图同属离散语言；
+// 最近一周实色，其余降透明度。零用量周留一根底线，不假装没有那一周。
+function Sparkline({ points, color }) {
+  const max = Math.max(...points, 1);
+  const width = 100;
+  const height = 26;
+  const step = width / points.length;
+  return (
+    <svg
+      className="project-sparkline"
+      style={color ? { color } : undefined}
+      viewBox={`0 0 ${width} ${height}`}
+      preserveAspectRatio="none"
+      aria-hidden="true"
+    >
+      {points.map((value, index) => {
+        const barHeight = value > 0 ? Math.max(1.6, (value / max) * (height - 2)) : 0.8;
+        return (
+          <rect
+            key={index}
+            x={(index * step + 0.35).toFixed(2)}
+            y={(height - barHeight).toFixed(2)}
+            width={(step - 0.7).toFixed(2)}
+            height={barHeight.toFixed(2)}
+          />
+        );
+      })}
+    </svg>
+  );
+}
 
 function ReportsSection({ report }) {
   const [view, setView] = useState("heatmap");
@@ -3195,9 +4089,8 @@ function ReportsSection({ report }) {
     return (
       <main className="reports-section" aria-busy="true">
         <header className="settings-header">
-          <span className="section-kicker">报告</span>
-          <h1>正在读取本地账本</h1>
-          <p>报告只统计已索引的数据，不触发新的日志扫描。</p>
+          <h1>报告</h1>
+          <p>正在读取本地账本。报告只统计已索引的数据，不触发新的日志扫描。</p>
         </header>
       </main>
     );
@@ -3207,9 +4100,8 @@ function ReportsSection({ report }) {
     return (
       <main className="reports-section">
         <header className="settings-header">
-          <span className="section-kicker">报告</span>
-          <h1>报告暂不可用</h1>
-          <p>本地账本读取失败；没有用演示数字替代。请稍后重试。</p>
+          <h1>报告</h1>
+          <p>本地账本读取失败，报告暂不可用；没有用演示数字替代。请稍后重试。</p>
         </header>
       </main>
     );
@@ -3247,10 +4139,9 @@ function ReportsSection({ report }) {
   return (
     <main className="reports-section" aria-labelledby="reports-title">
       <header className="settings-header">
-        <span className="section-kicker">报告</span>
-        <h1 id="reports-title">近 26 周活动</h1>
+        <h1 id="reports-title">报告</h1>
         <p>
-          只统计本地账本中已索引的数据（processed token 口径，非账单）。
+          <strong>近 26 周活动</strong> · 只统计本地账本中已索引的数据（processed token 口径，非账单）。
           {coverageStart ? `账本数据自 ${coverageStart} 起。` : ""}
           {data.isDemo ? " 当前为浏览器演示数据。" : ""}
         </p>
@@ -3277,7 +4168,7 @@ function ReportsSection({ report }) {
               </button>
             ))}
           </div>
-          {view !== "heatmap" && (
+          {view !== "heatmap" && view !== "projects" && (
             <div className="report-view-toggle" role="group" aria-label="统计时间段">
               {REPORT_RANGE_WEEKS.map((num) => (
                 <button
@@ -3295,18 +4186,51 @@ function ReportsSection({ report }) {
         </div>
         {/* 固定高度：三种视图内容高度不同，卡片会随切换忽大忽小。 */}
         <div className="report-view-body">
-        {view === "trend" ? (
+        {view === "projects" ? (
+          (data.projects || []).length > 0 ? (
+            <ul className="project-trend-list">
+              {data.projects.map((project, index) => (
+                <li key={project.path}>
+                  <span className="project-trend-name" title={project.path}>
+                    {project.label}
+                    <small>{project.activeDays} 天</small>
+                  </span>
+                  <Sparkline
+                    points={project.weekly}
+                    color={index < PROJECT_COLOR_COUNT ? `var(--viz-${index + 1})` : "var(--viz-other)"}
+                  />
+                  <em>{compactTokens(project.tokens)}</em>
+                  {project.recentDeltaPercent != null ? (
+                    <small
+                      className={project.recentDeltaPercent >= 0 ? "trend-up" : "trend-down"}
+                      title="近 7 天相对再前 7 天"
+                    >
+                      {project.recentDeltaPercent >= 0
+                        ? <ArrowUp size={10} weight="bold" aria-hidden="true" />
+                        : <ArrowDown size={10} weight="bold" aria-hidden="true" />}
+                      {Math.abs(Math.round(project.recentDeltaPercent))}%
+                    </small>
+                  ) : (
+                    <small className="trend-flat">—</small>
+                  )}
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="settings-muted">这段时间的用量还没有可归属的项目。</p>
+          )
+        ) : view === "trend" ? (
           <ReportTrendChart weeks={trendWeeks} />
         ) : view === "share" ? (
           <ReportShareDonut agents={rangeAgents} totalTokens={rangeTotal} weeksCount={trendWeeks.length} />
         ) : (
           <>
-        <div className="heatmap-months" aria-hidden="true">
+        <div className="heatmap-months" style={{ "--heatmap-weeks": weeks.length }} aria-hidden="true">
           {monthLabels.map((month) => (
             <span key={month.index} style={{ gridColumnStart: month.index + 1 }}>{month.label}</span>
           ))}
         </div>
-        <div className="heatmap" role="img" aria-label="近 26 周每日 token 用量热力图，颜色越深用量越大">
+        <div className="heatmap" style={{ "--heatmap-weeks": weeks.length }} role="img" aria-label="近 26 周每日 token 用量热力图，颜色越深用量越大">
           {weeks.map((week, weekIndex) => (
             <div className="heatmap-week" key={weekIndex}>
               {week.map((cell, dayIndex) => (
@@ -3377,6 +4301,7 @@ function ReportsSection({ report }) {
           </ul>
         </section>
       </div>
+
     </main>
   );
 }
@@ -3396,9 +4321,7 @@ function EmptySection({ section, onReturn }) {
 
 function initialWindowMode() {
   if (typeof window === "undefined") return "compact";
-  const requested = new URLSearchParams(window.location.search).get("view");
-  if (requested === "desktop-widget") return "desktop-widget";
-  if (requested === "expanded") return "expanded";
+  if (new URLSearchParams(window.location.search).get("view") === "expanded") return "expanded";
   // macOS 的零占地摘要属于菜单栏状态图标，不再把面板压成一条悬浮胶囊。
   if (IS_MAC) return "compact";
   // 上次收成胶囊条则恢复；expanded 不恢复。
@@ -3417,29 +4340,6 @@ function initialNav() {
     : "overview";
 }
 
-function initialWidgetAgents() {
-  // 浏览器视觉 QA 可显式指定布局状态；桌面构建始终只认用户设置。
-  if (!isDesktop()) {
-    const previewAgents = new URLSearchParams(window.location.search)
-      .get("agents")
-      ?.split(",");
-    if (previewAgents?.length) {
-      const valid = normalizeVisibleAgentList(previewAgents);
-      if (valid.length) return valid;
-    }
-  }
-  try {
-    const stored = JSON.parse(localStorage.getItem("metrik:widgetAgents") || "null");
-    if (Array.isArray(stored)) {
-      const valid = normalizeVisibleAgentList(stored);
-      if (valid.length) return valid;
-    }
-  } catch {
-    // 本地设置损坏时回到默认值。
-  }
-  return ["codex", "claude"];
-}
-
 export function App() {
   const [viewMode, setViewMode] = useState(initialWindowMode);
   const [period, setPeriod] = useState("today");
@@ -3450,11 +4350,9 @@ export function App() {
   const [activeNav, setActiveNav] = useState(initialNav);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [pinned, setPinned] = useState(() => localStorage.getItem("metrik:pinned") === "true");
-  // 玻璃材质默认开启；用户关闭后记住选择。
-  // macOS 上材质由系统 vibrancy 承担，恒开，没有开关按钮。
-  const [transparent, setTransparent] = useState(
-    () => IS_MAC || (localStorage.getItem("metrik:transparent") ?? "true") === "true",
-  );
+  // 卡片与胶囊固定使用玻璃材质，用户只在深色、浅色和透明三种外观间选择。
+  // expanded 仍通过 viewMode 单独关闭玻璃绘制。
+  const transparent = true;
   // 胶囊条方向：横条 / 竖条，用户手动选，记住选择。
   const [stripOrientation, setStripOrientation] = useState(() =>
     localStorage.getItem("metrik:stripOrientation") === "vertical" ? "vertical" : "horizontal",
@@ -3505,23 +4403,58 @@ export function App() {
     setNativeTheme(theme === "auto" ? null : theme);
   }, [viewMode, theme]);
   // 小插件展示哪些 Agent 由用户在设置里勾选；默认 Codex + Claude。
-  const [widgetAgents, setWidgetAgents] = useState(initialWidgetAgents);
+  const [widgetAgents, setWidgetAgents] = useState(() => {
+    try {
+      const stored = JSON.parse(localStorage.getItem("metrik:widgetAgents") || "null");
+      if (Array.isArray(stored)) {
+        const valid = normalizeVisibleAgentList(stored);
+        if (valid.length) return valid;
+      }
+    } catch {
+      // 本地设置损坏时回到默认值。
+    }
+    return ["codex", "claude"];
+  });
   // 玻璃浓度用户可调（ModernFlyouts 的做法）；仅影响玻璃模式的 CSS tint。
   const [glassAlpha, setGlassAlpha] = useState(() => {
     const stored = Number(localStorage.getItem("metrik:glassAlpha"));
-    return isGlassAlphaInRange(stored) ? stored : 0.82;
+    return Number.isFinite(stored) && stored >= 0.05 && stored <= 0.96 ? stored : 0.82;
   });
   const handleGlassAlpha = useCallback((next) => {
-    const parsed = Number(next);
-    if (!Number.isFinite(parsed)) return;
-    const value = Math.min(
-      GLASS_ALPHA_RANGE.max,
-      Math.max(GLASS_ALPHA_RANGE.min, parsed),
-    );
-    setGlassAlpha(value);
-    localStorage.setItem("metrik:glassAlpha", String(value));
-    if (IS_MAC) runWindowAction(() => broadcastMacAppearance({ glassAlpha: value }));
+    setGlassAlpha(next);
+    localStorage.setItem("metrik:glassAlpha", String(next));
+    if (IS_MAC) runWindowAction(() => broadcastMacAppearance({ glassAlpha: next }));
   }, []);
+  // 组件外观：深色 HUD / 透亮白（苹果式白 tint + 深色文字）/ 透明（不铺材质，
+  // 直接透出桌面）。用户可选，记住选择。只作用于 Windows 的卡片与胶囊；
+  // macOS 面板材质跟随系统 vibrancy，不提供此项。
+  const [glassTint, setGlassTint] = useState(() => {
+    const legacyDisabled = localStorage.getItem("metrik:transparent") === "false";
+    const value = legacyDisabled
+      ? "dark"
+      : normalizeGlassTint(localStorage.getItem("metrik:glassTint"));
+    // 旧版本把“不透明”作为第四种状态；新版迁移到默认深色，并移除旧开关。
+    if (legacyDisabled) localStorage.setItem("metrik:glassTint", value);
+    localStorage.removeItem("metrik:transparent");
+    return value;
+  });
+  const handleGlassTint = useCallback((next) => {
+    const value = normalizeGlassTint(next);
+    setGlassTint(value);
+    localStorage.setItem("metrik:glassTint", value);
+  }, []);
+  // 透明档的文字颜色，只在透明档生效；其它两档的前景由配色本身决定。
+  const [glassInk, setGlassInk] = useState(() =>
+    normalizeGlassInk(localStorage.getItem("metrik:glassInk")),
+  );
+  const handleGlassInk = useCallback((next) => {
+    const value = normalizeGlassInk(next);
+    setGlassInk(value);
+    localStorage.setItem("metrik:glassInk", value);
+  }, []);
+  // 轮转按钮要读当前配色但不该因它重建回调，用 ref 取值。
+  const glassTintRef = useRef(glassTint);
+  glassTintRef.current = glassTint;
   // 卡片/胶囊的整体缩放系数（连续值）：窗口尺寸与 WebView 原生 zoom 同乘一个系数，
   // 等比放大不会变形；expanded 有独立系数。生效在 windowClient 的形态切换里，
   // 设置页调整后下次回到卡片/胶囊时应用。
@@ -3550,9 +4483,10 @@ export function App() {
         })
         .catch(() => {}); // 静默失败：提醒是尽力而为，不打扰
     };
-    // 错开启动扫描的高峰再查；之后每天一次。
+    // 错开启动扫描的高峰再查；之后每六小时一次。间隔只在应用连续运行时计时，
+    // 而这是个常驻托盘的程序：按天计的话，一天里发布的版本它一个也看不见。
     const startTimer = window.setTimeout(check, 15000);
-    const interval = window.setInterval(check, 24 * 60 * 60 * 1000);
+    const interval = window.setInterval(check, 6 * 60 * 60 * 1000);
     return () => {
       cancelled = true;
       window.clearTimeout(startTimer);
@@ -3567,7 +4501,6 @@ export function App() {
         : [...current, agentId];
       if (!next.length) return current; // 至少保留一个
       localStorage.setItem("metrik:widgetAgents", JSON.stringify(next));
-      if (IS_MAC) runWindowAction(() => broadcastMacAppearance({ widgetAgents: next }));
       return next;
     });
   }, []);
@@ -3578,7 +4511,6 @@ export function App() {
       if (index <= 0) return current;
       [next[index - 1], next[index]] = [next[index], next[index - 1]];
       localStorage.setItem("metrik:widgetAgents", JSON.stringify(next));
-      if (IS_MAC) runWindowAction(() => broadcastMacAppearance({ widgetAgents: next }));
       return next;
     });
   }, []);
@@ -3586,6 +4518,9 @@ export function App() {
   const [rebuildState, setRebuildState] = useState({ status: "idle", message: "" });
   const [report, setReport] = useState(null);
   const [sessionsState, setSessionsState] = useState(null);
+  const [projectsState, setProjectsState] = useState(null);
+  // 规则变更后项目与会话一起重载。
+  const [usageReloadNonce, setUsageReloadNonce] = useState(0);
   const [snapshot, setSnapshot] = useState(() => getUsageSnapshot.initial("today"));
   // 历史索引还没补齐：账本尚未覆盖完整周期，数字必须显式标注为不完整。
   const indexingPending = snapshot.indexing?.pending || 0;
@@ -3663,11 +4598,8 @@ export function App() {
   }, [loadSnapshot, period, viewMode, indexing]);
 
   useEffect(() => {
-    // macOS 菜单栏面板由系统管层级和位置；独立桌面组件恢复自己的拖放位置。
-    if (IS_MAC) {
-      if (viewMode === "desktop-widget") runWindowAction(() => restoreWindowPosition("desktop-widget"));
-      return;
-    }
+    // macOS 面板由系统管层级和位置：不置顶、不恢复坐标。
+    if (IS_MAC) return;
     if (pinned) runWindowAction(() => setWindowPinned(true));
     // 小组件回到上次摆放的位置（含固定位置），坐标已不在任何屏幕上时居中。
     // strip 形态的启动定位在 strip 专属 effect 里做。
@@ -3702,23 +4634,37 @@ export function App() {
     };
   }, []);
 
-  // 玻璃只作用于小插件形态；系统明暗主题切换时重发对应 tint。
-  // 原生材质不可用（或非桌面环境）时回落到 CSS 玻璃拟态承担外观。
-  const [glassMode, setGlassMode] = useState("css");
+  // Windows 小组件终身保持创建期透明窗口，不在运行时切换 DWM backdrop。
+  // 桌面端初始直接选 alpha，避免 WebView 背景确认前闪一帧 CSS fallback。
+  const [glassMode, setGlassMode] = useState(() =>
+    resolveGlassMode({
+      enabled: transparent && viewMode !== "expanded",
+      tintStyle: glassTint,
+      nativeAvailable: false,
+      trueAlphaAvailable: isDesktop() && isWindowsPlatform(),
+    }),
+  );
   useEffect(() => {
     let cancelled = false;
     const apply = () => {
       setWindowGlass(
         transparent && viewMode !== "expanded",
-        viewMode === "desktop-widget" ? 28 : viewMode === "strip" ? 20 : 14,
-        viewMode === "desktop-widget" ? "underWindowBackground" : "hudWindow",
+        viewMode === "strip" ? 20 : 14,
+        glassTint,
       )
         .then((mode) => {
           if (!cancelled) setGlassMode(mode);
         })
         .catch((error) => {
           console.warn("Unable to update the desktop window.", error);
-          if (!cancelled) setGlassMode(transparent ? "css" : "off");
+          if (!cancelled) {
+            setGlassMode(resolveGlassMode({
+              enabled: transparent && viewMode !== "expanded",
+              tintStyle: glassTint,
+              nativeAvailable: false,
+              trueAlphaAvailable: isDesktop() && isWindowsPlatform(),
+            }));
+          }
         });
     };
     apply();
@@ -3728,23 +4674,55 @@ export function App() {
       cancelled = true;
       media?.removeEventListener?.("change", apply);
     };
-  }, [transparent, viewMode]);
+  }, [transparent, viewMode, glassTint]);
 
-  // mac 的设置页开在独立的完整视图窗口里，面板是另一个 webview 实例。
-  // WKWebView 的 storage 事件不跨窗口触发，所以面板浓度与 Agent 选择仍经
-  // Tauri 事件总线同步。真正的桌面小组件由 WidgetKit 管理，不参与这条链路。
+  // 深色档的 0.55 下限是白色文字的可读下限，不是历史补偿：白字压在 0.55 深底
+  // 上、透出亮壁纸时对比度 4.2:1，降到 0.22 就只剩 1.9:1。浅色档同理。
+  // clear 走深色文字，下限交给 CSS 里那条白霜曲线（0.38 起）。
+  const shellGlassAlpha = useMemo(() => {
+    if (glassTint === "clear") return glassAlpha;
+    const t = (glassAlpha - 0.05) / (0.96 - 0.05);
+    return 0.55 + Math.min(1, Math.max(0, t)) * (0.96 - 0.55);
+  }, [glassAlpha, glassTint]);
+  useLayoutEffect(() => {
+    document.documentElement.style.setProperty(
+      "--shell-glass-alpha",
+      String(shellGlassAlpha),
+    );
+    return () => {
+      document.documentElement.style.removeProperty("--shell-glass-alpha");
+    };
+  }, [shellGlassAlpha]);
+
+  // 圆角写成 CSS px 会被卡片和胶囊各自的 WebView 原生 zoom 放大：同样 8px，
+  // 卡片(zoom 0.95)画出 9.5 物理像素，竖胶囊(zoom 1.75)画出 17.5，成了大圆头。
+  // 折成物理像素让两种形态、任何缩放档都是同一个视觉半径。
+  useLayoutEffect(() => {
+    const apply = () => {
+      const dpr = window.devicePixelRatio || 1;
+      document.documentElement.style.setProperty(
+        "--glass-radius",
+        `${(GLASS_RADIUS_PX / dpr).toFixed(2)}px`,
+      );
+    };
+    apply();
+    window.addEventListener("resize", apply);
+    return () => {
+      window.removeEventListener("resize", apply);
+      document.documentElement.style.removeProperty("--glass-radius");
+    };
+  }, []);
+
+  // mac 的设置页开在独立的完整视图窗口里，面板是另一个 webview 实例，
+  // 拖滑杆时面板自己的 React 状态不会变。WKWebView 的 storage 事件不跨
+  // 窗口触发（每窗口独立 process pool），所以经 Tauri 事件总线把玻璃浓度
+  // 实时推进面板（改 CSS 变量当场可见）。广播也会回到发送方，处理是幂等
+  // 的。其它平台单窗口无此问题。
   useEffect(() => {
     if (!IS_MAC || !isDesktop()) return undefined;
     const unlistenPromise = onMacAppearance((payload) => {
       const alpha = Number(payload.glassAlpha);
-      if (isGlassAlphaInRange(alpha)) setGlassAlpha(alpha);
-      if (Array.isArray(payload.widgetAgents)) {
-        const agents = normalizeVisibleAgentList(payload.widgetAgents);
-        if (agents.length) {
-          setWidgetAgents(agents);
-          localStorage.setItem("metrik:widgetAgents", JSON.stringify(agents));
-        }
-      }
+      if (Number.isFinite(alpha) && alpha >= 0.05 && alpha <= 0.96) setGlassAlpha(alpha);
     });
     return () => {
       unlistenPromise.then((unlisten) => unlisten());
@@ -3776,6 +4754,16 @@ export function App() {
     return snapshot.agents.find((agent) => agent.id === selectedAgent)?.tokens || 0;
   }, [selectedAgent, snapshot]);
 
+  // 本机装了哪些 Agent，供设置里的分组用。拿不到检测结果时返回 null，
+  // 由列表决定不折叠——加载中、演示数据、旧后端都属于"不知道"，
+  // 而不知道时把 Agent 收进折叠区会让用户以为我们不支持它。
+  const detectedAgents = useMemo(() => {
+    if (snapshot.pending || snapshot.loadError) return null;
+    const known = snapshot.agents.filter((agent) => typeof agent.detected === "boolean");
+    if (!known.length) return null;
+    return new Set(known.filter((agent) => agent.detected).map((agent) => agent.id));
+  }, [snapshot]);
+
   // 配额卡只在小组件已勾选展示的 Agent 里轮换（用户明确不想看的不进循环）；
   // 勾选了但配额来源未启用的也保留——"官方配额不可用/设置中开启钩子"的
   // 提示本身是有效信息。widgetAgents 由设置保证非空。
@@ -3790,11 +4778,6 @@ export function App() {
     setQuotaAgent(next);
     localStorage.setItem("metrik:quotaAgent", next);
   }, [activeQuotaAgent, quotaAgents]);
-  const handleSelectQuotaAgent = useCallback((agentId) => {
-    if (!quotaAgents.includes(agentId)) return;
-    setQuotaAgent(agentId);
-    localStorage.setItem("metrik:quotaAgent", agentId);
-  }, [quotaAgents]);
 
   // 自动模式：胶囊条显示全部有官方配额数据的 agent（快照顺序）。
   const autoStripAgents = useMemo(
@@ -3969,29 +4952,27 @@ export function App() {
     };
   }, [activeNav, viewMode]);
 
-  // 会话明细同样只读账本；随周期切换重载。
+  // 用量页只读账本；项目与会话同批加载，规则变更后整体重载。
   useEffect(() => {
     if (activeNav !== "usage" || viewMode !== "expanded") return;
     let cancelled = false;
+    setProjectsState({ status: "loading", data: null });
     setSessionsState({ status: "loading", data: null });
-    getUsageSessions(period).then((data) => {
-      if (!cancelled) setSessionsState({ status: "ready", data });
+    Promise.all([getUsageProjects(period), getUsageSessions(period)]).then(([projectsData, sessionsData]) => {
+      if (cancelled) return;
+      setProjectsState({ status: "ready", data: projectsData });
+      setSessionsState({ status: "ready", data: sessionsData });
     });
     return () => {
       cancelled = true;
     };
-  }, [activeNav, viewMode, period]);
+  }, [activeNav, viewMode, period, usageReloadNonce]);
 
   const handleWindowMode = useCallback((nextMode) => {
     // macOS：菜单栏状态图标承担零占地摘要；面板只保留紧凑卡片，完整视图
     // 另开标准窗口，不再把 NSPanel 变形成一条悬浮胶囊。
     if (IS_MAC) {
       if (nextMode === "expanded") {
-        if (!isDesktop()) {
-          setViewMode("expanded");
-          setActiveNav("overview");
-          return;
-        }
         runWindowAction(() => openExpandedWindow());
         return;
       }
@@ -4051,13 +5032,11 @@ export function App() {
     });
   }, []);
 
+  // 标题栏的 ◐ 按钮与设置页保持同一模型，只循环深色、浅色、透明三种组件外观。
+  // 技术层的 off 只属于 expanded/回落状态，不作为第四种配色暴露。
   const handleToggleTransparent = useCallback(() => {
-    setTransparent((current) => {
-      const next = !current;
-      localStorage.setItem("metrik:transparent", String(next));
-      return next;
-    });
-  }, []);
+    handleGlassTint(nextGlassTint(normalizeGlassTint(glassTintRef.current)));
+  }, [handleGlassTint]);
 
   const handleRebuildLedger = useCallback(async () => {
     if (rebuildInFlight.current) return;
@@ -4109,8 +5088,10 @@ export function App() {
         pinned={pinned}
         loading={appBusy}
         transparent={transparent}
-        glassAlpha={glassAlpha}
+        glassAlpha={shellGlassAlpha}
         glassMode={glassMode}
+        glassTint={glassTint}
+        glassInk={glassInk}
         orientation={stripOrientation}
         onToggleOrientation={handleToggleStripOrientation}
         onTogglePinned={handleTogglePinned}
@@ -4118,21 +5099,6 @@ export function App() {
         onExpand={() => handleWindowMode("expanded")}
         availableUpdate={availableUpdate}
         onOpenUpdate={handleOpenUpdate}
-      />
-    );
-  }
-
-  if (viewMode === "desktop-widget") {
-    return (
-      <MacDesktopWidget
-        snapshot={snapshot}
-        loading={appBusy}
-        quotaAgent={activeQuotaAgent}
-        widgetAgents={widgetAgents}
-        glassAlpha={0}
-        glassMode={glassMode}
-        onSelectAgent={handleSelectQuotaAgent}
-        onExpand={() => handleWindowMode("expanded")}
       />
     );
   }
@@ -4149,6 +5115,8 @@ export function App() {
           pinned={pinned}
           transparent={transparent}
           glassMode={glassMode}
+          glassTint={glassTint}
+          glassInk={glassInk}
           onPeriodChange={setPeriod}
           onOpenSources={() => setDrawerOpen(true)}
           onTogglePinned={handleTogglePinned}
@@ -4158,7 +5126,7 @@ export function App() {
           quotaAgent={activeQuotaAgent}
           onCycleQuotaAgent={handleCycleQuotaAgent}
           widgetAgents={widgetAgents}
-          glassAlpha={glassAlpha}
+          glassAlpha={shellGlassAlpha}
           availableUpdate={availableUpdate}
           onOpenUpdate={handleOpenUpdate}
         />
@@ -4204,13 +5172,6 @@ export function App() {
           <ArrowsClockwise size={15} weight="light" aria-hidden="true" />
         </button>
         <Sidebar activeNav={activeNav} onNavChange={handleNavChange} snapshot={snapshot} loading={appBusy} />
-
-        {indexingPending > 0 ? (
-          <div className="indexing-banner" role="status">
-            <ClockCounterClockwise size={18} weight="light" aria-hidden="true" />
-            正在补齐历史索引，还剩 <strong>{indexingPending}</strong> 个日志文件。历史周期的数字尚不完整，会随补齐自动更新。
-          </div>
-        ) : null}
 
         {activeNav === "overview" ? (
           <>
@@ -4280,6 +5241,7 @@ export function App() {
                 selectedAgent={selectedAgent}
                 onSelectAgent={setSelectedAgent}
                 onOpenSources={() => setDrawerOpen(true)}
+                widgetAgents={widgetAgents}
               />
             </div>
           </>
@@ -4292,8 +5254,13 @@ export function App() {
             stripAgents={stripAgents}
             onToggleStripAgent={handleToggleStripAgent}
             onMoveStripAgent={handleMoveStripAgent}
+            detectedAgents={detectedAgents}
             glassAlpha={glassAlpha}
             onGlassAlpha={handleGlassAlpha}
+            glassTint={glassTint}
+            onGlassTint={handleGlassTint}
+            glassInk={glassInk}
+            onGlassInk={handleGlassInk}
             uiScale={uiScale}
             onUiScale={handleUiScale}
             stripScale={stripScale}
@@ -4309,7 +5276,12 @@ export function App() {
         ) : activeNav === "usage" ? (
           <>
             <PeriodControl period={period} onChange={setPeriod} fullWidthArea />
-            <UsageSection sessionsState={sessionsState} period={period} />
+            <UsageSection
+              projectsState={projectsState}
+              sessionsState={sessionsState}
+              period={period}
+              onRulesChanged={() => setUsageReloadNonce((value) => value + 1)}
+            />
           </>
         ) : (
           <EmptySection section={activeNav} onReturn={() => setActiveNav("overview")} />

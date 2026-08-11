@@ -10,7 +10,9 @@ use std::path::{Path, PathBuf};
 // depending on the optional requestId field.
 // Version 4 rebuilds Codex sources so fork/subagent replay token_counts stop
 // double-counting the parent thread's usage (and stop showing as unknown model).
-pub const PARSER_VERSION: i64 = 4;
+// Version 5 rebuilds every source so already-ledgered events pick up the project
+// working directory their adapters now report.
+pub const PARSER_VERSION: i64 = 5;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ReplaceSourceOutcome {
@@ -31,6 +33,7 @@ struct StoredUsageEvent {
     model: Option<String>,
     tokens: TokenVector,
     payload_hash: String,
+    project_path: Option<String>,
 }
 
 pub fn open_database(path: &Path) -> Result<Connection> {
@@ -235,7 +238,7 @@ fn insert_or_merge_usage_event(
         .query_row(
             "SELECT adapter_id, event_key, occurred_at_ms, session_id, model,
                     input_uncached_tokens, cache_read_tokens, cache_write_tokens,
-                    output_tokens, reasoning_tokens, payload_hash
+                    output_tokens, reasoning_tokens, payload_hash, project_path
              FROM usage_event WHERE event_id = ?1",
             [&event.event_id],
             |row| {
@@ -253,6 +256,7 @@ fn insert_or_merge_usage_event(
                         reasoning_output: row.get(9)?,
                     },
                     payload_hash: row.get(10)?,
+                    project_path: row.get(11)?,
                 })
             },
         )
@@ -263,8 +267,9 @@ fn insert_or_merge_usage_event(
             "INSERT INTO usage_event (
                 event_id, adapter_id, event_key, occurred_at_ms, session_id, model,
                 input_uncached_tokens, cache_read_tokens, cache_write_tokens,
-                output_tokens, reasoning_tokens, processed_tokens, quality, payload_hash
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                output_tokens, reasoning_tokens, processed_tokens, quality, payload_hash,
+                project_path
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
             params![
                 event.event_id,
                 event.adapter_id,
@@ -280,6 +285,7 @@ fn insert_or_merge_usage_event(
                 event.tokens.processed(),
                 event.quality,
                 event.payload_hash,
+                event.project_path,
             ],
         )?;
         return Ok(EventWriteOutcome::Accepted);
@@ -298,8 +304,11 @@ fn insert_or_merge_usage_event(
     // being completed, and may copy it into a branched session log. Those are
     // observations of one event, so merge each token component monotonically.
     // Fallback Claude keys and all other adapters keep strict payload matching.
+    // 用户声明的自定义来源用的是同一套 Claude 格式，因此有同样的"同一条消息被
+    // 反复观察、计数逐步补齐"行为，必须一并按分量合并；否则每次重扫都会因为
+    // payload 变化被判成身份冲突。
     let mergeable_claude_message =
-        event.adapter_id == "claude" && event.event_key.starts_with("message:");
+        matches!(event.adapter_id, "claude" | "custom") && event.event_key.starts_with("message:");
     // Antigravity has no log: every poll re-reads the live session and returns a
     // full snapshot, so an in-flight generation is observed repeatedly with
     // growing counts. Same shape as Claude — merge component-wise maxima.
@@ -319,6 +328,16 @@ fn insert_or_merge_usage_event(
         }
     }
     let fills_missing_model = mergeable && stored.model.is_none() && event.model.is_some();
+    // 项目归属不参与 payload_hash（见 domain::UsageEvent），所以它要在这里单独补：
+    // 解析器升级后重扫时，事件内容一模一样，只有这一列从 NULL 变成有值。
+    // 已有值不覆盖——事件发生在哪个目录是既成事实，仓库改名不该改写历史。
+    let fills_missing_project = stored.project_path.is_none() && event.project_path.is_some();
+    if fills_missing_project {
+        transaction.execute(
+            "UPDATE usage_event SET project_path = ?2 WHERE event_id = ?1",
+            params![event.event_id, event.project_path],
+        )?;
+    }
     if stored.payload_hash == event.payload_hash && !fills_missing_model {
         return Ok(EventWriteOutcome::Accepted);
     }
@@ -532,6 +551,64 @@ mod tests {
             events,
             quotas: vec![],
         }
+    }
+
+    /// 解析器升级后的重扫：事件内容一模一样，只有项目归属从无到有。
+    /// 它不参与 payload_hash，所以必须由这条单独的补写路径落库；非合并型
+    /// adapter（这里是 Codex）不能因此被判为身份冲突。
+    #[test]
+    fn a_rescan_backfills_the_project_without_a_payload_conflict() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(include_str!("../migrations/001_init.sql"))
+            .unwrap();
+        let event = || {
+            UsageEvent::new(
+                "codex",
+                "session-a:fingerprint".into(),
+                1_000,
+                "session-a".into(),
+                Some("gpt-5".into()),
+                TokenVector {
+                    input_uncached: 10,
+                    ..Default::default()
+                },
+                "cumulative_delta",
+            )
+        };
+        let stored_project = |connection: &Connection| -> Option<String> {
+            connection
+                .query_row("SELECT project_path FROM usage_event", [], |row| row.get(0))
+                .unwrap()
+        };
+
+        replace_source(&mut connection, &source("s", "codex", vec![event()]), 0).unwrap();
+        assert_eq!(stored_project(&connection), None);
+
+        replace_source(
+            &mut connection,
+            &source(
+                "s",
+                "codex",
+                vec![event().with_project(Some("D:\\work\\usage".into()))],
+            ),
+            0,
+        )
+        .unwrap();
+        assert_eq!(stored_project(&connection), Some("D:/work/usage".into()));
+
+        // 已有归属不被后续重扫改写：事件发生在哪个目录是既成事实。
+        replace_source(
+            &mut connection,
+            &source(
+                "s",
+                "codex",
+                vec![event().with_project(Some("E:/moved".into()))],
+            ),
+            0,
+        )
+        .unwrap();
+        assert_eq!(stored_project(&connection), Some("D:/work/usage".into()));
     }
 
     #[test]

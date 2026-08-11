@@ -27,6 +27,13 @@
     "autostart:allow-is-enabled",
     "os:allow-platform",
     "updater:default",
+    {
+      "identifier": "opener:allow-open-url",
+      "allow": [
+        { "url": "https://github.com/keros68/metrik*" },
+        { "url": "mailto:keros68@gmail.com" }
+      ]
+    },
     "process:allow-restart"
   ]
 }
