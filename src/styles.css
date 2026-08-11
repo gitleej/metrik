@@ -247,13 +247,13 @@ button:focus-visible {
 .widget-shell--mac:not(.widget-shell--glass-css) {
   /* 与 setEffects 传给窗口的 radius 对齐，避免四角露出方形材质。 */
   border-radius: 14px;
-  /* 浓度滑杆（0.60–0.96 写进 --glass-alpha）映射到 vibrancy 之上的罩层：
+  /* 浓度滑杆（0.05–0.96 写进 --glass-alpha）映射到 vibrancy 之上的罩层：
      模糊由系统 hudWindow 材质提供，罩层只管浓度。两段线性拉开动态范围：
-     低半段（60→82%）0.05→0.42 清透递进，默认 0.82 → 0.42 与旧固定罩同档；
+     低半段（5→82%）0.05→0.42 清透递进，默认 0.82 → 0.42 与旧固定罩同档；
      高半段（82→96%）0.42→0.90 加速冲向近实心——深色外观下 vibrancy 本身
      就是深底，斜率不够的话拉满也看不出差别。 */
   --mac-scrim: calc(
-    clamp(0.05, calc((var(--glass-alpha, 0.82) - 0.6) * 1.68 + 0.05), 0.42)
+    clamp(0.05, calc((var(--glass-alpha, 0.82) - 0.05) * 0.48 + 0.05), 0.42)
     + clamp(0, calc((var(--glass-alpha, 0.82) - 0.82) * 3.43), 0.48)
   );
   background:
@@ -815,6 +815,482 @@ button:focus-visible {
 }
 
 .widget-shell--transparent .widget-expand:hover { background: rgba(255, 255, 255, 0.22); }
+
+/* ============ macOS 桌面组件：Focus Dial ============
+   320 × 312 固定设计尺寸。原生窗口使用 UnderWindowBackground vibrancy；这里的表面只负责
+   可调 scrim、层次与浅/深桌面的可读性，不模拟系统模糊。 */
+html:has(.desktop-widget-shell),
+html:has(.desktop-widget-shell) body,
+html:has(.desktop-widget-shell) #root {
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: transparent;
+  border-radius: 28px;
+}
+
+.desktop-widget-shell {
+  --desktop-scrim: clamp(0.11, calc((var(--glass-alpha, 0.82) - 0.6) * 1.25 + 0.11), 0.56);
+  display: grid;
+  width: min(320px, 100vw);
+  height: min(312px, 100dvh);
+  grid-template-rows: 42px minmax(0, 1fr);
+  overflow: hidden;
+  color: rgba(255, 255, 255, 0.94);
+  background:
+    radial-gradient(125% 95% at 12% 0%, rgba(130, 169, 225, 0.12), transparent 55%),
+    linear-gradient(160deg, rgb(34 40 52 / calc(var(--desktop-scrim) * 0.92)), rgb(15 18 25 / var(--desktop-scrim)));
+  border-radius: 28px;
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.13),
+    inset 0 1px rgba(255, 255, 255, 0.18),
+    0 18px 48px rgba(15, 18, 25, 0.18);
+}
+
+.desktop-widget-shell--glass-css {
+  background:
+    radial-gradient(125% 95% at 12% 0%, rgba(130, 169, 225, 0.12), transparent 55%),
+    linear-gradient(160deg, rgba(35, 41, 54, 0.93), rgba(16, 19, 26, 0.96));
+}
+
+/* 原生模式在最低浓度时完全撤掉 CSS tint，真正的模糊和桌面取色交给
+   NSVisualEffectView(underWindowBackground)。高浓度再连续加回可读性罩层。 */
+.desktop-widget-shell--glass-native {
+  --desktop-native-scrim: calc(
+    clamp(0, calc(var(--glass-alpha, 0) * 0.282), 0.231)
+    + clamp(0, calc((var(--glass-alpha, 0) - 0.82) * 1.064), 0.149)
+  );
+  background: rgb(18 23 30 / var(--desktop-native-scrim));
+  box-shadow:
+    inset 0 0 0 0.75px rgba(255, 255, 255, 0.16),
+    inset 0 1px rgba(255, 255, 255, 0.2);
+}
+
+.desktop-widget-header {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 3px 9px 3px 17px;
+  cursor: move;
+  box-shadow: 0 1px rgba(255, 255, 255, 0.075);
+}
+
+.desktop-widget-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 17px;
+  font-weight: 590;
+  letter-spacing: -0.055em;
+}
+
+.desktop-widget-brand .status-dot {
+  width: 6px;
+  height: 6px;
+}
+
+.desktop-widget-refresh {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  place-items: center;
+  color: rgba(255, 255, 255, 0.58);
+  background: transparent;
+  border: 0;
+  border-radius: 10px;
+  cursor: pointer;
+  transition: color 180ms var(--motion), background-color 180ms var(--motion), transform 180ms var(--motion);
+}
+
+.desktop-widget-refresh:hover { color: #fff; background: rgba(255, 255, 255, 0.1); }
+.desktop-widget-refresh:active { transform: scale(0.94); }
+.desktop-widget-refresh:disabled { cursor: default; opacity: 0.62; }
+.desktop-widget-refresh:disabled svg { animation: widget-refresh-spin 0.9s linear infinite; }
+
+.desktop-widget-content {
+  display: grid;
+  min-height: 0;
+  grid-template-rows: minmax(0, 1fr) 80px 30px;
+  gap: 4px;
+  padding: 0 13px 8px;
+  transition: opacity 220ms var(--motion);
+}
+
+.desktop-widget-shell.is-loading .desktop-widget-content { opacity: 0.82; }
+
+.desktop-widget-focus {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: 174px minmax(0, 1fr);
+  align-items: center;
+}
+
+.desktop-quota-ring {
+  position: relative;
+  width: 150px;
+  height: 128px;
+  margin-left: 1px;
+}
+
+.desktop-quota-ring svg {
+  position: absolute;
+  top: 0;
+  left: 4px;
+  width: 128px;
+  height: 128px;
+  overflow: visible;
+  transform: rotate(132deg);
+}
+
+.desktop-quota-ring circle {
+  fill: none;
+  stroke-linecap: round;
+  stroke-width: 8;
+}
+
+.desktop-quota-ring-track {
+  stroke: rgba(255, 255, 255, 0.14);
+  stroke-dasharray: 86 14;
+}
+
+.desktop-quota-ring-value {
+  stroke: color-mix(in srgb, var(--quota-accent) 82%, #fff);
+  filter: drop-shadow(0 1px 5px color-mix(in srgb, var(--quota-accent) 32%, transparent));
+  transition: stroke-dasharray 700ms var(--motion), opacity 220ms var(--motion);
+}
+
+.desktop-quota-ring.is-stale .desktop-quota-ring-value { opacity: 0.56; }
+
+.desktop-quota-ring-copy {
+  position: absolute;
+  top: 24.5px;
+  left: 4px;
+  display: grid;
+  width: 128px;
+  grid-template-columns: minmax(0, 1fr);
+  justify-items: center;
+  text-align: center;
+}
+
+.desktop-quota-ring-copy > strong {
+  overflow: hidden;
+  width: 100%;
+  font-size: 10.5px;
+  font-weight: 560;
+  line-height: 1.05;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.desktop-quota-ring-copy > span {
+  margin-top: 2px;
+  color: rgba(255, 255, 255, 0.56);
+  font-size: 8.5px;
+  line-height: 1.05;
+}
+
+.desktop-quota-ring-copy > div {
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  margin-top: 3px;
+}
+
+/* 数字与百分号作为一个完整读数居中。此前让百分号悬挂虽然能对齐数字主体，
+   但完整的 “95%” 会持续显得右重。 */
+.desktop-quota-ring-copy > div.has-percent { transform: none; }
+
+.desktop-quota-ring-copy em {
+  font-family: "Newsreader", Georgia, serif;
+  font-size: 34px;
+  font-style: normal;
+  font-weight: 400;
+  font-variant-numeric: lining-nums tabular-nums;
+  letter-spacing: -0.06em;
+  line-height: 0.96;
+}
+
+.desktop-quota-ring-copy div small {
+  margin-left: 1px;
+  font-family: "Instrument Serif", Georgia, serif;
+  font-size: 13px;
+}
+
+.desktop-quota-ring-copy p {
+  width: 88px;
+  max-width: 100%;
+  margin: 3px 0 0;
+  overflow: hidden;
+  color: rgba(255, 255, 255, 0.58);
+  font-size: 7.5px;
+  line-height: 1.15;
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.desktop-widget-tokens {
+  display: grid;
+  min-width: 0;
+  align-content: center;
+  justify-items: start;
+  padding-left: 16px;
+  border-left: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.desktop-widget-tokens .agent-icon {
+  width: 31px;
+  height: 31px;
+  margin: 0 0 8px;
+  border-radius: 10px;
+}
+
+.desktop-widget-tokens > span {
+  color: rgba(255, 255, 255, 0.55);
+  font-size: 9px;
+}
+
+.desktop-widget-tokens > strong {
+  max-width: 118px;
+  margin-top: 2px;
+  overflow: hidden;
+  font-family: "Newsreader", Georgia, serif;
+  font-size: 31px;
+  font-weight: 400;
+  font-variant-numeric: lining-nums tabular-nums;
+  letter-spacing: -0.055em;
+  line-height: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.desktop-widget-tokens > small {
+  margin-top: 1px;
+  color: rgba(255, 255, 255, 0.54);
+  font-family: "Instrument Serif", Georgia, serif;
+  font-size: 10px;
+}
+
+.desktop-widget-agents {
+  min-height: 0;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.055);
+  border-radius: 16px;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.085), inset 0 1px rgba(255, 255, 255, 0.07);
+}
+
+.desktop-widget-agents button {
+  position: relative;
+  display: grid;
+  width: 100%;
+  height: 40px;
+  grid-template-columns: 3px 31px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 9px;
+  padding: 3px 13px 3px 0;
+  color: rgba(255, 255, 255, 0.9);
+  text-align: left;
+  background: transparent;
+  border: 0;
+  box-shadow: 0 1px rgba(255, 255, 255, 0.07);
+  cursor: pointer;
+  transition: background-color 180ms var(--motion), transform 180ms var(--motion);
+}
+
+.desktop-widget-agents button:last-child { box-shadow: none; }
+.desktop-widget-agents button:hover { background: rgba(255, 255, 255, 0.07); }
+.desktop-widget-agents button:active { transform: scale(0.985); }
+
+.desktop-widget-agents button > i {
+  width: 3px;
+  height: 26px;
+  background: var(--agent-accent);
+  border-radius: 0 3px 3px 0;
+  opacity: 0.35;
+  transform: scaleY(0.46);
+  transition: opacity 180ms var(--motion), transform 180ms var(--motion);
+}
+
+.desktop-widget-agents button.is-selected > i { opacity: 0.95; transform: scaleY(1); }
+
+.desktop-widget-agents .agent-icon {
+  width: 29px;
+  height: 29px;
+  margin: 0;
+  border-radius: 9px;
+}
+
+.desktop-widget-agents button > span {
+  overflow: hidden;
+  font-size: 12px;
+  font-weight: 560;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.desktop-widget-agents button > em {
+  font-size: 12px;
+  font-style: normal;
+  font-weight: 590;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 3–6 个已选 Agent 在固定的两行高度内完整呈现。 */
+.desktop-widget-agents.is-grid {
+  display: grid;
+  grid-template-rows: repeat(2, 40px);
+}
+
+.desktop-widget-agents.is-grid--2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.desktop-widget-agents.is-grid--3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+
+.desktop-widget-agents.is-grid button {
+  height: 40px;
+  grid-template-columns: 3px 27px minmax(0, 1fr) auto;
+  gap: 6px;
+  padding-right: 8px;
+  box-shadow:
+    inset -1px 0 rgba(255, 255, 255, 0.07),
+    inset 0 -1px rgba(255, 255, 255, 0.07);
+}
+
+.desktop-widget-agents.is-grid .agent-icon {
+  width: 25px;
+  height: 25px;
+  border-radius: 8px;
+}
+
+.desktop-widget-agents.is-grid button > span { font-size: 10px; }
+.desktop-widget-agents.is-grid button > em { font-size: 9.5px; }
+
+.desktop-widget-agents.is-grid--3 button {
+  grid-template-columns: 3px 22px minmax(0, 1fr);
+  grid-template-rows: 1fr 1fr;
+  gap: 0 5px;
+  padding-right: 5px;
+}
+
+.desktop-widget-agents.is-grid--3 button > i,
+.desktop-widget-agents.is-grid--3 .agent-icon { grid-row: 1 / -1; }
+
+.desktop-widget-agents.is-grid--3 .agent-icon {
+  width: 21px;
+  height: 21px;
+  border-radius: 7px;
+}
+
+.desktop-widget-agents.is-grid--3 button > span {
+  grid-column: 3;
+  grid-row: 1;
+  align-self: end;
+  font-size: 8.5px;
+  line-height: 1;
+}
+
+.desktop-widget-agents.is-grid--3 button > em {
+  grid-column: 3;
+  grid-row: 2;
+  align-self: start;
+  margin-top: 2px;
+  color: currentColor;
+  font-size: 8px;
+  line-height: 1;
+  opacity: 0.68;
+}
+
+.desktop-widget-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.desktop-widget-footer > span {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+  overflow: hidden;
+  color: rgba(255, 255, 255, 0.55);
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.desktop-widget-footer > span > i {
+  width: 6px;
+  height: 6px;
+  flex: 0 0 auto;
+  background: #70b962;
+  border-radius: 50%;
+  box-shadow: 0 0 0 3px rgba(112, 185, 98, 0.08);
+}
+
+.desktop-widget-footer > span.is-warning > i { background: #e0a748; box-shadow: 0 0 0 3px rgba(224, 167, 72, 0.08); }
+
+.desktop-widget-footer button {
+  display: inline-flex;
+  min-height: 26px;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 5px;
+  padding: 0 8px;
+  color: rgba(255, 255, 255, 0.74);
+  font-size: 9.5px;
+  background: transparent;
+  border: 0;
+  border-radius: 9px;
+  cursor: pointer;
+  transition: color 180ms var(--motion), background-color 180ms var(--motion), transform 180ms var(--motion);
+}
+
+.desktop-widget-footer button:hover { color: #fff; background: rgba(255, 255, 255, 0.09); }
+.desktop-widget-footer button:active { transform: scale(0.96); }
+
+@media (prefers-color-scheme: light) {
+  .desktop-widget-shell {
+    color: rgba(27, 30, 35, 0.94);
+    background:
+      radial-gradient(125% 95% at 12% 0%, rgb(255 255 255 / calc(var(--desktop-scrim) * 1.22)), transparent 55%),
+      linear-gradient(160deg, rgb(250 251 253 / var(--desktop-scrim)), rgb(228 233 240 / calc(var(--desktop-scrim) * 0.86)));
+    box-shadow:
+      inset 0 0 0 1px rgba(255, 255, 255, 0.72),
+      inset 0 1px rgba(255, 255, 255, 0.95),
+      0 18px 48px rgba(39, 48, 61, 0.14);
+  }
+
+  .desktop-widget-shell .desktop-widget-header {
+    box-shadow: 0 1px rgba(36, 42, 51, 0.08);
+  }
+  .desktop-widget-shell .desktop-widget-refresh { color: rgba(41, 45, 51, 0.55); }
+  .desktop-widget-shell .desktop-widget-refresh:hover { color: #1f2226; background: rgba(31, 36, 43, 0.065); }
+  .desktop-widget-shell .desktop-quota-ring-track { stroke: rgba(36, 43, 53, 0.1); }
+  .desktop-widget-shell .desktop-quota-ring-copy > span,
+  .desktop-widget-shell .desktop-quota-ring-copy p,
+  .desktop-widget-shell .desktop-widget-tokens > span,
+  .desktop-widget-shell .desktop-widget-tokens > small,
+  .desktop-widget-shell .desktop-widget-footer > span { color: rgba(40, 44, 50, 0.57); }
+  .desktop-widget-shell .desktop-widget-tokens { border-left-color: rgba(36, 42, 51, 0.1); }
+  .desktop-widget-shell .desktop-widget-agents {
+    background: rgba(255, 255, 255, 0.38);
+    box-shadow: inset 0 0 0 1px rgba(36, 42, 51, 0.08), inset 0 1px rgba(255, 255, 255, 0.72);
+  }
+  .desktop-widget-shell .desktop-widget-agents button {
+    color: rgba(27, 30, 35, 0.92);
+    box-shadow: 0 1px rgba(36, 42, 51, 0.075);
+  }
+  .desktop-widget-shell .desktop-widget-agents button:hover { background: rgba(255, 255, 255, 0.46); }
+  .desktop-widget-shell .desktop-widget-footer button { color: rgba(35, 39, 45, 0.65); }
+  .desktop-widget-shell .desktop-widget-footer button:hover { color: #17191d; background: rgba(31, 36, 43, 0.06); }
+  .desktop-widget-shell.desktop-widget-shell--glass-native {
+    background: rgb(248 250 252 / var(--desktop-native-scrim));
+    box-shadow:
+      inset 0 0 0 0.75px rgba(255, 255, 255, 0.74),
+      inset 0 1px rgba(255, 255, 255, 0.86);
+  }
+}
 
 /* ============ 胶囊条（strip 第三形态） ============
    近实心深色玻璃拟态（窗口本身透明，圆角由 CSS 画）；
@@ -2490,6 +2966,83 @@ html:has(.strip-shell) #root {
 
 .settings-card h2 { margin: 0 0 14px; font-size: 17px; letter-spacing: -0.02em; }
 
+.desktop-widget-setting {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+}
+
+.desktop-widget-setting > div { min-width: 0; }
+
+.desktop-widget-setting-kicker {
+  display: inline-block;
+  margin-bottom: 7px;
+  color: var(--blue);
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.desktop-widget-setting h2 { margin-bottom: 8px; }
+
+.desktop-widget-setting-toggle {
+  display: inline-flex;
+  min-height: 38px;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 9px;
+  padding: 0 13px 0 8px;
+  color: #55575b;
+  font-size: 12px;
+  font-weight: 560;
+  background: rgba(255, 255, 255, 0.72);
+  border: 0;
+  border-radius: 12px;
+  box-shadow: 0 1px 2px rgba(31, 33, 36, 0.08), 0 0 0 1px rgba(31, 33, 36, 0.065);
+  cursor: pointer;
+  transition: color 180ms var(--motion), background-color 180ms var(--motion), transform 180ms var(--motion);
+}
+
+.desktop-widget-setting-toggle > span {
+  position: relative;
+  width: 28px;
+  height: 17px;
+  background: rgba(31, 33, 36, 0.16);
+  border-radius: 999px;
+  transition: background-color 180ms var(--motion);
+}
+
+.desktop-widget-setting-toggle > span > i {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 11px;
+  height: 11px;
+  background: #fff;
+  border-radius: 50%;
+  box-shadow: 0 1px 3px rgba(31, 33, 36, 0.22);
+  transition: transform 180ms var(--motion);
+}
+
+.desktop-widget-setting-toggle.is-enabled { color: #245fbd; background: rgba(36, 107, 219, 0.085); }
+.desktop-widget-setting-toggle.is-enabled > span { background: var(--blue); }
+.desktop-widget-setting-toggle.is-enabled > span > i { transform: translateX(11px); }
+.desktop-widget-setting-toggle:active { transform: scale(0.97); }
+
+.desktop-widget-native-badge {
+  flex: 0 0 auto;
+  align-self: center;
+  padding: 7px 10px;
+  border-radius: 999px;
+  color: #245fbd;
+  background: rgba(36, 107, 219, 0.085);
+  font-size: 12px;
+  font-weight: 650;
+  letter-spacing: 0.01em;
+}
+
 .settings-subsection {
   margin-top: 18px;
   padding-top: 16px;
@@ -3553,6 +4106,14 @@ html:has(.strip-shell) #root {
   background: var(--d-raised);
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08);
 }
+:root[data-theme="dark"] .desktop-widget-setting-toggle {
+  color: var(--d-ink-3);
+  background: var(--d-raised);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08);
+}
+:root[data-theme="dark"] .desktop-widget-setting-toggle > span { background: rgba(255, 255, 255, 0.2); }
+:root[data-theme="dark"] .desktop-widget-setting-toggle.is-enabled { color: #9ec1f5; background: rgba(74, 132, 222, 0.15); }
+:root[data-theme="dark"] .desktop-widget-setting-toggle.is-enabled > span { background: #4f86dd; }
 :root[data-theme="dark"] .settings-agent-move {
   color: var(--d-ink-2);
   background: var(--d-raised);

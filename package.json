@@ -7,12 +7,13 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "test": "node --test src/platformDetection.test.js src/windowGeometry.test.js",
+    "test": "node --test src/platformDetection.test.js src/quotaWindows.test.js src/windowGeometry.test.js",
     "preview": "vite preview",
     "pricing:update": "node --use-env-proxy scripts/update-pricing.mjs",
     "tauri": "tauri",
     "desktop:dev": "tauri dev",
-    "desktop:build": "tauri build"
+    "desktop:build": "tauri build",
+    "desktop:widget-preview": "zsh scripts/build-macos-widget-preview.sh"
   },
   "dependencies": {
     "@fontsource-variable/geist": "^5.2.9",

@@ -14,6 +14,7 @@ const WINDOW_SIZES = {
   compact: { width: 320, height: 320, minWidth: 320, minHeight: 260 },
   expanded: { width: 1120, height: 760, minWidth: 960, minHeight: 700 },
   strip: { width: 240, height: 40, minWidth: 48, minHeight: 40 },
+  "desktop-widget": { width: 320, height: 312, minWidth: 320, minHeight: 312 },
 };
 
 // 卡片/胶囊的整体缩放系数（连续值）。窗口尺寸与页面 zoom 同乘一个系数，
@@ -437,12 +438,14 @@ const POSITION_KEYS = {
   compact: "metrik:widgetPosition",
   "strip-horizontal": "metrik:stripHorizontalPosition",
   "strip-vertical": "metrik:stripVerticalPosition",
+  "desktop-widget": "metrik:macDesktopWidgetPosition",
 };
 
 const lastPositions = {
   compact: null,
   "strip-horizontal": null,
   "strip-vertical": null,
+  "desktop-widget": null,
 };
 
 function isDesktop() {
@@ -510,8 +513,9 @@ async function rememberWindowPosition(api, appWindow, mode) {
 
 /// 启动时把窗口放回该形态上次的位置；坐标已不在任何显示器上（拔了扩展屏等）时居中。
 async function restoreWindowPosition(mode = "compact") {
-  // macOS 面板永远贴着菜单栏图标，没有"上次的位置"这回事。
-  if (isMacPlatform()) return;
+  // macOS 菜单栏面板永远贴着状态项，没有"上次的位置"；独立桌面组件则
+  // 可以拖动，和 Windows 浮窗一样恢复自己的坐标。
+  if (isMacPlatform() && mode !== "desktop-widget") return;
   const api = await windowApi();
   if (!api) return;
   const stored = readStoredPosition(mode);
@@ -551,7 +555,7 @@ async function onTrayShowExpanded(handler) {
   return listen("tray://show-expanded", () => handler());
 }
 
-/// mac 外观改动（玻璃浓度）的跨窗口广播：设置页开在独立的完整视图窗口，
+/// mac UI 设置（玻璃浓度、桌面组件 Agent）的跨窗口广播：设置页开在独立的完整视图窗口，
 /// 面板是另一个 webview 实例。WKWebView 的 storage 事件不跨窗口触发
 /// （每个窗口是独立 process pool），所以走 Tauri 事件总线；emit 也会回到
 /// 发送方自己，监听方要能幂等处理。其它平台单窗口，不用广播。
@@ -569,7 +573,8 @@ async function onMacAppearance(handler) {
 
 /// 拖动结束后持久化窗口位置（compact 与 strip 各记各的；expanded 不记）。
 async function startPositionMemory(getMode) {
-  if (isMacPlatform()) return () => {};
+  // macOS 只有独立桌面组件允许拖动；菜单栏面板仍由原生锚点定位。
+  if (isMacPlatform() && getMode() !== "desktop-widget") return () => {};
   const api = await windowApi();
   if (!api) return () => {};
   const appWindow = api.getCurrentWindow();
@@ -631,6 +636,13 @@ async function openExpandedWindow(nav) {
   await invoke("open_expanded_window", { nav: nav || null });
 }
 
+/// macOS 独立桌面组件由后端创建/隐藏，避免把菜单栏 NSPanel 变成普通浮窗。
+/// 浏览器预览和其它平台安静跳过。
+async function setMacosDesktopWidgetVisible(visible) {
+  if (!isDesktop() || !isMacPlatform()) return;
+  await invoke("set_macos_desktop_widget_visible", { visible: Boolean(visible) });
+}
+
 /// 按用户选择更新 macOS 菜单栏 Agent 状态项；null 表示该 Agent 没有可靠的
 /// 官方额度，后端会显示 "--"，不会填零或伪造数字。
 async function updateMacStatusItems(items) {
@@ -648,6 +660,7 @@ async function applyWindowMode(mode, options = {}) {
   // macOS 的完整视图是独立窗口；菜单栏 NSPanel 只保留 compact 卡片。
   if (isMacPlatform()) {
     if (!isDesktop()) return;
+    if (mode === "desktop-widget") return;
     // 首帧直接用上次内容测量的高度（同 Windows 的尺寸缓存），避免两段式跳变。
     await resizeMacosPanel({ height: compactContentHeight(WINDOW_SIZES.compact.height) });
     return;
@@ -1015,7 +1028,7 @@ function glassOptions() {
 
 /// 返回实际生效的材质："native"（系统模糊已启用）、"css"（原生不可用，
 /// 由 CSS 近实心玻璃承担外观）或 "off"。调用方据此切换样式层。
-async function setWindowGlass(enabled, radius = 12) {
+async function setWindowGlass(enabled, radius = 12, macEffect = "hudWindow") {
   if (!isDesktop()) return enabled ? "css" : "off";
   if (isWindowsPlatform()) {
     // WebView2 has its own composition surface. Make that surface transparent
@@ -1045,13 +1058,16 @@ async function setWindowGlass(enabled, radius = 12) {
     await makeWebviewTransparent();
   }
   try {
-    // macOS 的 vibrancy 是单选的：hudWindow 是系统 HUD 浮层一族的材质，
-    // 比 menu 更薄更清透，跟随系统外观。面板是 nonactivating（永远不会成为
-    // key window），state 必须锁 active，否则材质一直是失焦的发灰态。
+    // macOS 的 vibrancy 是单选的。菜单栏面板使用 hudWindow；桌面组件使用
+    // underWindowBackground，让壁纸本身成为底色，观感更接近系统桌面组件。
+    // 两种窗口都是 nonactivating，state 必须锁 active，否则材质会发灰。
     // 浓度不在这里调——CSS 按滑杆在 vibrancy 之上叠深浅可调的罩层。
+    const effect = macEffect === "underWindowBackground"
+      ? "underWindowBackground"
+      : "hudWindow";
     await appWindow.setEffects(
       isMacPlatform()
-        ? { effects: ["hudWindow"], state: "active", radius }
+        ? { effects: [effect], state: "active", radius }
         : { effects: ["blur"] },
     );
     return "native";
@@ -1324,6 +1340,7 @@ export {
   resizeStripWindow,
   restoreWindowPosition,
   setAutostart,
+  setMacosDesktopWidgetVisible,
   setNativeTheme,
   updateMacStatusItems,
   setStripScale,

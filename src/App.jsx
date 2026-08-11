@@ -36,6 +36,7 @@ import opencodeAppIcon from "./assets/opencode-app-icon.png";
 import qoderAppIcon from "./assets/qoder-app-icon.png";
 import workbuddyAppIcon from "./assets/workbuddy-app-icon.svg";
 import zcodeAppIcon from "./assets/zcode-app-icon.png";
+import { QUOTA_LOW_REMAINING, bindingWindow } from "./quotaWindows.js";
 import { horizontalStripTargetWidth } from "./windowGeometry";
 import {
   configureQoderCookie,
@@ -388,7 +389,7 @@ function modelDisplayName(model) {
 // （已过期窗口也算有来源，单独走"已重置，等待刷新"样式）；一个都没有时
 // 由调用方渲染 "-- / 暂无可靠来源"，绝不编造数字。
 function compactDisplayWindows(entry) {
-  return (entry.windows || []).filter((window) => window.view.available).slice(0, 2);
+  return (entry.windows || []).filter((window) => window.view.available);
 }
 
 // 原生 title tooltip：逐窗口列出剩余与重置倒计时，并标注官方/快照/演示来源，
@@ -407,15 +408,14 @@ function compactQuotaTooltip(agentId, windows) {
   return [AGENT_META[agentId].label, ...lines].join("\n");
 }
 
-// 胶囊条一格优先展示 5 小时窗口；该 Agent 没有 5h 窗口时，取后端排好序的
-// 第一个可用窗口（后端按 five_hour → seven_day → 模型/月度排序）。
+// 胶囊条展示当前真正约束用量的窗口；平时取短窗，任一窗口告急时显示
+// 剩余最少的告急窗口，避免“5h 很满但周额度已经用尽”仍报宽裕数字。
 function stripCellData(entry) {
   const windows = (entry.windows || []).filter(
     (window) => window.view.available && !window.view.resetExpired,
   );
   if (!windows.length) return null;
-  const fiveHour = windows.find((window) => String(window.key || "").includes("five_hour"));
-  return { tightest: fiveHour || windows[0], windows };
+  return { tightest: bindingWindow(windows) || windows[0], windows };
 }
 
 // 原生 title tooltip：列出全部窗口的剩余与重置倒计时；快照数据标注更新时间。
@@ -450,7 +450,7 @@ function quotaSeverity(view) {
   if (!view.available || view.resetExpired) return "";
   const used = quotaUsedPercent(view);
   if (used >= 95) return "critical";
-  if (used >= 85) return "warn";
+  if (used >= 100 - QUOTA_LOW_REMAINING) return "warn";
   return "";
 }
 
@@ -1480,9 +1480,8 @@ function CompactWidget({
               if (!meta) return null;
               const entry = agentQuotaFor(snapshot, agentId);
               const windows = compactDisplayWindows(entry);
-              // 行内头条窗口与胶囊条同规则：后端排序 five_hour 优先的第一个可用窗口；
-              // 完整窗口明细在该行的原生 tooltip 与焦点卡中。
-              const headline = windows[0] || null;
+              // 行内头条窗口与胶囊条同规则；完整窗口明细仍在 tooltip 与焦点卡中。
+              const headline = bindingWindow(entry.windows) || windows[0] || null;
               const headlineView = headline?.view || null;
               const current = Boolean(headlineView && headlineView.available && !headlineView.resetExpired);
               const stale = Boolean(
@@ -1541,6 +1540,154 @@ function CompactWidget({
           <button type="button" className="widget-expand" onClick={() => onExpand("expanded")}>
             <span>完整视图</span>
             <ArrowsOutSimple size={16} weight="light" aria-hidden="true" />
+          </button>
+        </footer>
+      </div>
+    </main>
+  );
+}
+
+function desktopWidgetQuota(snapshot, agentId) {
+  const entry = agentQuotaFor(snapshot, agentId);
+  const windows = compactDisplayWindows(entry);
+  const headline = bindingWindow(entry.windows) || windows[0] || null;
+  const view = headline?.view || UNAVAILABLE_QUOTA;
+  const available = Boolean(view.available && !view.resetExpired);
+  return {
+    available,
+    remaining: available ? Math.max(0, Math.min(100, view.remainingPercent)) : null,
+    reset: available ? `${formatReset(view.resetsInMinutes)}后重置` : view.resetExpired
+      ? "已重置，等待刷新"
+      : agentId === "claude"
+        ? "设置中开启配额来源"
+        : "官方配额不可用",
+    stale: Boolean(available && (view.stale || view.quality === "official_snapshot")),
+    windowLabel: headline ? shortWindowLabel(headline.key) : "官方",
+  };
+}
+
+function MacDesktopWidget({
+  snapshot,
+  loading,
+  quotaAgent,
+  widgetAgents,
+  glassAlpha,
+  glassMode,
+  onSelectAgent,
+  onExpand,
+}) {
+  const activeMeta = AGENT_META[quotaAgent];
+  const activeQuota = desktopWidgetQuota(snapshot, quotaAgent);
+  const activeTokens = snapshot.agents.find((agent) => agent.id === quotaAgent)?.tokens || 0;
+  const displayRemaining = activeQuota.available ? Math.round(activeQuota.remaining) : null;
+  const ringProgress = activeQuota.available ? activeQuota.remaining * 0.86 : 0;
+  const availableAgentRows = widgetAgents.filter((agentId) => AGENT_META[agentId]);
+  // 固定 80px 区域内完整呈现用户勾选的 Agent：1–2 个用整行，3–4 个用
+  // 两列，5–6 个用三列。设置语义就是“勾选即显示”，不再隐藏成轮换队列。
+  const agentGridClass = availableAgentRows.length <= 2
+    ? "is-list"
+    : availableAgentRows.length <= 4
+      ? "is-grid is-grid--2"
+      : "is-grid is-grid--3";
+  const partial = snapshotIsPartial(snapshot);
+  const statusLabel = snapshot.pending
+    ? "正在读取"
+    : snapshot.loadError
+      ? "沿用上次数据"
+      : partial
+        ? "部分覆盖"
+        : loading
+          ? "正在更新"
+          : "刚刚更新";
+
+  return (
+    <main
+      className={`desktop-widget-shell desktop-widget-shell--glass ${glassMode === "native" ? "desktop-widget-shell--glass-native" : ""} ${glassMode === "css" ? "desktop-widget-shell--glass-css" : ""} ${loading ? "is-loading" : ""}`}
+      style={{ "--glass-alpha": glassAlpha, "--quota-accent": activeMeta.accent }}
+    >
+      <h1 className="sr-only">Metrik macOS 桌面组件</h1>
+      <header className="desktop-widget-header" data-tauri-drag-region>
+        <div className="desktop-widget-brand" data-tauri-drag-region>
+          <span>Metrik</span>
+          <i
+            className={`status-dot ${loading ? "status-dot--loading" : ""} ${snapshot.loadError ? "status-dot--error" : ""}`}
+            title={statusDotTitle(loading, snapshot.loadError)}
+            aria-hidden="true"
+          />
+        </div>
+      </header>
+
+      <div className="desktop-widget-content">
+        <section className="desktop-widget-focus" aria-label={`${activeMeta.label} 官方额度`}>
+          <div className={`desktop-quota-ring ${activeQuota.stale ? "is-stale" : ""}`}>
+            <svg viewBox="0 0 120 120" aria-hidden="true">
+              <circle className="desktop-quota-ring-track" cx="60" cy="60" r="48" pathLength="100" />
+              <circle
+                className="desktop-quota-ring-value"
+                cx="60"
+                cy="60"
+                r="48"
+                pathLength="100"
+                style={{ strokeDasharray: `${ringProgress} ${100 - ringProgress}` }}
+              />
+            </svg>
+            <div className="desktop-quota-ring-copy">
+              <strong>
+                {activeMeta.label}{activeQuota.available ? ` · ${activeQuota.windowLabel}` : ""}
+              </strong>
+              <span>剩余</span>
+              <div
+                className={displayRemaining != null ? "has-percent" : ""}
+                aria-live="polite"
+                aria-atomic="true"
+              >
+                <em>{activeQuota.stale && displayRemaining != null ? "~" : ""}{displayRemaining ?? "--"}</em>
+                {displayRemaining != null && <small>%</small>}
+              </div>
+              <p>{activeQuota.reset}</p>
+            </div>
+          </div>
+
+          <div className="desktop-widget-tokens">
+            <AgentMark agentId={quotaAgent} />
+            <span>今日</span>
+            <strong>{snapshot.pending || snapshot.loadError ? "--" : compactTokens(activeTokens)}</strong>
+            <small>tokens</small>
+          </div>
+        </section>
+
+        <section className={`desktop-widget-agents ${agentGridClass}`} aria-label="切换 Agent">
+          {availableAgentRows.map((agentId) => {
+            const meta = AGENT_META[agentId];
+            const quota = desktopWidgetQuota(snapshot, agentId);
+            const remaining = quota.available ? Math.round(quota.remaining) : null;
+            return (
+              <button
+                type="button"
+                className={agentId === quotaAgent ? "is-selected" : ""}
+                key={agentId}
+                style={{ "--agent-accent": meta.accent }}
+                aria-pressed={agentId === quotaAgent}
+                onClick={() => onSelectAgent(agentId)}
+                title={`${meta.label} · ${quota.windowLabel} · ${quota.reset}`}
+              >
+                <i aria-hidden="true" />
+                <AgentMark agentId={agentId} />
+                <span>{meta.label}</span>
+                <em>{quota.stale && remaining != null ? "~" : ""}{remaining == null ? "--" : `${remaining}%`}</em>
+              </button>
+            );
+          })}
+        </section>
+
+        <footer className="desktop-widget-footer">
+          <span className={snapshot.loadError || partial ? "is-warning" : ""}>
+            <i aria-hidden="true" />
+            {statusLabel}
+          </span>
+          <button type="button" onClick={onExpand}>
+            完整视图
+            <ArrowsOutSimple size={14} weight="light" aria-hidden="true" />
           </button>
         </footer>
       </div>
@@ -2057,6 +2204,18 @@ const THEME_OPTIONS = [
   { id: "dark", label: "暗色" },
 ];
 
+// 与远端最新版 Windows true-alpha 玻璃保持同一浓度语义。5% 是“只留材质、
+// 几乎不加罩层”，96% 是近实心；不要再把旧版 60% 回退下限带到 macOS。
+// 5% 起点与旧版默认 82% 都必须落在滑杆刻度上；用 1% 步进避免原生
+// range 把 82% 静默吸到 83%，而旁边读数仍显示 82%。
+const GLASS_ALPHA_RANGE = Object.freeze({ min: 0.05, max: 0.96, step: 0.01 });
+
+function isGlassAlphaInRange(value) {
+  return Number.isFinite(value)
+    && value >= GLASS_ALPHA_RANGE.min
+    && value <= GLASS_ALPHA_RANGE.max;
+}
+
 function SliderRow({ label, hint, min, max, step, percent, ariaLabel, onChange }) {
   return (
     <div className="settings-subsection">
@@ -2078,7 +2237,16 @@ function SliderRow({ label, hint, min, max, step, percent, ariaLabel, onChange }
   );
 }
 
-function AppearanceCard({ theme, onThemeChange, glassAlpha, onGlassAlpha, uiScale, onUiScale, stripScale, onStripScale }) {
+function AppearanceCard({
+  theme,
+  onThemeChange,
+  glassAlpha,
+  onGlassAlpha,
+  uiScale,
+  onUiScale,
+  stripScale,
+  onStripScale,
+}) {
   return (
     <div className="settings-card">
       <h2>外观与缩放</h2>
@@ -2099,13 +2267,15 @@ function AppearanceCard({ theme, onThemeChange, glassAlpha, onGlassAlpha, uiScal
         ))}
       </div>
       <SliderRow
-        label="小组件玻璃浓度"
-        hint="越低越透、越高越实；系统模糊不可用时自动锁定近实心。"
-        min={60}
-        max={96}
-        step={2}
+        label={IS_MAC ? "菜单栏面板玻璃浓度" : "小组件玻璃浓度"}
+        hint={IS_MAC
+          ? "越低越透、越高越实；5% 只保留菜单栏面板的系统材质。"
+          : "越低越透、越高越实；5% 接近全透明。系统模糊不可用时自动锁定近实心。"}
+        min={GLASS_ALPHA_RANGE.min * 100}
+        max={GLASS_ALPHA_RANGE.max * 100}
+        step={GLASS_ALPHA_RANGE.step * 100}
         percent={Math.round(glassAlpha * 100)}
-        ariaLabel="玻璃浓度百分比"
+        ariaLabel={IS_MAC ? "菜单栏面板玻璃浓度百分比" : "小组件玻璃浓度百分比"}
         onChange={onGlassAlpha}
       />
       {/* mac 的菜单栏面板是系统 UI 的一部分，尺寸固定不提供缩放；
@@ -2134,6 +2304,21 @@ function AppearanceCard({ theme, onThemeChange, glassAlpha, onGlassAlpha, uiScal
           onChange={onStripScale}
         />
       )}
+    </div>
+  );
+}
+
+function MacDesktopWidgetCard() {
+  return (
+    <div className="settings-card desktop-widget-setting">
+      <div>
+        <span className="desktop-widget-setting-kicker">macOS</span>
+        <h2>桌面小组件</h2>
+        <p className="settings-muted">
+          使用真正的 WidgetKit 小组件，透明材质、圆角与桌面层级都由 macOS 管理。先在桌面右键选择“编辑小组件”，再搜索 Metrik。
+        </p>
+      </div>
+      <span className="desktop-widget-native-badge">系统原生</span>
     </div>
   );
 }
@@ -2351,7 +2536,26 @@ const SETTINGS_TABS = [
   },
 ];
 
-function SettingsSection({ onSnapshotRefresh, widgetAgents, onToggleWidgetAgent, onMoveWidgetAgent, stripAgents, onToggleStripAgent, onMoveStripAgent, glassAlpha, onGlassAlpha, uiScale, onUiScale, stripScale, onStripScale, theme, onThemeChange, autoUpdateCheck, onAutoUpdateCheck, availableUpdate }) {
+function SettingsSection({
+  onSnapshotRefresh,
+  widgetAgents,
+  onToggleWidgetAgent,
+  onMoveWidgetAgent,
+  stripAgents,
+  onToggleStripAgent,
+  onMoveStripAgent,
+  glassAlpha,
+  onGlassAlpha,
+  uiScale,
+  onUiScale,
+  stripScale,
+  onStripScale,
+  theme,
+  onThemeChange,
+  autoUpdateCheck,
+  onAutoUpdateCheck,
+  availableUpdate,
+}) {
   const [settings, setSettings] = useState(null);
   const [directoryInput, setDirectoryInput] = useState("");
   const [busy, setBusy] = useState(false);
@@ -2425,6 +2629,9 @@ function SettingsSection({ onSnapshotRefresh, widgetAgents, onToggleWidgetAgent,
       <div className="settings-grid">
         {activeTab.id === "display" && (
           <>
+            {IS_MAC && (
+              <MacDesktopWidgetCard />
+            )}
             <AgentsDisplayCard
               widgetAgents={widgetAgents}
               onToggleWidgetAgent={onToggleWidgetAgent}
@@ -3189,7 +3396,9 @@ function EmptySection({ section, onReturn }) {
 
 function initialWindowMode() {
   if (typeof window === "undefined") return "compact";
-  if (new URLSearchParams(window.location.search).get("view") === "expanded") return "expanded";
+  const requested = new URLSearchParams(window.location.search).get("view");
+  if (requested === "desktop-widget") return "desktop-widget";
+  if (requested === "expanded") return "expanded";
   // macOS 的零占地摘要属于菜单栏状态图标，不再把面板压成一条悬浮胶囊。
   if (IS_MAC) return "compact";
   // 上次收成胶囊条则恢复；expanded 不恢复。
@@ -3206,6 +3415,29 @@ function initialNav() {
   return new URLSearchParams(window.location.search).get("nav") === "settings"
     ? "settings"
     : "overview";
+}
+
+function initialWidgetAgents() {
+  // 浏览器视觉 QA 可显式指定布局状态；桌面构建始终只认用户设置。
+  if (!isDesktop()) {
+    const previewAgents = new URLSearchParams(window.location.search)
+      .get("agents")
+      ?.split(",");
+    if (previewAgents?.length) {
+      const valid = normalizeVisibleAgentList(previewAgents);
+      if (valid.length) return valid;
+    }
+  }
+  try {
+    const stored = JSON.parse(localStorage.getItem("metrik:widgetAgents") || "null");
+    if (Array.isArray(stored)) {
+      const valid = normalizeVisibleAgentList(stored);
+      if (valid.length) return valid;
+    }
+  } catch {
+    // 本地设置损坏时回到默认值。
+  }
+  return ["codex", "claude"];
 }
 
 export function App() {
@@ -3273,27 +3505,22 @@ export function App() {
     setNativeTheme(theme === "auto" ? null : theme);
   }, [viewMode, theme]);
   // 小插件展示哪些 Agent 由用户在设置里勾选；默认 Codex + Claude。
-  const [widgetAgents, setWidgetAgents] = useState(() => {
-    try {
-      const stored = JSON.parse(localStorage.getItem("metrik:widgetAgents") || "null");
-      if (Array.isArray(stored)) {
-        const valid = normalizeVisibleAgentList(stored);
-        if (valid.length) return valid;
-      }
-    } catch {
-      // 本地设置损坏时回到默认值。
-    }
-    return ["codex", "claude"];
-  });
+  const [widgetAgents, setWidgetAgents] = useState(initialWidgetAgents);
   // 玻璃浓度用户可调（ModernFlyouts 的做法）；仅影响玻璃模式的 CSS tint。
   const [glassAlpha, setGlassAlpha] = useState(() => {
     const stored = Number(localStorage.getItem("metrik:glassAlpha"));
-    return Number.isFinite(stored) && stored >= 0.6 && stored <= 0.96 ? stored : 0.82;
+    return isGlassAlphaInRange(stored) ? stored : 0.82;
   });
   const handleGlassAlpha = useCallback((next) => {
-    setGlassAlpha(next);
-    localStorage.setItem("metrik:glassAlpha", String(next));
-    if (IS_MAC) runWindowAction(() => broadcastMacAppearance({ glassAlpha: next }));
+    const parsed = Number(next);
+    if (!Number.isFinite(parsed)) return;
+    const value = Math.min(
+      GLASS_ALPHA_RANGE.max,
+      Math.max(GLASS_ALPHA_RANGE.min, parsed),
+    );
+    setGlassAlpha(value);
+    localStorage.setItem("metrik:glassAlpha", String(value));
+    if (IS_MAC) runWindowAction(() => broadcastMacAppearance({ glassAlpha: value }));
   }, []);
   // 卡片/胶囊的整体缩放系数（连续值）：窗口尺寸与 WebView 原生 zoom 同乘一个系数，
   // 等比放大不会变形；expanded 有独立系数。生效在 windowClient 的形态切换里，
@@ -3340,6 +3567,7 @@ export function App() {
         : [...current, agentId];
       if (!next.length) return current; // 至少保留一个
       localStorage.setItem("metrik:widgetAgents", JSON.stringify(next));
+      if (IS_MAC) runWindowAction(() => broadcastMacAppearance({ widgetAgents: next }));
       return next;
     });
   }, []);
@@ -3350,6 +3578,7 @@ export function App() {
       if (index <= 0) return current;
       [next[index - 1], next[index]] = [next[index], next[index - 1]];
       localStorage.setItem("metrik:widgetAgents", JSON.stringify(next));
+      if (IS_MAC) runWindowAction(() => broadcastMacAppearance({ widgetAgents: next }));
       return next;
     });
   }, []);
@@ -3434,8 +3663,11 @@ export function App() {
   }, [loadSnapshot, period, viewMode, indexing]);
 
   useEffect(() => {
-    // macOS 面板由系统管层级和位置：不置顶、不恢复坐标。
-    if (IS_MAC) return;
+    // macOS 菜单栏面板由系统管层级和位置；独立桌面组件恢复自己的拖放位置。
+    if (IS_MAC) {
+      if (viewMode === "desktop-widget") runWindowAction(() => restoreWindowPosition("desktop-widget"));
+      return;
+    }
     if (pinned) runWindowAction(() => setWindowPinned(true));
     // 小组件回到上次摆放的位置（含固定位置），坐标已不在任何屏幕上时居中。
     // strip 形态的启动定位在 strip 专属 effect 里做。
@@ -3478,7 +3710,8 @@ export function App() {
     const apply = () => {
       setWindowGlass(
         transparent && viewMode !== "expanded",
-        viewMode === "strip" ? 20 : 14,
+        viewMode === "desktop-widget" ? 28 : viewMode === "strip" ? 20 : 14,
+        viewMode === "desktop-widget" ? "underWindowBackground" : "hudWindow",
       )
         .then((mode) => {
           if (!cancelled) setGlassMode(mode);
@@ -3497,16 +3730,21 @@ export function App() {
     };
   }, [transparent, viewMode]);
 
-  // mac 的设置页开在独立的完整视图窗口里，面板是另一个 webview 实例，
-  // 拖滑杆时面板自己的 React 状态不会变。WKWebView 的 storage 事件不跨
-  // 窗口触发（每窗口独立 process pool），所以经 Tauri 事件总线把玻璃浓度
-  // 实时推进面板（改 CSS 变量当场可见）。广播也会回到发送方，处理是幂等
-  // 的。其它平台单窗口无此问题。
+  // mac 的设置页开在独立的完整视图窗口里，面板是另一个 webview 实例。
+  // WKWebView 的 storage 事件不跨窗口触发，所以面板浓度与 Agent 选择仍经
+  // Tauri 事件总线同步。真正的桌面小组件由 WidgetKit 管理，不参与这条链路。
   useEffect(() => {
     if (!IS_MAC || !isDesktop()) return undefined;
     const unlistenPromise = onMacAppearance((payload) => {
       const alpha = Number(payload.glassAlpha);
-      if (Number.isFinite(alpha) && alpha >= 0.6 && alpha <= 0.96) setGlassAlpha(alpha);
+      if (isGlassAlphaInRange(alpha)) setGlassAlpha(alpha);
+      if (Array.isArray(payload.widgetAgents)) {
+        const agents = normalizeVisibleAgentList(payload.widgetAgents);
+        if (agents.length) {
+          setWidgetAgents(agents);
+          localStorage.setItem("metrik:widgetAgents", JSON.stringify(agents));
+        }
+      }
     });
     return () => {
       unlistenPromise.then((unlisten) => unlisten());
@@ -3552,6 +3790,11 @@ export function App() {
     setQuotaAgent(next);
     localStorage.setItem("metrik:quotaAgent", next);
   }, [activeQuotaAgent, quotaAgents]);
+  const handleSelectQuotaAgent = useCallback((agentId) => {
+    if (!quotaAgents.includes(agentId)) return;
+    setQuotaAgent(agentId);
+    localStorage.setItem("metrik:quotaAgent", agentId);
+  }, [quotaAgents]);
 
   // 自动模式：胶囊条显示全部有官方配额数据的 agent（快照顺序）。
   const autoStripAgents = useMemo(
@@ -3744,6 +3987,11 @@ export function App() {
     // 另开标准窗口，不再把 NSPanel 变形成一条悬浮胶囊。
     if (IS_MAC) {
       if (nextMode === "expanded") {
+        if (!isDesktop()) {
+          setViewMode("expanded");
+          setActiveNav("overview");
+          return;
+        }
         runWindowAction(() => openExpandedWindow());
         return;
       }
@@ -3870,6 +4118,21 @@ export function App() {
         onExpand={() => handleWindowMode("expanded")}
         availableUpdate={availableUpdate}
         onOpenUpdate={handleOpenUpdate}
+      />
+    );
+  }
+
+  if (viewMode === "desktop-widget") {
+    return (
+      <MacDesktopWidget
+        snapshot={snapshot}
+        loading={appBusy}
+        quotaAgent={activeQuotaAgent}
+        widgetAgents={widgetAgents}
+        glassAlpha={0}
+        glassMode={glassMode}
+        onSelectAgent={handleSelectQuotaAgent}
+        onExpand={() => handleWindowMode("expanded")}
       />
     );
   }

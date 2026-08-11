@@ -11,6 +11,8 @@ mod pricing;
 mod schema;
 mod storage;
 mod sync;
+#[cfg(target_os = "macos")]
+mod widget_snapshot;
 
 use anyhow::{Context, Result};
 use domain::{QuotaSample, UsageReport, UsageSessions, UsageSnapshot};
@@ -349,7 +351,7 @@ async fn usage_snapshot(
         let _gate = scan_gate
             .lock()
             .map_err(|_| "usage scan lock poisoned".to_owned())?;
-        engine::build_snapshot(
+        let snapshot = engine::build_snapshot(
             &database_path,
             &period,
             &quota_cache,
@@ -357,7 +359,16 @@ async fn usage_snapshot(
             &http_quota_cache,
             force.unwrap_or(false),
         )
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+
+        #[cfg(target_os = "macos")]
+        if let Err(error) = widget_snapshot::persist(&snapshot) {
+            // Widget publication is a secondary output. A temporary App Group or
+            // filesystem failure must not hide the primary Metrik usage result.
+            eprintln!("Metrik could not publish its WidgetKit snapshot ({error:#})");
+        }
+
+        Ok(snapshot)
     })
     .await
     .map_err(|error| format!("usage scan task failed: {error}"))?
@@ -1091,6 +1102,20 @@ fn open_expanded_window(app: tauri::AppHandle, nav: Option<String>) -> Result<()
     }
 }
 
+/// macOS 可选桌面组件由独立原生窗口承载；其它平台没有对应形态。
+#[tauri::command]
+fn set_macos_desktop_widget_visible(app: tauri::AppHandle, visible: bool) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        macos::set_desktop_widget_visible(&app, visible)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (app, visible);
+        Err("桌面组件仅用于 macOS".into())
+    }
+}
+
 /// macOS 菜单栏面板在紧凑卡片与胶囊条之间切换尺寸；后端负责在改尺寸后
 /// 重新锚定菜单栏图标。其它平台不调用此命令。
 /// 高度按高分屏可用高留足余量（前端已按 screen.availHeight 钳过），
@@ -1268,6 +1293,17 @@ pub fn run() {
                     emergency_database_path()
                 }
             };
+            #[cfg(target_os = "macos")]
+            match engine::build_cached_snapshot(&database_path, "today") {
+                Ok(snapshot) => {
+                    if let Err(error) = widget_snapshot::persist(&snapshot) {
+                        eprintln!("Metrik could not seed its WidgetKit snapshot ({error:#})");
+                    }
+                }
+                Err(error) => {
+                    eprintln!("Metrik could not read a cached WidgetKit snapshot ({error:#})");
+                }
+            }
             // 旧版本写坏的 statusLine 只有用户手动关一次开关才会重写，而界面显示
             // 的是「已安装」，没人会想到去切。启动时静默补一次，坏在旧版本上的人
             // 升级即恢复。不属于 Metrik 的 statusLine 不会被碰。
@@ -1317,6 +1353,7 @@ pub fn run() {
             set_glass_backdrop,
             set_native_theme,
             open_expanded_window,
+            set_macos_desktop_widget_visible,
             resize_macos_panel,
             update_macos_status_items
         ])
@@ -1326,6 +1363,17 @@ pub fn run() {
 
 pub fn run_statusline() {
     claude_hook::run_statusline();
+}
+
+#[cfg(target_os = "macos")]
+pub fn publish_widget_snapshot_from_database(database_path: &Path) -> Result<PathBuf> {
+    let snapshot = engine::build_cached_snapshot(database_path, "today")?;
+    widget_snapshot::persist(&snapshot)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn publish_widget_snapshot_from_database(_database_path: &Path) -> Result<PathBuf> {
+    anyhow::bail!("WidgetKit snapshots are only available on macOS")
 }
 
 #[cfg(test)]

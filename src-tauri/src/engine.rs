@@ -190,6 +190,15 @@ pub fn build_snapshot(
     query_snapshot(&connection, period, report)
 }
 
+/// Builds a display snapshot from the already-indexed ledger without scanning logs,
+/// refreshing credentials, or calling provider APIs. The macOS host uses this at
+/// launch so WidgetKit can show the last known state immediately; the normal frontend
+/// refresh replaces it with a current snapshot moments later.
+pub fn build_cached_snapshot(database_path: &Path, period: &str) -> Result<UsageSnapshot> {
+    let connection = storage::open_database_read_only(database_path)?;
+    query_snapshot(&connection, period, ScanReport::default())
+}
+
 /// 只读历史报告：仅查询本地账本已有数据，绝不触发日志扫描或写入，
 /// 保证报告页秒开。
 pub fn build_report(database_path: &Path) -> Result<UsageReport> {

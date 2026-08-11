@@ -18,8 +18,12 @@ change.
 - The compact widget prioritizes per-agent official quota windows, including
   remaining percentage and reset countdown. Token analytics belong in the
   expanded view.
-- The strip prefers the five-hour quota window and falls back to the first
-  available ranked window.
+- Compact rows, strip cells, and the WidgetKit focus view have room for one
+  quota number, and it answers “can I use this Agent right now”. Normally that
+  is the shortest available window. When any window reaches 15% remaining or
+  less, the lowest live window takes over, because an exhausted weekly budget
+  blocks the Agent even when the session window looks full. Readings whose
+  reset moment has passed never participate.
 
 ## Agent and adapter behavior
 
@@ -82,17 +86,34 @@ change.
 
 - Compact mode is a native menu-bar panel that follows current system
   appearance and material. It is not a floating Windows-style strip.
+- The optional macOS desktop component is a real WidgetKit extension registered
+  in the system widget gallery. It is not a borderless Tauri/WebView window and
+  does not duplicate Windows floating-window behavior.
+- WidgetKit owns the desktop material, corner shape, content margins, desktop
+  placement, tint/rendering mode, and accessibility adaptations. Metrik does
+  not expose an opacity slider for this surface or paint a second outer card.
+- The focus widget prioritizes one Agent's binding official quota window and
+  reset countdown, with local token count secondary. The overview widget shows
+  every supported Agent in a large family (up to six); its large-family anatomy
+  preserves the approved Metrik desktop card: quota dial and today's tokens on
+  top, Agent switcher below, refresh/expanded-view footer last. Unavailable and
+  stale quota keep the same `--` and `~` grammar as the menu bar and compact
+  panel.
+- The host app publishes a compact, versioned, sanitised JSON snapshot through
+  an App Group. The extension never opens the SQLite ledger and the snapshot
+  never contains prompts, responses, credentials, or raw source paths.
 - The panel material is system vibrancy from the HUD family, kept in the
   active state because the non-activating panel never becomes key. The
-  glass-density slider adjusts a scrim above vibrancy, so blur stays native
-  while density sweeps continuously from airy to near-solid in both light
-  and dark appearance.
+  panel's independent 5–96% glass-density slider adjusts a scrim above
+  vibrancy, so blur stays native while density sweeps continuously from airy
+  to near-solid in both light and dark appearance.
 - The panel has a fixed design size (width 320, height follows content). The
   widget-scale setting is a Windows-only concept and is hidden on macOS; the
   panel is part of the system UI and does not scale.
-- Appearance changes made in the separate expanded window (glass density)
-  propagate live to the panel webview via the Tauri event bus — WKWebView
-  storage events do not cross windows.
+- Appearance changes made in the separate expanded window (panel density and
+  Agent selection) propagate live to the other webviews via the Tauri event bus
+  — WKWebView storage events do not cross windows. WidgetKit data refresh uses
+  the App Group snapshot contract instead.
 - Content overlays must remain readable on both light and dark desktops.
 - The menu bar uses Metrik's own minimal grammar: one monochrome provider icon
   plus official remaining percentage for every selected agent, `--` for
