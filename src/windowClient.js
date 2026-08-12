@@ -17,7 +17,9 @@ const WINDOW_SIZES = {
   // Agent 只留一行时卡片允许收短，不再空一截（高度仍由内容自愈驱动）。
   compact: { width: 320, height: 320, minWidth: 320, minHeight: 260 },
   expanded: { width: 1120, height: 760, minWidth: 960, minHeight: 700 },
-  strip: { width: 240, height: 40, minWidth: 40, minHeight: 40 },
+  // 横条高 28（26px 控件槽 + 呼吸），竖条宽 42：最小尺寸必须低于两者，
+  // 否则窗口卡在下限上，内容测量再准也收不回去。
+  strip: { width: 240, height: 28, minWidth: 28, minHeight: 28 },
 };
 
 // 卡片/胶囊的整体缩放系数（连续值）。窗口尺寸与页面 zoom 同乘一个系数，
