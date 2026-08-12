@@ -13,6 +13,8 @@ test("macOS release embeds the native WidgetKit extension and helpers", () => {
   assert.deepEqual(tauriConfig.bundle.macOS.files, {
     "PlugIns/MetrikWidget.appex":
       "../.build/macos-widget-extension/MetrikWidget.appex",
+    "Helpers/metrik-widget-publish":
+      "../.build/macos-widget-extension/Helpers/metrik-widget-publish",
     "Helpers/metrik-widget-reload":
       "../.build/macos-widget-extension/Helpers/metrik-widget-reload",
   });

@@ -73,6 +73,7 @@
       "entitlements": "entitlements.macOS.plist",
       "files": {
         "PlugIns/MetrikWidget.appex": "../.build/macos-widget-extension/MetrikWidget.appex",
+        "Helpers/metrik-widget-publish": "../.build/macos-widget-extension/Helpers/metrik-widget-publish",
         "Helpers/metrik-widget-reload": "../.build/macos-widget-extension/Helpers/metrik-widget-reload"
       }
     }

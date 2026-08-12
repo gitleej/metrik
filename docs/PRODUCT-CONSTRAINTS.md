@@ -111,11 +111,14 @@ change.
 - WidgetKit owns desktop material, corner shape, placement, tint mode, and
   accessibility adaptations. Metrik does not paint a second outer card or
   expose an opacity slider for the system widget.
-- The host and extension share only a compact sanitised snapshot through a
-  per-user Application Support file; releases are ad-hoc signed without a team
-  identity, so an App Group container is not an option. The snapshot contains
-  derived totals and quota metadata, never prompts, responses, credentials, or
-  raw source paths.
+- The host and extension share only a compact sanitised snapshot through their
+  App Group. It contains derived totals and quota metadata, never prompts,
+  responses, credentials, or raw source paths. Releases are ad-hoc signed, so
+  every process that touches the group container must carry both the App
+  Sandbox and the group entitlement: a non-sandboxed binary (including the
+  host app itself) accessing the container makes macOS treat the access as
+  foreign and prompt repeatedly. The host therefore delegates container
+  writes to a sandboxed signed helper and holds no group entitlement itself.
 - Widget clicks open the expanded view through `metrik://` deep links
   (`metrik://open`, `metrik://agent/<id>`, and the expanded-view nav targets);
   the widget never embeds interactive controls beyond these links.
