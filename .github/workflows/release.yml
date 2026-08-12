@@ -72,7 +72,6 @@ jobs:
           app_path="$(find src-tauri/target -path '*/release/bundle/macos/Metrik.app' -type d -print -quit)"
           test -n "$app_path"
           test -x "$app_path/Contents/PlugIns/MetrikWidget.appex/Contents/MacOS/MetrikWidget"
-          test -x "$app_path/Contents/Helpers/metrik-widget-publish"
           test -x "$app_path/Contents/Helpers/metrik-widget-reload"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app_path/Contents/PlugIns/MetrikWidget.appex/Contents/Info.plist")" = "app.metrik.desktop.widget"
           codesign --verify --deep --strict --verbose=2 "$app_path"

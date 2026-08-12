@@ -571,6 +571,14 @@ async function onMacAppearance(handler) {
   return listen("metrik://mac-appearance", (event) => handler(event.payload || {}));
 }
 
+/// 桌面小组件 deep link 到达时完整视图窗口已经开着：后端只负责把窗口带到
+/// 前台，导航目标通过这个事件交给前端（窗口新建时则走 nav 查询参数）。
+async function onWidgetNavigate(handler) {
+  if (!isDesktop() || !isMacPlatform()) return () => {};
+  const { listen } = await import("@tauri-apps/api/event");
+  return listen("metrik://navigate", (event) => handler(event.payload));
+}
+
 /// 拖动结束后持久化窗口位置（compact 与 strip 各记各的；expanded 不记）。
 async function startPositionMemory(getMode) {
   if (isMacPlatform()) return () => {};
@@ -1312,6 +1320,7 @@ export {
   onMacAppearance,
   onScaleFactorChanged,
   onTrayShowExpanded,
+  onWidgetNavigate,
   openExpandedWindow,
   readStripScale,
   readUiScale,

@@ -1025,6 +1025,10 @@ pub fn run() {
     #[cfg(target_os = "macos")]
     let builder = builder.plugin(tauri_nspanel::init());
 
+    // 桌面小组件点击打开 metrik:// 链接；scheme 由 tauri.conf.json 注册进 Info.plist。
+    #[cfg(target_os = "macos")]
+    let builder = builder.plugin(tauri_plugin_deep_link::init());
+
     #[cfg(any(target_os = "macos", windows, target_os = "linux"))]
     let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
         // macOS 上小插件是菜单栏面板：第二个实例把面板弹回图标下方，而不是显示一个游离窗口。
@@ -1063,6 +1067,21 @@ pub fn run() {
             // 与 Windows 的"单窗口变形 + 自绘按钮"完全分开。
             #[cfg(target_os = "macos")]
             macos::setup(app)?;
+
+            // 桌面小组件的点击：metrik:// 链接统一打开完整视图。
+            #[cfg(target_os = "macos")]
+            {
+                use tauri_plugin_deep_link::DeepLinkExt;
+                let handle = app.handle().clone();
+                app.deep_link().on_open_url(move |event| {
+                    if let Some(url) = event.urls().iter().find(|url| url.scheme() == "metrik") {
+                        let _ = macos::open_expanded_window(
+                            handle.clone(),
+                            macos::nav_for_widget_url(url),
+                        );
+                    }
+                });
+            }
 
             #[cfg(all(desktop, not(target_os = "macos")))]
             setup_tray(app)?;

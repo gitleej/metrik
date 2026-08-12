@@ -4,6 +4,11 @@
 //! compact, versioned JSON snapshot containing only derived totals and official quota
 //! metadata. This keeps storage ownership in the shared core and gives WidgetKit a
 //! stable contract that can evolve independently from the database schema.
+//!
+//! Release builds are ad-hoc signed without a team identity, so an App Group
+//! container cannot authorise the host and the extension as one developer. The
+//! bridge is a per-user Application Support file that the unsandboxed extension
+//! reads directly.
 
 use crate::domain::UsageSnapshot;
 use anyhow::{Context, Result};
@@ -11,7 +16,6 @@ use serde::Serialize;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -104,50 +108,9 @@ fn make_payload(snapshot: &UsageSnapshot) -> WidgetSnapshot<'_> {
     }
 }
 
-fn publisher_path() -> Option<PathBuf> {
-    if let Some(path) = std::env::var_os("METRIK_WIDGET_PUBLISHER") {
-        let path = PathBuf::from(path);
-        return path.is_file().then_some(path);
-    }
-
-    let executable = std::env::current_exe().ok()?;
-    let contents = executable.parent().and_then(Path::parent)?;
-    let helper = contents.join("Helpers").join("metrik-widget-publish");
-    helper.is_file().then_some(helper)
-}
-
-fn publish_with_helper(helper: &Path, bytes: &[u8]) -> Result<PathBuf> {
-    let mut child = Command::new(helper)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .with_context(|| format!("cannot start WidgetKit publisher {}", helper.display()))?;
-    child
-        .stdin
-        .take()
-        .context("WidgetKit publisher stdin is unavailable")?
-        .write_all(bytes)
-        .context("cannot send the snapshot to the WidgetKit publisher")?;
-    let output = child
-        .wait_with_output()
-        .context("cannot wait for the WidgetKit publisher")?;
-    if !output.status.success() {
-        let detail = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("WidgetKit publisher failed: {}", detail.trim());
-    }
-    let path = String::from_utf8(output.stdout)
-        .context("WidgetKit publisher returned a non-UTF-8 path")?;
-    let path = PathBuf::from(path.trim());
-    if path.as_os_str().is_empty() {
-        anyhow::bail!("WidgetKit publisher returned an empty path");
-    }
-    Ok(path)
-}
-
-fn fallback_directory() -> Result<PathBuf> {
+fn snapshot_directory() -> Result<PathBuf> {
     let base = dirs::data_dir().context("cannot locate the application support directory")?;
-    Ok(base.join("Metrik").join("Widget Preview"))
+    Ok(base.join("Metrik").join("Widget"))
 }
 
 fn write_atomically(path: &Path, bytes: &[u8]) -> Result<()> {
@@ -155,7 +118,7 @@ fn write_atomically(path: &Path, bytes: &[u8]) -> Result<()> {
         .parent()
         .context("widget snapshot has no parent directory")?;
     fs::create_dir_all(parent)
-        .with_context(|| format!("cannot create widget group directory {}", parent.display()))?;
+        .with_context(|| format!("cannot create widget snapshot directory {}", parent.display()))?;
 
     let temporary = parent.join(format!(".{SNAPSHOT_FILE_NAME}.{}.tmp", std::process::id()));
     let mut options = OpenOptions::new();
@@ -181,15 +144,8 @@ fn write_atomically(path: &Path, bytes: &[u8]) -> Result<()> {
 
 pub fn persist(snapshot: &UsageSnapshot) -> Result<PathBuf> {
     let bytes = serde_json::to_vec(&make_payload(snapshot))?;
-    let path = if let Some(helper) = publisher_path() {
-        publish_with_helper(&helper, &bytes)?
-    } else {
-        // Cargo tests and unbundled development builds have no signed helper.
-        // Keep a readable preview copy without pretending it is an App Group.
-        let path = fallback_directory()?.join(SNAPSHOT_FILE_NAME);
-        write_atomically(&path, &bytes)?;
-        path
-    };
+    let path = snapshot_directory()?.join(SNAPSHOT_FILE_NAME);
+    write_atomically(&path, &bytes)?;
     reload_timelines();
     Ok(path)
 }

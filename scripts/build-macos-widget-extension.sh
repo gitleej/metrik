@@ -81,21 +81,17 @@ do
   ditto "$PROJECT_DIR/src/assets/$asset" "$APPEX_RESOURCES/$asset"
 done
 
-build_universal "$HELPERS_DIR/metrik-widget-publish" \
-  -framework Foundation \
-  "$PROJECT_DIR/WidgetExtension/Sources/MetrikWidgetPublisher.swift"
 build_universal "$HELPERS_DIR/metrik-widget-reload" \
   -framework WidgetKit \
   "$PROJECT_DIR/WidgetExtension/Sources/MetrikWidgetReloader.swift"
 
 # This is ad-hoc bundle integrity, not Developer ID distribution signing. The
-# nested extension must be sealed before Tauri seals the outer app bundle.
+# nested extension must be sealed before Tauri seals the outer app bundle. The
+# entitlements are intentionally empty: ad-hoc signed components cannot share an
+# App Group, so the widget reads the host's Application Support snapshot file.
 codesign --force --sign - \
   --entitlements "$PROJECT_DIR/WidgetExtension/MetrikWidget.entitlements" \
   "$APPEX_BUNDLE"
-codesign --force --sign - \
-  --entitlements "$PROJECT_DIR/src-tauri/entitlements.macOS.plist" \
-  "$HELPERS_DIR/metrik-widget-publish"
 codesign --force --sign - "$HELPERS_DIR/metrik-widget-reload"
 codesign --verify --strict --verbose=2 "$APPEX_BUNDLE"
 

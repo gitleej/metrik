@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "Metrik",
-  "version": "0.15.1",
+  "version": "0.15.2",
   "identifier": "app.metrik.desktop",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -37,6 +37,11 @@
     }
   },
   "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": ["metrik"]
+      }
+    },
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDMxMDE1MzcxOTAyOEE1OEMKUldTTXBTaVFjVk1CTWJjMHZYY01vbDNsMlAveFYwZU9Gem9ZbmlEbmRTSmxabzYxcEplamtKbS8K",
       "endpoints": [
@@ -68,7 +73,6 @@
       "entitlements": "entitlements.macOS.plist",
       "files": {
         "PlugIns/MetrikWidget.appex": "../.build/macos-widget-extension/MetrikWidget.appex",
-        "Helpers/metrik-widget-publish": "../.build/macos-widget-extension/Helpers/metrik-widget-publish",
         "Helpers/metrik-widget-reload": "../.build/macos-widget-extension/Helpers/metrik-widget-reload"
       }
     }

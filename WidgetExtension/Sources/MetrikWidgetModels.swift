@@ -1,6 +1,14 @@
 import Foundation
 
-let metrikAppGroupIdentifier = "group.app.metrik.desktop"
+/// Widget clicks open the host app through these URLs; the host maps them to
+/// expanded-view navigation targets (see nav_for_widget_url in macos.rs).
+enum MetrikWidgetDeepLink {
+    static let open = URL(string: "metrik://open")!
+
+    static func agent(_ id: String) -> URL {
+        URL(string: "metrik://agent/\(id)")!
+    }
+}
 
 struct MetrikWidgetSnapshot: Decodable {
     let schemaVersion: Int
@@ -60,13 +68,8 @@ enum MetrikWidgetStore {
     static let fileName = "widget-snapshot.json"
 
     static func load() -> MetrikWidgetSnapshot? {
-        if let container = FileManager.default
-            .containerURL(forSecurityApplicationGroupIdentifier: metrikAppGroupIdentifier)
-        {
-            let sharedURL = container.appendingPathComponent(self.fileName, isDirectory: false)
-            if let snapshot = self.decode(sharedURL) {
-                return snapshot
-            }
+        if let snapshotURL = self.snapshotURL, let snapshot = self.decode(snapshotURL) {
+            return snapshot
         }
 
         guard let bundledURL = Bundle.main.url(
@@ -74,6 +77,17 @@ enum MetrikWidgetStore {
             withExtension: "json")
         else { return nil }
         return self.decode(bundledURL)
+    }
+
+    // The host publishes the snapshot into Application Support. Release builds are
+    // ad-hoc signed without a team identity, so an App Group container cannot
+    // replace this plain per-user file bridge.
+    private static var snapshotURL: URL? {
+        FileManager.default
+            .urls(for: .applicationSupportDirectory, in: .userDomainMask)
+            .first?
+            .appendingPathComponent("Metrik/Widget", isDirectory: true)
+            .appendingPathComponent(self.fileName, isDirectory: false)
     }
 
     private static func decode(_ url: URL) -> MetrikWidgetSnapshot? {

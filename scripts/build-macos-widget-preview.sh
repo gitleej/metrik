@@ -104,7 +104,7 @@ chmod +x \
   "$APPEX_BINARY"
 xattr -cr "$APP_BUNDLE"
 
-echo "Applying local ad-hoc signatures and App Sandbox entitlements..."
+echo "Applying local ad-hoc signatures..."
 codesign --force --sign - "$APP_BUNDLE/Contents/Helpers/metrik-widget-reload"
 codesign --force --sign - \
   --entitlements "$PROJECT_DIR/WidgetExtension/MetrikWidget.preview.entitlements" \
