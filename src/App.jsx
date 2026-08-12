@@ -80,7 +80,6 @@ import {
   onMacAppearance,
   onScaleFactorChanged,
   onTrayShowExpanded,
-  onWidgetNavigate,
   openExpandedWindow,
   readStripScale,
   readUiScale,
@@ -4352,12 +4351,12 @@ function stripPositionMode(orientation) {
   return `strip-${orientation}`;
 }
 
-/// 托盘菜单的"设置"直接开在设置页；桌面小组件的 deep link 也能指定目标页。
-/// 其余情况从概览进。
+/// 托盘菜单的"设置"直接开在设置页；其余情况从概览进。
 function initialNav() {
   if (typeof window === "undefined") return "overview";
-  const nav = new URLSearchParams(window.location.search).get("nav");
-  return NAV_ITEMS.some((item) => item.id === nav) ? nav : "overview";
+  return new URLSearchParams(window.location.search).get("nav") === "settings"
+    ? "settings"
+    : "overview";
 }
 
 export function App() {
@@ -4743,18 +4742,6 @@ export function App() {
     const unlistenPromise = onMacAppearance((payload) => {
       const alpha = Number(payload.glassAlpha);
       if (Number.isFinite(alpha) && alpha >= 0.05 && alpha <= 0.96) setGlassAlpha(alpha);
-    });
-    return () => {
-      unlistenPromise.then((unlisten) => unlisten());
-    };
-  }, []);
-
-  // 完整视图窗口已开着时，桌面小组件的 deep link 经事件切页（窗口新建时走
-  // nav 查询参数，见 initialNav）。
-  useEffect(() => {
-    if (!IS_MAC || !isDesktop()) return undefined;
-    const unlistenPromise = onWidgetNavigate((nav) => {
-      if (NAV_ITEMS.some((item) => item.id === nav)) setActiveNav(nav);
     });
     return () => {
       unlistenPromise.then((unlisten) => unlisten());

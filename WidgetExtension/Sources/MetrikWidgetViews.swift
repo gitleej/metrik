@@ -37,9 +37,19 @@ struct MetrikProviderIcon: View {
                let url = Bundle.main.url(forResource: asset.name, withExtension: asset.ext),
                let image = NSImage(contentsOf: url)
             {
-                Image(nsImage: image)
-                    .resizable()
-                    .scaledToFit()
+                // 单色/透明桌面风格（macOS 15+ accented 渲染）默认把位图漂成白色，
+                // 品牌图标必须保持全彩，否则只剩一个白方块。该修饰符是 WidgetKit 的
+                // Image 扩展，必须先 resizable 再设置；macOS 14 没有它，走原版渲染。
+                if #available(macOS 15.0, *) {
+                    Image(nsImage: image)
+                        .resizable()
+                        .widgetAccentedRenderingMode(.fullColor)
+                        .scaledToFit()
+                } else {
+                    Image(nsImage: image)
+                        .resizable()
+                        .scaledToFit()
+                }
             } else {
                 Image(systemName: "terminal")
                     .resizable()
@@ -102,7 +112,6 @@ struct MetrikFocusView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .containerBackground(.fill.tertiary, for: .widget)
-        .widgetURL(self.focusAgent.map { MetrikWidgetDeepLink.agent($0.id) } ?? MetrikWidgetDeepLink.open)
     }
 
     private var focusAgent: MetrikWidgetAgent? {
@@ -222,9 +231,7 @@ struct MetrikOverviewView: View {
                     } else {
                         VStack(spacing: 0) {
                             ForEach(self.visibleAgents) { agent in
-                                Link(destination: MetrikWidgetDeepLink.agent(agent.id)) {
-                                    MetrikOverviewRow(agent: agent, compact: true)
-                                }
+                                MetrikOverviewRow(agent: agent, compact: true)
                                 if agent.id != self.visibleAgents.last?.id {
                                     Divider()
                                 }
@@ -236,7 +243,6 @@ struct MetrikOverviewView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .containerBackground(.fill.tertiary, for: .widget)
-        .widgetURL(MetrikWidgetDeepLink.open)
     }
 
     private var limit: Int { self.family == .systemLarge ? 6 : 3 }
@@ -274,12 +280,8 @@ private struct MetrikDashboardView: View {
                     .frame(width: 6, height: 6)
                 Text(self.hasFreshQuota ? "刚刚更新" : "部分覆盖")
                 Spacer(minLength: 8)
-                Link(destination: MetrikWidgetDeepLink.open) {
-                    HStack(spacing: 6) {
-                        Text("完整视图")
-                        Image(systemName: "arrow.up.right")
-                    }
-                }
+                Text("完整视图")
+                Image(systemName: "arrow.up.right")
             }
             .font(.caption2)
             .foregroundStyle(.secondary)
@@ -402,14 +404,12 @@ private struct MetrikDashboardAgentGrid: View {
 
         LazyVGrid(columns: columns, alignment: .leading, spacing: 0) {
             ForEach(Array(agents.enumerated()), id: \.element.id) { index, agent in
-                Link(destination: MetrikWidgetDeepLink.agent(agent.id)) {
-                    MetrikDashboardAgentCell(
-                        agent: agent,
-                        compact: agents.count > 4,
-                        showsTrailingDivider: columnCount == 2 && index.isMultiple(of: 2),
-                        showsBottomDivider: index < agents.count - columnCount)
-                        .frame(height: cellHeight)
-                }
+                MetrikDashboardAgentCell(
+                    agent: agent,
+                    compact: agents.count > 4,
+                    showsTrailingDivider: columnCount == 2 && index.isMultiple(of: 2),
+                    showsBottomDivider: index < agents.count - columnCount)
+                    .frame(height: cellHeight)
             }
         }
         .frame(height: cellHeight * CGFloat(rowCount))

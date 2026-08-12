@@ -2,16 +2,6 @@ import Foundation
 
 let metrikAppGroupIdentifier = "group.app.metrik.desktop"
 
-/// Widget clicks open the host app through these URLs; the host maps them to
-/// expanded-view navigation targets (see nav_for_widget_url in macos.rs).
-enum MetrikWidgetDeepLink {
-    static let open = URL(string: "metrik://open")!
-
-    static func agent(_ id: String) -> URL {
-        URL(string: "metrik://agent/\(id)")!
-    }
-}
-
 struct MetrikWidgetSnapshot: Decodable {
     let schemaVersion: Int
     let generatedAt: String

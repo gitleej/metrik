@@ -46,9 +46,6 @@ libc = "0.2"
 # 菜单栏面板：把 main 窗口换成不抢焦点的 NSPanel。crates.io 上没有 Tauri 2 版本，
 # 只能走 git 分支；上游停更时需要自行维护。
 tauri-nspanel = { git = "https://github.com/ahkohd/tauri-nspanel", branch = "v2" }
-# 桌面小组件点击走 metrik:// deep link；只有 macOS 有 WidgetKit 扩展。
-tauri-plugin-deep-link = "2"
-url = "2"
 
 [target.'cfg(windows)'.dependencies]
 # 只剩任务栏进度按钮用得到。WinRT 合成那几个 feature 和 windows-numerics 是

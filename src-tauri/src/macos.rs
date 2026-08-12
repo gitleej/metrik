@@ -17,7 +17,7 @@ use tauri::image::Image;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{
-    ActivationPolicy, AppHandle, Emitter, LogicalSize, Manager, PhysicalPosition, Rect, WebviewUrl,
+    ActivationPolicy, AppHandle, LogicalSize, Manager, PhysicalPosition, Rect, WebviewUrl,
     WebviewWindowBuilder,
 };
 use tauri_nspanel::cocoa::appkit::{NSMainMenuWindowLevel, NSWindowCollectionBehavior};
@@ -413,22 +413,6 @@ fn position_panel_with_width(app: &AppHandle, logical_width: Option<f64>) {
     let _ = window.set_position(PhysicalPosition::new(x.round() as i32, y.round() as i32));
 }
 
-/// 桌面小组件的 metrik:// 链接 → 完整视图导航目标（对应 App.jsx 的 NAV_ITEMS）。
-/// metrik://open 与未识别的链接只打开窗口；metrik://agent/<id> 暂落到概览，
-/// 等完整视图有 per-agent 页面后再细化。
-pub fn nav_for_widget_url(url: &url::Url) -> Option<String> {
-    if url.scheme() != "metrik" {
-        return None;
-    }
-    match url.host_str() {
-        Some("settings") => Some("settings".into()),
-        Some("usage") => Some("usage".into()),
-        Some("reports") => Some("reports".into()),
-        Some("agent") => Some("overview".into()),
-        _ => None,
-    }
-}
-
 /// 完整视图是一个独立的标准窗口：原生红绿灯、可缩放、进 Dock 与 Cmd-Tab。
 /// 面板（NSPanel）无法兼任这个角色，所以单开一个窗口。
 pub fn open_expanded_window(app: AppHandle, nav: Option<String>) -> Result<(), String> {
@@ -439,10 +423,6 @@ pub fn open_expanded_window(app: AppHandle, nav: Option<String>) -> Result<(), S
         window.show().map_err(|error| error.to_string())?;
         window.unminimize().ok();
         window.set_focus().map_err(|error| error.to_string())?;
-        // 窗口已存在时 nav 查询参数送不进去，改走事件让前端切页。
-        if let Some(nav) = nav {
-            let _ = app.emit("metrik://navigate", nav);
-        }
         return Ok(());
     }
 
@@ -557,18 +537,6 @@ fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn widget_deep_links_map_to_expanded_nav_targets() {
-        let parse = |raw: &str| nav_for_widget_url(&url::Url::parse(raw).unwrap());
-        assert_eq!(parse("metrik://open"), None);
-        assert_eq!(parse("metrik://settings"), Some("settings".to_string()));
-        assert_eq!(parse("metrik://usage"), Some("usage".to_string()));
-        assert_eq!(parse("metrik://reports"), Some("reports".to_string()));
-        assert_eq!(parse("metrik://agent/claude"), Some("overview".to_string()));
-        assert_eq!(parse("metrik://unknown"), None);
-        assert_eq!(parse("https://example.com/settings"), None);
-    }
 
     #[test]
     fn status_title_clamps_percentages_and_marks_stale_data() {

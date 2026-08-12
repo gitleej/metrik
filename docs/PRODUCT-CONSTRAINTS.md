@@ -119,9 +119,6 @@ change.
   host app itself) accessing the container makes macOS treat the access as
   foreign and prompt repeatedly. The host therefore delegates container
   writes to a sandboxed signed helper and holds no group entitlement itself.
-- Widget clicks open the expanded view through `metrik://` deep links
-  (`metrik://open`, `metrik://agent/<id>`, and the expanded-view nav targets);
-  the widget never embeds interactive controls beyond these links.
 - The panel material is system vibrancy from the HUD family, kept in the
   active state because the non-activating panel never becomes key. The
   glass-density slider adjusts a scrim above vibrancy, so blur stays native
