@@ -279,9 +279,6 @@ private struct MetrikDashboardView: View {
                     .fill(self.hasFreshQuota ? Color.green : Color.orange)
                     .frame(width: 6, height: 6)
                 Text(self.hasFreshQuota ? "刚刚更新" : "部分覆盖")
-                Spacer(minLength: 8)
-                Text("完整视图")
-                Image(systemName: "arrow.up.right")
             }
             .font(.caption2)
             .foregroundStyle(.secondary)
