@@ -177,6 +177,7 @@ pub fn update_status_items(
         return Err("macOS 菜单栏状态项参数长度不一致".into());
     }
 
+    eprintln!("Metrik status items requested: {}", agents.join(","));
     for spec in STATUS_ITEMS {
         let Some(tray) = app.tray_by_id(spec.id) else {
             return Err(format!("macOS {} 菜单栏状态项不存在", spec.name));
@@ -184,6 +185,11 @@ pub fn update_status_items(
         let selected_index = agents.iter().position(|agent| agent == spec.id);
         tray.set_visible(selected_index.is_some())
             .map_err(|error| error.to_string())?;
+        eprintln!(
+            "Metrik status item {} visible={}",
+            spec.id,
+            selected_index.is_some()
+        );
         let Some(index) = selected_index else {
             continue;
         };
@@ -413,6 +419,27 @@ fn position_panel_with_width(app: &AppHandle, logical_width: Option<f64>) {
     let _ = window.set_position(PhysicalPosition::new(x.round() as i32, y.round() as i32));
 }
 
+/// Tauri 给每个 macOS 窗口默认打开 FullSizeContentView（tauri#3914 的变通），
+/// 但在 macOS 26 上它会让手动指定的深色外观进不了标题栏——深色内容上面总顶着
+/// 一条白色标题栏。完整视图是唯一带原生标题栏的窗口，创建后清掉这个标志，
+/// 标题栏就能正常跟随窗口外观明暗。
+fn strip_fullsize_content_view(window: &tauri::WebviewWindow) {
+    use objc::{msg_send, sel, sel_impl};
+    use tauri_nspanel::cocoa::base::id;
+
+    const FULLSIZE_CONTENT_VIEW: usize = 1 << 15;
+
+    let Ok(ns_window) = window.ns_window() else {
+        return;
+    };
+    let ns_window = ns_window as usize;
+    let _ = window.app_handle().run_on_main_thread(move || unsafe {
+        let ns_window = ns_window as id;
+        let mask: usize = msg_send![ns_window, styleMask];
+        let _: () = msg_send![ns_window, setStyleMask: mask & !FULLSIZE_CONTENT_VIEW];
+    });
+}
+
 /// 完整视图是一个独立的标准窗口：原生红绿灯、可缩放、进 Dock 与 Cmd-Tab。
 /// 面板（NSPanel）无法兼任这个角色，所以单开一个窗口。
 pub fn open_expanded_window(app: AppHandle, nav: Option<String>) -> Result<(), String> {
@@ -440,6 +467,7 @@ pub fn open_expanded_window(app: AppHandle, nav: Option<String>) -> Result<(), S
         .center()
         .build()
         .map_err(|error| error.to_string())?;
+    strip_fullsize_content_view(&window);
 
     // 完整视图开着时才进 Dock；它被关掉后回到纯菜单栏应用。
     let handle = app.clone();

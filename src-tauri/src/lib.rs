@@ -824,10 +824,16 @@ async fn set_claude_hook(enabled: bool) -> Result<claude_hook::ClaudeHookStatus,
 /// 完整视图在 macOS 是带原生标题栏的独立窗口：用户手动选择明暗、且与系统相反时，
 /// 让原生标题栏跟随内容主题（"自动"传 None，交回系统决定，与内容一致）。
 /// Windows 的完整视图无边框、无原生标题栏，无需处理，这里对其它平台是 no-op。
+// objc/cocoa 的老宏在 clippy 下报 unexpected_cfgs/deprecated，与 macos.rs 头部同理豁免。
+#[cfg_attr(target_os = "macos", allow(deprecated, unexpected_cfgs))]
 #[tauri::command]
 fn set_native_theme(window: tauri::WebviewWindow, theme: Option<String>) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
+        use objc::{class, msg_send, sel, sel_impl};
+        use tauri_nspanel::cocoa::base::{id, nil};
+        use tauri_nspanel::cocoa::foundation::NSString;
+
         let resolved = match theme.as_deref() {
             Some("dark") => Some(tauri::Theme::Dark),
             Some("light") => Some(tauri::Theme::Light),
@@ -835,6 +841,35 @@ fn set_native_theme(window: tauri::WebviewWindow, theme: Option<String>) -> Resu
         };
         window
             .set_theme(resolved)
+            .map_err(|error| error.to_string())?;
+
+        // 再把窗口级 appearance 直接压上（"自动"清回 nil，跟随系统）。
+        // 标题栏能跟随它的前提是创建时清掉了 FullSizeContentView
+        // （见 macos.rs 的 strip_fullsize_content_view）。
+        // AppKit 不是线程安全的：Tauri 命令跑在线程池里，离主线程的
+        // setAppearance: 会被静默忽略，必须派回主线程执行。
+        let ns_window = window.ns_window().map_err(|error| error.to_string())? as usize;
+        window
+            .app_handle()
+            .run_on_main_thread(move || {
+                let appearance: id = unsafe {
+                    match resolved {
+                        Some(tauri::Theme::Dark) => {
+                            let name = NSString::alloc(nil).init_str("NSAppearanceNameDarkAqua");
+                            msg_send![class!(NSAppearance), appearanceNamed: name]
+                        }
+                        Some(tauri::Theme::Light) => {
+                            let name = NSString::alloc(nil).init_str("NSAppearanceNameAqua");
+                            msg_send![class!(NSAppearance), appearanceNamed: name]
+                        }
+                        _ => nil,
+                    }
+                };
+                let ns_window = ns_window as id;
+                unsafe {
+                    let _: () = msg_send![ns_window, setAppearance: appearance];
+                }
+            })
             .map_err(|error| error.to_string())?;
     }
     #[cfg(not(target_os = "macos"))]
