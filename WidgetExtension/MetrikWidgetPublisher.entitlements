@@ -1,15 +1,12 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList.dtd">
 <plist version="1.0">
 <dict>
-    <!-- 触碰 App Group 容器的进程必须同时沙盒化：ad-hoc 签名下，非沙盒进程
-         直接读写 Group Container 会被 macOS 当作"访问其他 App 的数据"反复弹窗；
-         沙盒 + entitlement 的组合则免授权（已在 macOS 26 真机验证）。 -->
+    <!-- publisher 嵌入了 widget extension 的 bundle identity，所以沙盒进程的
+         UserDefaults.standard 解析进 widget 的 container，不依赖 App Group。
+         App Group 在 ad-hoc 签名（无 Team ID）下会被系统静默忽略，留着只会
+         误导排查。 -->
     <key>com.apple.security.app-sandbox</key>
     <true/>
-    <key>com.apple.security.application-groups</key>
-    <array>
-        <string>group.app.metrik.desktop</string>
-    </array>
 </dict>
 </plist>

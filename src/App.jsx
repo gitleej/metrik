@@ -4420,12 +4420,19 @@ export function App() {
   const activeLoadPeriod = useRef(null);
   const queuedLoadPeriod = useRef(null);
   const currentPeriod = useRef(period);
+  const widgetAgentsRef = useRef(widgetAgents);
   const rebuildInFlight = useRef(false);
   currentPeriod.current = period;
+  widgetAgentsRef.current = widgetAgents;
 
   const loadSnapshot = useCallback(async (nextPeriod, options) => {
     if (loadInFlight.current) {
-      queuedLoadPeriod.current = activeLoadPeriod.current === nextPeriod ? null : nextPeriod;
+      // 普通的同周期轮询仍合并；Agent 勾选/排序变化必须排一次同周期请求，
+      // 否则恰逢已有请求进行中时，WidgetKit 会一直保留旧选择。
+      // 已排队的选择刷新也不能被随后到达的普通轮询清掉。
+      if (options?.ensureLatestWidgetAgents || activeLoadPeriod.current !== nextPeriod) {
+        queuedLoadPeriod.current = nextPeriod;
+      }
       return;
     }
 
@@ -4439,7 +4446,11 @@ export function App() {
         queuedLoadPeriod.current = null;
         const requestId = ++requestSequence.current;
         setLoading(true);
-        const next = await getUsageSnapshot(periodToLoad, forceLoad ? { force: true } : undefined);
+        const next = await getUsageSnapshot(periodToLoad, {
+          force: forceLoad,
+          // 每轮都读 ref：排队请求必须拿到最新勾选，不能沿用创建回调时的闭包。
+          widgetAgents: widgetAgentsRef.current,
+        });
         forceLoad = false;
         if (requestId === requestSequence.current && !queuedLoadPeriod.current) {
           setSnapshot(next);
@@ -4454,8 +4465,9 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    loadSnapshot(period);
-  }, [period, loadSnapshot]);
+    // 周期或 Agent 选择变化都重发快照；选择变化即便撞上在途请求也不能被合并。
+    loadSnapshot(period, { ensureLatestWidgetAgents: true });
+  }, [period, widgetAgents, loadSnapshot]);
 
   useEffect(() => {
     // 历史索引未补齐时快速迭代：每次快照只花掉一小段补齐预算，靠连续刷新把

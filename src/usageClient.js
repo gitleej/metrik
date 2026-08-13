@@ -275,7 +275,13 @@ async function loadUsageSnapshot(period = "today", options = {}) {
   }
 
   try {
-    return await invoke("usage_snapshot", { period, force: !!options.force });
+    return await invoke("usage_snapshot", {
+      period,
+      force: !!options.force,
+      // 用户在设置里勾选的小组件 Agent；后端只把这个列表用于 WidgetKit 快照过滤，
+      // 返回给前端的完整快照不受影响。null = 不过滤。
+      widgetAgents: Array.isArray(options.widgetAgents) ? options.widgetAgents : null,
+    });
   } catch (error) {
     console.warn("Unable to load live usage.", error);
     return unavailableSnapshot(period);

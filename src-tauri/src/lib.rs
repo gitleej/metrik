@@ -339,6 +339,7 @@ fn resolve_database_path(legacy_database: &Path, local_database: &Path) -> Resul
 async fn usage_snapshot(
     period: String,
     force: Option<bool>,
+    widget_agents: Option<Vec<String>>,
     state: State<'_, AppState>,
 ) -> Result<UsageSnapshot, String> {
     let database_path = state.database_path.clone();
@@ -358,7 +359,28 @@ async fn usage_snapshot(
         .map_err(|error| error.to_string())?;
 
         #[cfg(target_os = "macos")]
-        if let Err(error) = widget_snapshot::persist(&snapshot) {
+        let widget_agents = widget_agents
+            .as_deref()
+            .map(widget_snapshot::normalize_agent_filter);
+
+        #[cfg(target_os = "macos")]
+        if let Some(agents) = widget_agents.as_ref() {
+            let save_result = storage::open_database(&database_path).and_then(|connection| {
+                let encoded = serde_json::to_string(agents)?;
+                storage::set_app_setting(
+                    &connection,
+                    widget_snapshot::AGENT_FILTER_SETTING_KEY,
+                    &encoded,
+                )
+            });
+            if let Err(error) = save_result {
+                // 选择持久化只服务于下次冷启动；当前快照仍应正常发布。
+                eprintln!("Metrik could not remember its WidgetKit Agent selection ({error:#})");
+            }
+        }
+
+        #[cfg(target_os = "macos")]
+        if let Err(error) = widget_snapshot::persist(&snapshot, widget_agents.as_deref()) {
             // Widget publication is a secondary output. A temporary App Group or
             // filesystem failure must not hide the primary Metrik usage result.
             eprintln!("Metrik could not publish its WidgetKit snapshot ({error:#})");
@@ -1099,8 +1121,26 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             match engine::build_cached_snapshot(&database_path, "today") {
                 Ok(snapshot) => {
-                    if let Err(error) = widget_snapshot::persist(&snapshot) {
-                        eprintln!("Metrik could not seed its WidgetKit snapshot ({error:#})");
+                    // 冷启动时前端 localStorage 尚未挂载，只能使用上一次前端快照请求
+                    // 同步进 app_setting 的选择。旧版本没有该设置时保留磁盘上的现有
+                    // WidgetKit 快照，避免升级启动瞬间擅自变成全量 Agent。
+                    let saved_agents = storage::open_database_read_only(&database_path)
+                        .ok()
+                        .and_then(|connection| {
+                            storage::get_app_setting(
+                                &connection,
+                                widget_snapshot::AGENT_FILTER_SETTING_KEY,
+                            )
+                            .ok()
+                            .flatten()
+                        })
+                        .and_then(|encoded| serde_json::from_str::<Vec<String>>(&encoded).ok())
+                        .map(|agents| widget_snapshot::normalize_agent_filter(&agents))
+                        .filter(|agents| !agents.is_empty());
+                    if let Some(agents) = saved_agents {
+                        if let Err(error) = widget_snapshot::persist(&snapshot, Some(&agents)) {
+                            eprintln!("Metrik could not seed its WidgetKit snapshot ({error:#})");
+                        }
                     }
                 }
                 Err(error) => {
@@ -1171,8 +1211,23 @@ pub fn run_statusline() {
 
 #[cfg(target_os = "macos")]
 pub fn publish_widget_snapshot_from_database(database_path: &Path) -> Result<PathBuf> {
-    let snapshot = engine::build_cached_snapshot(database_path, "today")?;
-    widget_snapshot::persist(&snapshot)
+    // 走真正的扫描路径而非只读缓存：这样即便前端面板不可见（用户只看菜单栏/
+    // 桌面组件），被外部定时器周期性起一次的本 helper 也能发现新产生的日志
+    // 并刷新 WidgetKit snapshot。force=false 避免在旁路进程里触发配额 API 限流。
+    let quota_cache: SharedQuotaCache = Arc::new(quota::QuotaCache::default());
+    let snapshot = engine::build_snapshot(database_path, "today", &quota_cache, false)?;
+    // 读回用户在设置里勾选并排过序的 Agent 列表（usage_snapshot command 会把它
+    // 持久化到 app_setting）。CLI 旁路刷新必须带上同一份顺序，否则 Widget 会回退
+    // 到 AGENT_IDS 的固定顺序，与用户在软件里的排列不一致。
+    let agent_filter = storage::open_database_read_only(database_path)
+        .ok()
+        .and_then(|connection| {
+            storage::get_app_setting(&connection, widget_snapshot::AGENT_FILTER_SETTING_KEY)
+                .ok()
+                .flatten()
+        })
+        .and_then(|encoded| serde_json::from_str::<Vec<String>>(&encoded).ok());
+    widget_snapshot::persist(&snapshot, agent_filter.as_deref())
 }
 
 #[cfg(not(target_os = "macos"))]

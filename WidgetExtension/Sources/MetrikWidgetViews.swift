@@ -15,13 +15,13 @@ struct MetrikTimelineProvider: TimelineProvider {
     func getSnapshot(in context: Context, completion: @escaping (MetrikWidgetEntry) -> Void) {
         let snapshot = context.isPreview
             ? MetrikWidgetStore.preview
-            : MetrikWidgetStore.load() ?? MetrikWidgetStore.preview
+            : MetrikWidgetStore.load() ?? MetrikWidgetStore.unavailable
         completion(MetrikWidgetEntry(date: Date(), snapshot: snapshot))
     }
 
     func getTimeline(in context: Context, completion: @escaping (Timeline<MetrikWidgetEntry>) -> Void) {
         let now = Date()
-        let snapshot = MetrikWidgetStore.load() ?? MetrikWidgetStore.preview
+        let snapshot = MetrikWidgetStore.load() ?? MetrikWidgetStore.unavailable
         let entry = MetrikWidgetEntry(date: now, snapshot: snapshot)
         completion(Timeline(entries: [entry], policy: .after(now.addingTimeInterval(5 * 60))))
     }
@@ -272,7 +272,14 @@ private struct MetrikDashboardView: View {
                 .frame(height: 132)
             }
 
+            // 上下两个 Spacer 把 Agent 网格悬浮在中部、状态行压到底边：
+            // Agent 数量由用户勾选决定，任何数量都不会在底部
+            // 留出大块空白。
+            Spacer(minLength: 0)
+
             MetrikDashboardAgentGrid(agents: self.visibleAgents)
+
+            Spacer(minLength: 0)
 
             HStack(spacing: 6) {
                 Circle()
@@ -290,7 +297,8 @@ private struct MetrikDashboardView: View {
     }
 
     private var visibleAgents: [MetrikWidgetAgent] {
-        Array(entry.snapshot.agents.prefix(6))
+        // 快照已被宿主按用户的勾选过滤，不能再用固定上限截断选择。
+        entry.snapshot.agents
     }
 
     private var hasFreshQuota: Bool {
@@ -394,7 +402,15 @@ private struct MetrikDashboardAgentGrid: View {
     var body: some View {
         let columnCount = agents.count <= 2 ? 1 : 2
         let rowCount = max(1, Int(ceil(Double(agents.count) / Double(columnCount))))
-        let cellHeight: CGFloat = agents.count > 4 ? 31 : 38
+        let cellHeight: CGFloat = if agents.count > 8 {
+            24
+        } else if agents.count > 6 {
+            27
+        } else if agents.count > 4 {
+            31
+        } else {
+            38
+        }
         let columns = Array(
             repeating: GridItem(.flexible(), spacing: 0),
             count: columnCount)
