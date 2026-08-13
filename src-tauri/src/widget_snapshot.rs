@@ -30,6 +30,27 @@ pub fn normalize_agent_filter(agent_filter: &[String]) -> Vec<String> {
     })
 }
 
+/// Resolve the single authoritative macOS selection. Once a valid saved value exists,
+/// a window-provided value is only a stale rendering hint and must never replace it.
+/// The boolean says whether the caller should persist a one-time initial selection.
+pub fn resolve_agent_filter(
+    saved: Option<&str>,
+    requested: Option<&[String]>,
+) -> (Option<Vec<String>>, bool) {
+    let saved = saved
+        .and_then(|encoded| serde_json::from_str::<Vec<String>>(encoded).ok())
+        .map(|agents| normalize_agent_filter(&agents))
+        .filter(|agents| !agents.is_empty());
+    if saved.is_some() {
+        return (saved, false);
+    }
+    let initial = requested
+        .map(normalize_agent_filter)
+        .filter(|agents| !agents.is_empty());
+    let should_persist = initial.is_some();
+    (initial, should_persist)
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct WidgetSnapshot<'a> {
@@ -317,6 +338,23 @@ mod tests {
             "kimi".to_owned(),
         ];
         assert_eq!(normalize_agent_filter(&filter), ["kimi"]);
+    }
+
+    #[test]
+    fn saved_selection_wins_over_a_stale_window_request() {
+        let requested = vec!["codex".to_owned(), "claude".to_owned()];
+        let (resolved, should_persist) =
+            resolve_agent_filter(Some(r#"["zcode","kimi","codex"]"#), Some(&requested));
+        assert_eq!(resolved.unwrap(), ["zcode", "kimi", "codex"]);
+        assert!(!should_persist);
+    }
+
+    #[test]
+    fn first_valid_window_selection_seeds_missing_saved_state_once() {
+        let requested = vec!["kimi".to_owned(), "codex".to_owned()];
+        let (resolved, should_persist) = resolve_agent_filter(None, Some(&requested));
+        assert_eq!(resolved.unwrap(), ["kimi", "codex"]);
+        assert!(should_persist);
     }
 
     #[test]

@@ -573,6 +573,22 @@ async function onMacAppearance(handler) {
   return listen("metrik://mac-appearance", (event) => handler(event.payload || {}));
 }
 
+/// macOS 的设置页与菜单栏面板是两个独立 WebView。Agent 选择必须走事件总线，
+/// 不能依赖 localStorage 的 storage 事件（WKWebView 不会跨这两个窗口派发它）。
+async function broadcastMacAgentSelection(agents) {
+  if (!isDesktop() || !isMacPlatform()) return;
+  const { emit } = await import("@tauri-apps/api/event");
+  // 先让两个 WebView 同帧更新，再持久化为后端权威选择并刷新 WidgetKit。
+  await emit("metrik://mac-agent-selection", { agents }).catch(() => {});
+  await invoke("set_macos_agent_selection", { agents });
+}
+
+async function onMacAgentSelection(handler) {
+  if (!isDesktop() || !isMacPlatform()) return () => {};
+  const { listen } = await import("@tauri-apps/api/event");
+  return listen("metrik://mac-agent-selection", (event) => handler(event.payload || {}));
+}
+
 /// 拖动结束后持久化窗口位置（compact 与 strip 各记各的；expanded 不记）。
 async function startPositionMemory(getMode) {
   if (isMacPlatform()) return () => {};
@@ -1301,6 +1317,7 @@ export {
   WINDOW_SIZES,
   applyStartupUiScale,
   applyWindowMode,
+  broadcastMacAgentSelection,
   broadcastMacAppearance,
   checkForUpdate,
   closeWindow,
@@ -1311,6 +1328,7 @@ export {
   isWindowsPlatform,
   minimizeWindow,
   normalizeUiScale,
+  onMacAgentSelection,
   onMacAppearance,
   onScaleFactorChanged,
   onTrayShowExpanded,

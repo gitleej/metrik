@@ -149,7 +149,10 @@ change.
   plus official remaining percentage for every selected agent, `--` for
   unavailable data, and `~` for stale data.
 - Clicking any status item opens the anchored compact panel. Agent selection
-  updates immediately and always keeps at least one agent.
+  updates immediately across the separate settings window, compact panel,
+  WidgetKit snapshot, and menu-bar status items, and always keeps at least one
+  agent. A hidden window must never write an older selection back over the
+  current one during its next data refresh.
 - Provider names are not repeated as menu-bar text, and the menu structure must
   not copy another product's layout or multi-account detail.
 
