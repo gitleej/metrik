@@ -2194,7 +2194,7 @@ dependencies = [
 
 [[package]]
 name = "metrik"
-version = "0.15.1"
+version = "0.16.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2202,6 +2202,7 @@ dependencies = [
  "hex",
  "image",
  "libc",
+ "objc",
  "rusqlite",
  "rustls",
  "serde",

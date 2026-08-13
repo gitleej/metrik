@@ -1,6 +1,5 @@
 import Foundation
-
-let metrikAppGroupIdentifier = "group.app.metrik.desktop"
+import OSLog
 
 struct MetrikWidgetSnapshot: Decodable {
     let schemaVersion: Int
@@ -57,28 +56,31 @@ private extension Comparable {
 }
 
 enum MetrikWidgetStore {
-    static let fileName = "widget-snapshot.json"
+    static let snapshotKey = "widgetSnapshotJSON"
+    private static let logger = Logger(
+        subsystem: "app.metrik.desktop.widget",
+        category: "snapshot")
 
     static func load() -> MetrikWidgetSnapshot? {
-        if let container = FileManager.default
-            .containerURL(forSecurityApplicationGroupIdentifier: metrikAppGroupIdentifier)
-        {
-            let sharedURL = container.appendingPathComponent(self.fileName, isDirectory: false)
-            if let snapshot = self.decode(sharedURL) {
-                return snapshot
-            }
+        // publisher helper 嵌入了和 widget 一样的 bundle identity，它的
+        // UserDefaults.standard 写进的就是 widget container 的同一个 plist；
+        // widget 用自己的 UserDefaults.standard 读同一份。不依赖 App Group。
+        let sharedDefaults = UserDefaults.standard
+        guard let data = sharedDefaults.data(forKey: self.snapshotKey) else {
+            self.logger.error("Shared snapshot preference missing")
+            return nil
         }
-
-        guard let bundledURL = Bundle.main.url(
-            forResource: "preview-widget-snapshot",
-            withExtension: "json")
-        else { return nil }
-        return self.decode(bundledURL)
-    }
-
-    private static func decode(_ url: URL) -> MetrikWidgetSnapshot? {
-        guard let data = try? Data(contentsOf: url) else { return nil }
-        return try? JSONDecoder().decode(MetrikWidgetSnapshot.self, from: data)
+        do {
+            let snapshot = try JSONDecoder().decode(MetrikWidgetSnapshot.self, from: data)
+            self.logger.notice(
+                "Shared snapshot decoded with \(snapshot.agents.count, privacy: .public) agents")
+            return snapshot
+        } catch {
+            let cocoaError = error as NSError
+            self.logger.error(
+                "Shared snapshot decode failed: domain=\(cocoaError.domain, privacy: .public) code=\(cocoaError.code, privacy: .public)")
+            return nil
+        }
     }
 
     static let preview = MetrikWidgetSnapshot(
@@ -127,6 +129,14 @@ enum MetrikWidgetStore {
                 tokens: 410_000,
                 windows: [])
         ])
+
+    // 仅供真实桌面运行时读取失败时使用。生产组件绝不能把 gallery 的演示
+    // 数字伪装成用户数据；空 Agent 列表会进入明确的“打开 Metrik 刷新”状态。
+    static let unavailable = MetrikWidgetSnapshot(
+        schemaVersion: 1,
+        generatedAt: ISO8601DateFormatter().string(from: Date()),
+        totalTokens: 0,
+        agents: [])
 }
 
 enum MetrikWidgetFormat {

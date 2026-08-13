@@ -275,7 +275,13 @@ async function loadUsageSnapshot(period = "today", options = {}) {
   }
 
   try {
-    return await invoke("usage_snapshot", { period, force: !!options.force });
+    return await invoke("usage_snapshot", {
+      period,
+      force: !!options.force,
+      // 用户在设置里勾选的小组件 Agent；后端只把这个列表用于 WidgetKit 快照过滤，
+      // 返回给前端的完整快照不受影响。null = 不过滤。
+      widgetAgents: Array.isArray(options.widgetAgents) ? options.widgetAgents : null,
+    });
   } catch (error) {
     console.warn("Unable to load live usage.", error);
     return unavailableSnapshot(period);
@@ -528,36 +534,6 @@ async function setProjectRules(rules) {
   return invoke("set_project_rules", { rules });
 }
 
-// 浏览器演示模式的自定义来源存在内存里，预览也能走一遍增删流程。
-let demoCustomSources = [];
-
-async function getCustomSources() {
-  if (!isTauriRuntime()) {
-    await new Promise((resolve) => setTimeout(resolve, 80));
-    return [...demoCustomSources];
-  }
-  try {
-    return await invoke("custom_usage_sources");
-  } catch (error) {
-    console.warn("Unable to load custom usage sources.", error);
-    return [];
-  }
-}
-
-async function setCustomSources(sources) {
-  if (!isTauriRuntime()) {
-    await new Promise((resolve) => setTimeout(resolve, 120));
-    demoCustomSources = (sources || [])
-      .map((source) => ({
-        name: String(source.name || "").trim(),
-        path: String(source.path || "").trim().replace(/\\/g, "/").replace(/\/+$/, ""),
-      }))
-      .filter((source) => source.name && source.path);
-    return [...demoCustomSources];
-  }
-  return invoke("set_custom_usage_sources", { sources });
-}
-
 async function getUsageReport() {
   if (!isTauriRuntime()) {
     await new Promise((resolve) => setTimeout(resolve, 220));
@@ -679,8 +655,6 @@ export {
   getUsageProjects,
   getProjectRules,
   setProjectRules,
-  getCustomSources,
-  setCustomSources,
   exportCsvFile,
   rebuildLocalLedger,
   getSyncSettings,

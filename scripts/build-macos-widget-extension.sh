@@ -14,7 +14,10 @@ APPEX_RESOURCES="$APPEX_BUNDLE/Contents/Resources"
 HELPERS_DIR="$BUILD_DIR/Helpers"
 SDK_PATH="$(xcrun --sdk macosx --show-sdk-path)"
 APP_VERSION="$(node -p "require('$PROJECT_DIR/package.json').version")"
-APP_BUILD_NUMBER="${GITHUB_RUN_NUMBER:-1}"
+# Every extension build needs a monotonic value across both local and CI installs:
+# WidgetKit otherwise keeps a previously registered binary/timeline. A UTC build
+# timestamp also prevents a local build from outranking a later CI run number.
+APP_BUILD_NUMBER="$(date -u +%Y%m%d%H%M%S)"
 
 # A universal Tauri release needs a universal extension too. Local arm64/x86_64
 # builds may override this to one architecture to keep iteration fast.
@@ -83,18 +86,28 @@ done
 
 build_universal "$HELPERS_DIR/metrik-widget-publish" \
   -framework Foundation \
+  -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist \
+  -Xlinker "$PROJECT_DIR/WidgetExtension/MetrikWidgetPublisher.Info.plist" \
   "$PROJECT_DIR/WidgetExtension/Sources/MetrikWidgetPublisher.swift"
 build_universal "$HELPERS_DIR/metrik-widget-reload" \
   -framework WidgetKit \
+  -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist \
+  -Xlinker "$PROJECT_DIR/WidgetExtension/MetrikWidgetReloader.Info.plist" \
   "$PROJECT_DIR/WidgetExtension/Sources/MetrikWidgetReloader.swift"
 
 # This is ad-hoc bundle integrity, not Developer ID distribution signing. The
 # nested extension must be sealed before Tauri seals the outer app bundle.
+# Both snapshot processes are sandboxed and share the extension bundle identifier, so
+# UserDefaults/cfprefsd resolves to the Widget's standard container. This works for ad-hoc
+# builds without a TeamIdentifier; App Group access does not on macOS 26.
+# A sandboxed standalone executable additionally needs an embedded Info.plist
+# (the publisher is built with -sectcreate __TEXT __info_plist above): without a
+# bundle identifier, libsecinit crashes with SIGTRAP before main() ever runs.
 codesign --force --sign - \
   --entitlements "$PROJECT_DIR/WidgetExtension/MetrikWidget.entitlements" \
   "$APPEX_BUNDLE"
 codesign --force --sign - \
-  --entitlements "$PROJECT_DIR/src-tauri/entitlements.macOS.plist" \
+  --entitlements "$PROJECT_DIR/WidgetExtension/MetrikWidgetPublisher.entitlements" \
   "$HELPERS_DIR/metrik-widget-publish"
 codesign --force --sign - "$HELPERS_DIR/metrik-widget-reload"
 codesign --verify --strict --verbose=2 "$APPEX_BUNDLE"

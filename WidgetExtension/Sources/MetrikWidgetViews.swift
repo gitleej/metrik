@@ -15,13 +15,13 @@ struct MetrikTimelineProvider: TimelineProvider {
     func getSnapshot(in context: Context, completion: @escaping (MetrikWidgetEntry) -> Void) {
         let snapshot = context.isPreview
             ? MetrikWidgetStore.preview
-            : MetrikWidgetStore.load() ?? MetrikWidgetStore.preview
+            : MetrikWidgetStore.load() ?? MetrikWidgetStore.unavailable
         completion(MetrikWidgetEntry(date: Date(), snapshot: snapshot))
     }
 
     func getTimeline(in context: Context, completion: @escaping (Timeline<MetrikWidgetEntry>) -> Void) {
         let now = Date()
-        let snapshot = MetrikWidgetStore.load() ?? MetrikWidgetStore.preview
+        let snapshot = MetrikWidgetStore.load() ?? MetrikWidgetStore.unavailable
         let entry = MetrikWidgetEntry(date: now, snapshot: snapshot)
         completion(Timeline(entries: [entry], policy: .after(now.addingTimeInterval(5 * 60))))
     }
@@ -37,9 +37,19 @@ struct MetrikProviderIcon: View {
                let url = Bundle.main.url(forResource: asset.name, withExtension: asset.ext),
                let image = NSImage(contentsOf: url)
             {
-                Image(nsImage: image)
-                    .resizable()
-                    .scaledToFit()
+                // 单色/透明桌面风格（macOS 15+ accented 渲染）默认把位图漂成白色，
+                // 品牌图标必须保持全彩，否则只剩一个白方块。该修饰符是 WidgetKit 的
+                // Image 扩展，必须先 resizable 再设置；macOS 14 没有它，走原版渲染。
+                if #available(macOS 15.0, *) {
+                    Image(nsImage: image)
+                        .resizable()
+                        .widgetAccentedRenderingMode(.fullColor)
+                        .scaledToFit()
+                } else {
+                    Image(nsImage: image)
+                        .resizable()
+                        .scaledToFit()
+                }
             } else {
                 Image(systemName: "terminal")
                     .resizable()
@@ -262,16 +272,20 @@ private struct MetrikDashboardView: View {
                 .frame(height: 132)
             }
 
+            // 上下两个 Spacer 把 Agent 网格悬浮在中部、状态行压到底边：
+            // Agent 数量由用户勾选决定，任何数量都不会在底部
+            // 留出大块空白。
+            Spacer(minLength: 0)
+
             MetrikDashboardAgentGrid(agents: self.visibleAgents)
+
+            Spacer(minLength: 0)
 
             HStack(spacing: 6) {
                 Circle()
                     .fill(self.hasFreshQuota ? Color.green : Color.orange)
                     .frame(width: 6, height: 6)
                 Text(self.hasFreshQuota ? "刚刚更新" : "部分覆盖")
-                Spacer(minLength: 8)
-                Text("完整视图")
-                Image(systemName: "arrow.up.right")
             }
             .font(.caption2)
             .foregroundStyle(.secondary)
@@ -283,7 +297,8 @@ private struct MetrikDashboardView: View {
     }
 
     private var visibleAgents: [MetrikWidgetAgent] {
-        Array(entry.snapshot.agents.prefix(6))
+        // 快照已被宿主按用户的勾选过滤，不能再用固定上限截断选择。
+        entry.snapshot.agents
     }
 
     private var hasFreshQuota: Bool {
@@ -387,7 +402,15 @@ private struct MetrikDashboardAgentGrid: View {
     var body: some View {
         let columnCount = agents.count <= 2 ? 1 : 2
         let rowCount = max(1, Int(ceil(Double(agents.count) / Double(columnCount))))
-        let cellHeight: CGFloat = agents.count > 4 ? 31 : 38
+        let cellHeight: CGFloat = if agents.count > 8 {
+            24
+        } else if agents.count > 6 {
+            27
+        } else if agents.count > 4 {
+            31
+        } else {
+            38
+        }
         let columns = Array(
             repeating: GridItem(.flexible(), spacing: 0),
             count: columnCount)

@@ -1351,6 +1351,12 @@ html:has(.strip-shell) #root {
     inset 0 1px rgba(255, 255, 255, 0.12);
 }
 
+/* 横条高度从 40 收到 28 之后，8px 圆角在短边上占掉近三分之一，看着发圆。
+   按原来的比例（8/40）回到 6px；竖条短边仍是 42px 宽，不受影响。 */
+.strip-shell--transparent:not(.strip-shell--vertical) {
+  border-radius: 6px;
+}
+
 /* macOS：条带同样使用跟随系统的 menu vibrancy；原生材质拿不到时走
    上面的近实心配方，不套这条。 */
 .strip-shell--mac:not(.strip-shell--glass-css) {
@@ -1413,12 +1419,11 @@ html:has(.strip-shell) #root {
   display: grid;
   flex: 1;
   min-width: 0;
-  gap: 3px;
 }
 
 .strip-cell-body em {
-  /* 百分比压在自己那根进度条正上方：左对齐时数字宽度一变（9% / 100%）
-     就和条错开，一排格子看着参差。 */
+  /* 居中而非左对齐：数字宽度一变（9% / 100%）左对齐就让一排格子的
+     右边参差。 */
   text-align: center;
   color: rgba(31, 33, 36, 0.92);
   font-style: normal;
@@ -1431,44 +1436,13 @@ html:has(.strip-shell) #root {
 
 .strip-shell--transparent .strip-cell-body em { color: rgba(255, 255, 255, 0.92); }
 
-.strip-cell-track {
-  display: block;
-  height: 4px;
-  overflow: hidden;
-  background: color-mix(in srgb, var(--quota-accent, var(--blue)) 16%, rgba(31, 33, 36, 0.05));
-  border-radius: 2px;
-}
-
-.strip-shell--transparent .strip-cell-track {
-  background: color-mix(in srgb, var(--quota-accent, #7fabef) 22%, rgba(255, 255, 255, 0.06));
-}
-
-.strip-cell-track i {
-  display: block;
-  width: 100%;
-  height: 100%;
-  background: var(--quota-accent, var(--blue));
-  border-radius: inherit;
-  transform-origin: left center;
-  transition-property: transform, opacity;
-  transition-duration: 700ms;
-  transition-timing-function: var(--motion);
-}
-
-.strip-shell--transparent .strip-cell-track i { filter: brightness(1.22) saturate(0.92); }
-
-/* 陈旧快照只淡化进度条（与小卡片一致），文字保持全亮；
-   接近耗尽换警示色（沿用 85/95 分级）。 */
+/* 格子只有图标 + 百分比两层，接近耗尽全靠数字变色表达（沿用 85/95 分级）。 */
 .strip-cell--warn em { color: #8f681f; }
-.strip-cell--warn .strip-cell-track i { background: var(--warn); }
 .strip-cell--critical em { color: #a1402e; }
-.strip-cell--critical .strip-cell-track i { background: var(--critical); }
 .strip-shell--transparent .strip-cell--warn em { color: #e8b04a; }
-.strip-shell--transparent .strip-cell--warn .strip-cell-track i { background: #e8b04a; filter: none; }
 .strip-shell--transparent .strip-cell--critical em { color: #ec7a63; }
-.strip-shell--transparent .strip-cell--critical .strip-cell-track i { background: #ec7a63; filter: none; }
 
-/* 用户勾选了但暂无官方配额来源的 agent："--" 占格，不显示进度条。 */
+/* 用户勾选了但暂无官方配额来源的 agent："--" 占格。 */
 .strip-cell--unavailable em { color: var(--muted); }
 .strip-shell--transparent .strip-cell--unavailable em { color: rgba(255, 255, 255, 0.55); }
 
@@ -1507,7 +1481,20 @@ html:has(.strip-shell) #root {
 
 /* 基础 .status-dot 的 margin-top 是来源抽屉的对齐补偿，胶囊条里要归零，
    否则点相对按钮下坠 5px。 */
-.strip-shell .status-dot { flex: none; margin: 0; }
+.strip-shell .status-dot {
+  flex: none;
+  margin: 0;
+}
+
+/* 固定 / 横竖切换 / 还原 / 完整视图不再常驻——四个 26px 的槽在竖条上要吃掉
+   130px，比三个格子还高。它们由 … 就地展开，收起态则完全不占位：… 绝对
+   定位压在状态灯那个槽里，悬停或展开时与灯互换。 */
+.strip-control-slot--menu { position: relative; }
+
+/* 让位给 … 只能用 visibility：更新中的灯有一条跑在 opacity 上的呼吸动画，
+   动画优先级高于普通声明，写 opacity: 0 会让黄灯继续压在按钮上。 */
+.strip-shell:hover .strip-control-slot--menu .status-dot,
+.strip-controls--open .strip-control-slot--menu .status-dot { visibility: hidden; }
 
 .strip-button {
   display: grid;
@@ -1515,15 +1502,29 @@ html:has(.strip-shell) #root {
   place-items: center;
   width: 26px;
   height: 26px;
+  padding: 0;
   color: #4f5257;
   background: rgba(31, 33, 36, 0.06);
   border: none;
   border-radius: 8px;
   cursor: pointer;
-  transition-property: color, background-color;
+  transition-property: color, background-color, opacity;
   transition-duration: 240ms;
   transition-timing-function: var(--motion);
 }
+
+/* 展开入口自己不占格：铺满状态灯的槽，静止态透明。 */
+.strip-button--menu {
+  position: absolute;
+  inset: 0;
+  width: auto;
+  height: auto;
+  opacity: 0;
+}
+
+.strip-shell:hover .strip-button--menu,
+.strip-controls--open .strip-button--menu,
+.strip-button--menu:focus-visible { opacity: 1; }
 
 .strip-button:hover {
   color: #1f2124;
@@ -1703,10 +1704,6 @@ html:has(.strip-shell) #root {
 
   .strip-shell--mac:not(.strip-shell--glass-css).strip-shell--transparent .strip-cell-body em {
     color: rgba(24, 26, 30, 0.92);
-  }
-
-  .strip-shell--mac:not(.strip-shell--glass-css).strip-shell--transparent .strip-cell-track {
-    background: rgba(31, 33, 36, 0.11);
   }
 
   .strip-shell--mac:not(.strip-shell--glass-css).strip-shell--transparent .strip-button {
@@ -1921,30 +1918,12 @@ html:has(.strip-shell) #root {
   color: rgba(31, 33, 36, 0.92);
 }
 
-.strip-shell--transparent.strip-shell--glass-light .strip-cell-track {
-  background: color-mix(in srgb, var(--quota-accent, var(--blue)) 16%, rgba(31, 33, 36, 0.05));
-}
-
-.strip-shell--transparent.strip-shell--glass-light .strip-cell-track i {
-  filter: none;
-}
-
 .strip-shell--transparent.strip-shell--glass-light .strip-cell--warn em {
   color: #8f681f;
 }
 
-.strip-shell--transparent.strip-shell--glass-light .strip-cell--warn .strip-cell-track i {
-  background: var(--warn);
-  filter: none;
-}
-
 .strip-shell--transparent.strip-shell--glass-light .strip-cell--critical em {
   color: #a1402e;
-}
-
-.strip-shell--transparent.strip-shell--glass-light .strip-cell--critical .strip-cell-track i {
-  background: var(--critical);
-  filter: none;
 }
 
 .strip-shell--transparent.strip-shell--glass-light .strip-cell--unavailable em {
@@ -2116,8 +2095,7 @@ html:has(.strip-shell--glass-clear) #root::after {
   background: rgba(255, 255, 255, 0.7);
 }
 
-/* 胶囊控制按钮：常驻底托在竖条上排成一列方块，比图标本身还抢眼，
-   静止态改为无底，只保留 hover 和选中的小面积反馈。 */
+/* 透明档的底托压在真实桌面上比图标本身还抢眼，静止态无底，只留 hover 反馈。 */
 .strip-shell--transparent.strip-shell--glass-clear:not(.strip-shell--glass-ink-light) .strip-button {
   color: rgba(31, 33, 36, 0.62);
   background: transparent;
@@ -2168,12 +2146,6 @@ html:has(.strip-shell--glass-clear) #root::after {
   font-weight: 500;
 }
 
-.strip-shell--transparent.strip-shell--glass-clear .strip-cell-track {
-  height: 3px;
-  background: rgba(31, 33, 36, 0.12);
-}
-
-.strip-shell--transparent.strip-shell--glass-clear .strip-cell-track i,
 .widget-shell--transparent.widget-shell--glass-clear .quota-bar-track i {
   filter: saturate(0.86);
   opacity: 0.84;
@@ -2272,11 +2244,6 @@ html:has(.strip-shell--glass-ink-light) #root {
 .strip-shell--transparent.strip-shell--glass-ink-light .strip-button:hover {
   color: #fff;
   background: rgba(255, 255, 255, 0.16);
-}
-
-.strip-shell--transparent.strip-shell--glass-ink-light .strip-cell-track {
-  height: 3px;
-  background: rgba(255, 255, 255, 0.22);
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -3142,8 +3109,7 @@ html:has(.strip-shell--glass-ink-light) #root {
 .agent-icon--kimi,
 .agent-icon--antigravity,
 .agent-icon--workbuddy,
-.agent-icon--qoder,
-.agent-icon--custom { color: inherit; }
+.agent-icon--qoder { color: inherit; }
 
 .agent-monogram {
   display: grid;

@@ -20,6 +20,7 @@ import {
   CornersOut,
   ClockCounterClockwise,
   Database,
+  DotsThree,
   EyeSlash,
   FileText,
   FolderSimple,
@@ -57,8 +58,6 @@ import {
   getUsageProjects,
   getProjectRules,
   setProjectRules,
-  getCustomSources,
-  setCustomSources,
   getUsageSnapshot,
   rebuildLocalLedger,
   removeSyncDevice,
@@ -180,15 +179,6 @@ const AGENT_META = {
     iconSrc: qoderAppIcon,
     iconClass: "agent-icon--qoder",
   },
-  custom: {
-    // 用户自己声明的 Claude 兼容 JSONL 目录，合并成一条。没有品牌图标，
-    // 用字母牌兜底（AgentMark 已支持）。
-    label: "自定义",
-    // 中性灰蓝：不与任何厂商的品牌色抢，一眼看出它不是某个具体产品。
-    accent: "#6b7280",
-    monogram: "自",
-    iconClass: "agent-icon--custom",
-  },
 };
 
 const AGENT_ORDER = Object.keys(AGENT_META);
@@ -209,22 +199,25 @@ function agentIdsInDisplayOrder(preferred) {
   return [...preferred, ...AGENT_ORDER.filter((agentId) => !preferred.includes(agentId))];
 }
 
-// 胶囊条首帧尺寸估计：横条一格约 68px 宽；竖条是横条立起来的窄长条，
-// 一格约 54px 高（图标/百分比/进度条纵向堆叠）。
+// 胶囊条首帧尺寸估计：一格只有图标 + 百分比两层，横条约 54px 宽、竖条约
+// 46px 高。
 // 这些常量只用于进入 strip 的第一帧，之后的窗口尺寸由 StripBar 里的
 // 内容测量观察器按真实渲染结果收敛——不同字体/DPI/缩放比例、有无更新点
 // 都不会再裁掉内容（曾因常量与 CSS 脱钩裁掉竖条最后一个按钮）。
-const STRIP_CELL_WIDTH = 58;
-const STRIP_CHROME_WIDTH = IS_MAC ? 76 : 158;
-const STRIP_BAR_HEIGHT = 40;
+const STRIP_CELL_WIDTH = 54;
+// 控件区只剩状态灯/菜单入口那一个 26px 槽，两个平台一样：横条是外壳
+// padding 11 + 槽 26 + 格间距，竖条是外壳 padding 10 + 控件区 padding 4 + 槽 26。
+const STRIP_CHROME_WIDTH = 40;
+// 条高的下限是 26px 的控件槽，不是格子内容（图标 16 + 上下 padding = 24）。
+const STRIP_BAR_HEIGHT = 28;
 // 竖条宽度由 26px 控件槽 + 外壳 padding 定死下限（32px）；42 留 10px 呼吸，
 // 再宽图标和百分比周围就空得发肥。
 const STRIP_VERTICAL_WIDTH = 42;
-const STRIP_VCELL_HEIGHT = 54;
-// 横条宽度的收缩迟滞。一格 58px，所以 6px 远低于「真的少了一个 Agent」，
+const STRIP_VCELL_HEIGHT = 46;
+// 横条宽度的收缩迟滞。一格 54px，所以 6px 远低于「真的少了一个 Agent」，
 // 又高于 DPI/zoom 取整带来的亚像素噪声。
 const STRIP_WIDTH_SHRINK_SLACK = 6;
-const STRIP_VCHROME_HEIGHT = IS_MAC ? 84 : 160;
+const STRIP_VCHROME_HEIGHT = 40;
 
 function stripWindowSize(orientation, count) {
   const cells = Math.max(1, count);
@@ -253,8 +246,8 @@ function measureStripVerticalContent(shell) {
   );
 }
 
-/// 横条目标宽度：格子按设计宽 68/格（图标 + 三位百分比 + 进度条是字体无关的
-/// 有界内容），控件区取实测自然宽（flex:none 永不被压缩；有无更新点、macOS
+/// 横条目标宽度：格子按设计宽 54/格（图标 + 三位百分比是字体无关的有界
+/// 内容），控件区取实测自然宽（flex:none 永不被压缩；有无更新点、macOS
 /// 有无固定键都会变）。横条格子 flex:1 会拉伸填满窗口，布局测量推不出
 /// "窗口过宽"，所以格数部分必须用设计宽计算，窗口才能随格数增减伸缩。
 function measureStripHorizontalTarget(shell) {
@@ -1177,10 +1170,15 @@ function StripBar({
   }));
   const dragProps = pinned || IS_MAC ? {} : { "data-tauri-drag-region": true };
   const vertical = orientation === "vertical";
-  const OrientationIcon = vertical ? ArrowsLeftRight : ArrowsDownUp;
   // 透明档的真实桌面背景变化很大，控制图标加粗以稳定识别。
-  const buttonWeight = transparent && glassTint === "clear" ? "bold" : "light";
+  const buttonWeight = transparent && glassTint === "clear" ? "bold" : "regular";
   const shellRef = useRef(null);
+  const OrientationIcon = vertical ? ArrowsLeftRight : ArrowsDownUp;
+  // 控制按钮不再常驻：四个 26px 的槽在竖条上要吃掉 130px，比三个格子还高。
+  // 改成按需就地展开——点状态灯位上浮出的 … 把它们放出来，条身随之变长，
+  // 指针离开自动收回。窗口尺寸本来就跟着内容测量走，这里不用另外调窗。
+  const [controlsOpen, setControlsOpen] = useState(false);
+  const toggleControls = useCallback(() => setControlsOpen((open) => !open), []);
   const shellAppearance = glassShellAppearance("strip", {
     transparent,
     glassMode,
@@ -1264,13 +1262,20 @@ function StripBar({
       observer.disconnect();
     };
   });
+  const glassProps = glassPointerProps(shellAppearance.edgeInteractive);
+  // 展开态跟着指针走：移出条身就收回，省得用户忘了收，条一直长着。
+  const handlePointerLeave = (event) => {
+    glassProps.onPointerLeave?.(event);
+    setControlsOpen(false);
+  };
   return (
     <main
       ref={shellRef}
       className={shellAppearance.className}
       data-glass-surface={shellAppearance.trueAlpha ? "true-alpha" : undefined}
       {...dragProps}
-      {...glassPointerProps(shellAppearance.edgeInteractive)}
+      {...glassProps}
+      onPointerLeave={handlePointerLeave}
       style={{
         ...shellAppearance.style,
         ...(pinned ? { cursor: "default" } : {}),
@@ -1306,7 +1311,6 @@ function StripBar({
             <div
               key={agentId}
               className={`strip-cell ${severity ? `strip-cell--${severity}` : ""}`}
-              style={{ "--quota-accent": meta.accent }}
               title={stripTooltip(agentId, cell.windows)}
               {...dragProps}
             >
@@ -1318,13 +1322,6 @@ function StripBar({
               />
               <span className="strip-cell-body">
                 <em>{Math.round(view.remainingPercent)}%</em>
-                <span className="strip-cell-track" aria-hidden="true">
-                  <i
-                    style={{
-                      transform: `scaleX(${Math.max(0, Math.min(1, view.remainingPercent / 100))})`,
-                    }}
-                  />
-                </span>
               </span>
             </div>
           );
@@ -1334,7 +1331,7 @@ function StripBar({
           配额不可用
         </span>
       )}
-      <div className="strip-controls">
+      <div className={`strip-controls ${controlsOpen ? "strip-controls--open" : ""}`}>
         {availableUpdate && (
           <span className="strip-control-slot">
             <button
@@ -1346,51 +1343,70 @@ function StripBar({
             />
           </span>
         )}
-        <span className="strip-control-slot" title={statusDotTitle(loading, snapshot.loadError)}>
+        {/* 状态灯与展开入口共用一个 26px 槽：… 绝对定位压在灯上，
+            悬停或展开时互换，收起态因此一个像素都不多占。 */}
+        <span
+          className="strip-control-slot strip-control-slot--menu"
+          title={statusDotTitle(loading, snapshot.loadError)}
+        >
           <i
             className={`status-dot ${loading ? "status-dot--loading" : ""} ${snapshot.loadError ? "status-dot--error" : ""}`}
             aria-hidden="true"
           />
-        </span>
-        {!IS_MAC && (
           <button
             type="button"
-            className={`strip-button ${pinned ? "strip-button--active" : ""}`}
-            onClick={onTogglePinned}
-            aria-label={pinned ? "取消固定，恢复拖动" : "固定在当前位置并置顶"}
-            aria-pressed={pinned}
-            title={pinned ? "取消固定，恢复拖动" : "固定在当前位置并置顶"}
+            className={`strip-button strip-button--menu ${controlsOpen ? "strip-button--active" : ""}`}
+            onClick={toggleControls}
+            aria-label={controlsOpen ? "收起控制按钮" : "展开控制按钮"}
+            aria-expanded={controlsOpen}
+            title={controlsOpen ? "收起控制按钮" : "展开控制按钮"}
           >
-            <PushPinSimple size={15} weight={pinned ? "fill" : buttonWeight} aria-hidden="true" />
+            <DotsThree size={16} weight={buttonWeight} aria-hidden="true" />
           </button>
+        </span>
+        {controlsOpen && (
+          <>
+            {!IS_MAC && (
+              <button
+                type="button"
+                className={`strip-button ${pinned ? "strip-button--active" : ""}`}
+                onClick={onTogglePinned}
+                aria-label={pinned ? "取消固定，恢复拖动" : "固定在当前位置并置顶"}
+                aria-pressed={pinned}
+                title={pinned ? "取消固定，恢复拖动" : "固定在当前位置并置顶"}
+              >
+                <PushPinSimple size={15} weight={pinned ? "fill" : buttonWeight} aria-hidden="true" />
+              </button>
+            )}
+            <button
+              type="button"
+              className="strip-button"
+              onClick={onToggleOrientation}
+              aria-label={vertical ? "切换为横条" : "切换为竖条"}
+              title={vertical ? "切换为横条" : "切换为竖条"}
+            >
+              <OrientationIcon size={15} weight={buttonWeight} aria-hidden="true" />
+            </button>
+            <button
+              type="button"
+              className="strip-button"
+              onClick={onRestore}
+              aria-label="展开为桌面小插件"
+              title="展开为桌面小插件"
+            >
+              <ArrowsOutSimple size={15} weight={buttonWeight} aria-hidden="true" />
+            </button>
+            <button
+              type="button"
+              className="strip-button"
+              onClick={onExpand}
+              aria-label="打开完整视图"
+              title="完整视图"
+            >
+              <CornersOut size={15} weight={buttonWeight} aria-hidden="true" />
+            </button>
+          </>
         )}
-        <button
-          type="button"
-          className="strip-button"
-          onClick={onToggleOrientation}
-          aria-label={vertical ? "切换为横条" : "切换为竖条"}
-          title={vertical ? "切换为横条" : "切换为竖条"}
-        >
-          <OrientationIcon size={15} weight={buttonWeight} aria-hidden="true" />
-        </button>
-        <button
-          type="button"
-          className="strip-button"
-          onClick={onRestore}
-          aria-label="展开为桌面小插件"
-          title="展开为桌面小插件"
-        >
-          <ArrowsOutSimple size={15} weight={buttonWeight} aria-hidden="true" />
-        </button>
-        <button
-          type="button"
-          className="strip-button"
-          onClick={onExpand}
-          aria-label="打开完整视图"
-          title="完整视图"
-        >
-          <CornersOut size={15} weight={buttonWeight} aria-hidden="true" />
-        </button>
       </div>
     </main>
   );
@@ -2571,123 +2587,6 @@ function AgentsDisplayCard({ widgetAgents, onToggleWidgetAgent, onMoveWidgetAgen
   );
 }
 
-/// 自定义用量来源：我们没接的 Agent，只要日志是 Claude 兼容 JSONL，
-/// 用户指一下目录就能算进总量，不必等我们排期。
-function CustomSourcesCard({ onSnapshotRefresh }) {
-  const [sources, setSources] = useState(null);
-  const [nameInput, setNameInput] = useState("");
-  const [pathInput, setPathInput] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [feedback, setFeedback] = useState(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    getCustomSources()
-      .then((value) => {
-        if (!cancelled) setSources(value);
-      })
-      .catch(() => {
-        if (!cancelled) setFeedback({ tone: "error", message: "自定义来源读取失败。" });
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  const apply = async (next) => {
-    setBusy(true);
-    setFeedback(null);
-    try {
-      // 后端返回归一化后的结果：去重、去空白后可能与输入不同，直接以它为准。
-      const saved = await setCustomSources(next);
-      setSources(saved);
-      onSnapshotRefresh();
-    } catch (error) {
-      setFeedback({ tone: "error", message: `${error}` });
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const add = () => {
-    const name = nameInput.trim();
-    const path = pathInput.trim();
-    if (!name || !path) return;
-    apply([...(sources || []), { name, path }]).then(() => {
-      setNameInput("");
-      setPathInput("");
-    });
-  };
-
-  return (
-    <div className="settings-card">
-      <h2>自定义来源</h2>
-      <p className="settings-muted">
-        我们还没适配的 Agent，只要会话日志是 Claude 兼容 JSONL，指定目录后即可计入统计，
-        合并显示为「自定义」。只读取 token 计数，不读对话内容。
-      </p>
-      <p className="settings-muted">
-        格式不符的目录解析不出事件，如实显示 0，不做猜测。各来源的解析情况见「数据统计」。
-      </p>
-      <div className="rules-add">
-        <input
-          value={nameInput}
-          placeholder="显示名"
-          spellCheck={false}
-          onChange={(event) => setNameInput(event.target.value)}
-          aria-label="自定义来源显示名"
-        />
-        <input
-          value={pathInput}
-          placeholder="会话日志目录，递归查找其下的 *.jsonl"
-          spellCheck={false}
-          onChange={(event) => setPathInput(event.target.value)}
-          onKeyDown={(event) => { if (event.key === "Enter") add(); }}
-          aria-label="自定义来源目录"
-        />
-        <button
-          type="button"
-          className="ledger-button"
-          disabled={!nameInput.trim() || !pathInput.trim() || busy}
-          onClick={add}
-        >
-          添加
-        </button>
-      </div>
-      {sources === null ? (
-        <p className="settings-muted">正在读取…</p>
-      ) : sources.length === 0 ? (
-        <p className="settings-muted">还没有自定义来源。</p>
-      ) : (
-        <ul className="settings-device-list">
-          {sources.map((source) => (
-            <li key={source.path}>
-              <span>{source.name}</span>
-              <small title={source.path}>{source.path}</small>
-              <button
-                type="button"
-                className="ledger-button ledger-button--secondary"
-                disabled={busy}
-                onClick={() => apply(sources.filter((item) => item.path !== source.path))}
-              >
-                移除
-              </button>
-            </li>
-          ))}
-        </ul>
-      )}
-      {feedback && (
-        <p
-          className={`settings-feedback settings-feedback--${feedback.tone}`}
-          role={feedback.tone === "error" ? "alert" : "status"}
-        >
-          {feedback.message}
-        </p>
-      )}
-    </div>
-  );
-}
-
 function QoderQuotaCard({ onSnapshotRefresh }) {
   const [status, setStatus] = useState(null);
   const [cookieInput, setCookieInput] = useState("");
@@ -2953,7 +2852,6 @@ function SettingsSection({ onSnapshotRefresh, widgetAgents, onToggleWidgetAgent,
         )}
         {activeTab.id === "sources" && (
           <>
-            <CustomSourcesCard onSnapshotRefresh={onSnapshotRefresh} />
             <ClaudeHookCard onSnapshotRefresh={onSnapshotRefresh} />
             <QoderQuotaCard onSnapshotRefresh={onSnapshotRefresh} />
           </>
@@ -4549,12 +4447,19 @@ export function App() {
   const activeLoadPeriod = useRef(null);
   const queuedLoadPeriod = useRef(null);
   const currentPeriod = useRef(period);
+  const widgetAgentsRef = useRef(widgetAgents);
   const rebuildInFlight = useRef(false);
   currentPeriod.current = period;
+  widgetAgentsRef.current = widgetAgents;
 
   const loadSnapshot = useCallback(async (nextPeriod, options) => {
     if (loadInFlight.current) {
-      queuedLoadPeriod.current = activeLoadPeriod.current === nextPeriod ? null : nextPeriod;
+      // 普通的同周期轮询仍合并；Agent 勾选/排序变化必须排一次同周期请求，
+      // 否则恰逢已有请求进行中时，WidgetKit 会一直保留旧选择。
+      // 已排队的选择刷新也不能被随后到达的普通轮询清掉。
+      if (options?.ensureLatestWidgetAgents || activeLoadPeriod.current !== nextPeriod) {
+        queuedLoadPeriod.current = nextPeriod;
+      }
       return;
     }
 
@@ -4568,7 +4473,11 @@ export function App() {
         queuedLoadPeriod.current = null;
         const requestId = ++requestSequence.current;
         setLoading(true);
-        const next = await getUsageSnapshot(periodToLoad, forceLoad ? { force: true } : undefined);
+        const next = await getUsageSnapshot(periodToLoad, {
+          force: forceLoad,
+          // 每轮都读 ref：排队请求必须拿到最新勾选，不能沿用创建回调时的闭包。
+          widgetAgents: widgetAgentsRef.current,
+        });
         forceLoad = false;
         if (requestId === requestSequence.current && !queuedLoadPeriod.current) {
           setSnapshot(next);
@@ -4583,8 +4492,9 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    loadSnapshot(period);
-  }, [period, loadSnapshot]);
+    // 周期或 Agent 选择变化都重发快照；选择变化即便撞上在途请求也不能被合并。
+    loadSnapshot(period, { ensureLatestWidgetAgents: true });
+  }, [period, widgetAgents, loadSnapshot]);
 
   useEffect(() => {
     // 历史索引未补齐时快速迭代：每次快照只花掉一小段补齐预算，靠连续刷新把

@@ -108,12 +108,31 @@ change.
 - The optional desktop component is a native WidgetKit extension embedded at
   `Metrik.app/Contents/PlugIns/MetrikWidget.appex`; shipping only its source or
   a standalone preview host does not count as releasing the feature.
+- The WidgetKit snapshot follows the user's compact-widget Agent selection and
+  order exactly. Large widgets use a density-responsive grid for every selected
+  Agent rather than a fixed six-item slice, and cold startup must not replace a
+  saved selection with the full registry.
+- Gallery placeholders may use illustrative data, but an installed production
+  widget whose shared snapshot is unavailable renders an explicit empty state;
+  it never presents the six-Agent gallery preview as live user data.
 - WidgetKit owns desktop material, corner shape, placement, tint mode, and
   accessibility adaptations. Metrik does not paint a second outer card or
   expose an opacity slider for the system widget.
-- The host and extension share only a compact sanitised snapshot through their
-  App Group. It contains derived totals and quota metadata, never prompts,
-  responses, credentials, or raw source paths.
+- The host and extension share only a compact sanitised snapshot through the
+  Widget extension's sandbox preferences. It contains derived totals and quota
+  metadata, never prompts, responses, credentials, or raw source paths. The
+  unsandboxed host delegates all shared-data writes to a sandboxed signed
+  publisher. For ad-hoc local
+  builds, the publisher embeds the Widget extension's bundle identifier and
+  both use standard `UserDefaults` in that extension container; App Groups are
+  not reliable without a signing TeamIdentifier on macOS 26. Neither process
+  opens a raw shared-container file.
+  A sandboxed standalone helper must embed an Info.plist (`__info_plist`
+  section with a bundle identifier); a bare binary crashes in libsecinit
+  before `main()` and the snapshot silently stops updating.
+  The timeline reload helper likewise presents the containing app's bundle
+  identity and keeps its run loop alive long enough for WidgetCenter's
+  asynchronous XPC request to reach the system before the helper exits.
 - The panel material is system vibrancy from the HUD family, kept in the
   active state because the non-activating panel never becomes key. The
   glass-density slider adjusts a scrim above vibrancy, so blur stays native

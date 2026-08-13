@@ -3,9 +3,6 @@ mod app_server;
 mod claude_hook;
 mod claude_oauth;
 mod coding_quota;
-mod custom_sources;
-#[cfg(test)]
-mod custom_sources_e2e;
 mod detect;
 mod domain;
 mod engine;
@@ -342,6 +339,7 @@ fn resolve_database_path(legacy_database: &Path, local_database: &Path) -> Resul
 async fn usage_snapshot(
     period: String,
     force: Option<bool>,
+    widget_agents: Option<Vec<String>>,
     state: State<'_, AppState>,
 ) -> Result<UsageSnapshot, String> {
     let database_path = state.database_path.clone();
@@ -360,8 +358,34 @@ async fn usage_snapshot(
         )
         .map_err(|error| error.to_string())?;
 
+        // WidgetKit 只存在于 macOS；其它平台上这个参数没有消费者，
+        // 显式标记已读，避免 clippy 的 unused-variables 报警。
+        #[cfg(not(target_os = "macos"))]
+        let _ = &widget_agents;
+
         #[cfg(target_os = "macos")]
-        if let Err(error) = widget_snapshot::persist(&snapshot) {
+        let widget_agents = widget_agents
+            .as_deref()
+            .map(widget_snapshot::normalize_agent_filter);
+
+        #[cfg(target_os = "macos")]
+        if let Some(agents) = widget_agents.as_ref() {
+            let save_result = storage::open_database(&database_path).and_then(|connection| {
+                let encoded = serde_json::to_string(agents)?;
+                storage::set_app_setting(
+                    &connection,
+                    widget_snapshot::AGENT_FILTER_SETTING_KEY,
+                    &encoded,
+                )
+            });
+            if let Err(error) = save_result {
+                // 选择持久化只服务于下次冷启动；当前快照仍应正常发布。
+                eprintln!("Metrik could not remember its WidgetKit Agent selection ({error:#})");
+            }
+        }
+
+        #[cfg(target_os = "macos")]
+        if let Err(error) = widget_snapshot::persist(&snapshot, widget_agents.as_deref()) {
             // Widget publication is a secondary output. A temporary App Group or
             // filesystem failure must not hide the primary Metrik usage result.
             eprintln!("Metrik could not publish its WidgetKit snapshot ({error:#})");
@@ -477,42 +501,6 @@ async fn export_csv(file_name: String, content: String) -> Result<String, String
     })
     .await
     .map_err(|error| format!("csv export task failed: {error}"))?
-}
-
-/// 用户声明的自定义用量来源。只读，供设置页展示。
-#[tauri::command]
-async fn custom_usage_sources(
-    state: State<'_, AppState>,
-) -> Result<Vec<custom_sources::CustomSource>, String> {
-    let database_path = state.database_path.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        let connection =
-            storage::open_database_read_only(&database_path).map_err(|error| error.to_string())?;
-        custom_sources::load(&connection).map_err(|error| error.to_string())
-    })
-    .await
-    .map_err(|error| format!("custom sources task failed: {error}"))?
-}
-
-/// 覆盖式保存。返回归一化后的结果，让界面直接反映实际生效的配置
-/// （去重、去空白后可能与用户输入不同）。
-#[tauri::command]
-async fn set_custom_usage_sources(
-    sources: Vec<custom_sources::CustomSource>,
-    state: State<'_, AppState>,
-) -> Result<Vec<custom_sources::CustomSource>, String> {
-    let database_path = state.database_path.clone();
-    let scan_gate = Arc::clone(&state.scan_gate);
-    tauri::async_runtime::spawn_blocking(move || {
-        let _gate = scan_gate
-            .lock()
-            .map_err(|_| "usage scan lock poisoned".to_owned())?;
-        let connection =
-            storage::open_database(&database_path).map_err(|error| error.to_string())?;
-        custom_sources::save(&connection, sources).map_err(|error| error.to_string())
-    })
-    .await
-    .map_err(|error| format!("set custom sources task failed: {error}"))?
 }
 
 #[tauri::command]
@@ -863,10 +851,16 @@ async fn set_claude_hook(enabled: bool) -> Result<claude_hook::ClaudeHookStatus,
 /// 完整视图在 macOS 是带原生标题栏的独立窗口：用户手动选择明暗、且与系统相反时，
 /// 让原生标题栏跟随内容主题（"自动"传 None，交回系统决定，与内容一致）。
 /// Windows 的完整视图无边框、无原生标题栏，无需处理，这里对其它平台是 no-op。
+// objc/cocoa 的老宏在 clippy 下报 unexpected_cfgs/deprecated，与 macos.rs 头部同理豁免。
+#[cfg_attr(target_os = "macos", allow(deprecated, unexpected_cfgs))]
 #[tauri::command]
 fn set_native_theme(window: tauri::WebviewWindow, theme: Option<String>) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
+        use objc::{class, msg_send, sel, sel_impl};
+        use tauri_nspanel::cocoa::base::{id, nil};
+        use tauri_nspanel::cocoa::foundation::NSString;
+
         let resolved = match theme.as_deref() {
             Some("dark") => Some(tauri::Theme::Dark),
             Some("light") => Some(tauri::Theme::Light),
@@ -874,6 +868,35 @@ fn set_native_theme(window: tauri::WebviewWindow, theme: Option<String>) -> Resu
         };
         window
             .set_theme(resolved)
+            .map_err(|error| error.to_string())?;
+
+        // 再把窗口级 appearance 直接压上（"自动"清回 nil，跟随系统）。
+        // 标题栏能跟随它的前提是创建时清掉了 FullSizeContentView
+        // （见 macos.rs 的 strip_fullsize_content_view）。
+        // AppKit 不是线程安全的：Tauri 命令跑在线程池里，离主线程的
+        // setAppearance: 会被静默忽略，必须派回主线程执行。
+        let ns_window = window.ns_window().map_err(|error| error.to_string())? as usize;
+        window
+            .app_handle()
+            .run_on_main_thread(move || {
+                let appearance: id = unsafe {
+                    match resolved {
+                        Some(tauri::Theme::Dark) => {
+                            let name = NSString::alloc(nil).init_str("NSAppearanceNameDarkAqua");
+                            msg_send![class!(NSAppearance), appearanceNamed: name]
+                        }
+                        Some(tauri::Theme::Light) => {
+                            let name = NSString::alloc(nil).init_str("NSAppearanceNameAqua");
+                            msg_send![class!(NSAppearance), appearanceNamed: name]
+                        }
+                        _ => nil,
+                    }
+                };
+                let ns_window = ns_window as id;
+                unsafe {
+                    let _: () = msg_send![ns_window, setAppearance: appearance];
+                }
+            })
             .map_err(|error| error.to_string())?;
     }
     #[cfg(not(target_os = "macos"))]
@@ -1103,8 +1126,26 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             match engine::build_cached_snapshot(&database_path, "today") {
                 Ok(snapshot) => {
-                    if let Err(error) = widget_snapshot::persist(&snapshot) {
-                        eprintln!("Metrik could not seed its WidgetKit snapshot ({error:#})");
+                    // 冷启动时前端 localStorage 尚未挂载，只能使用上一次前端快照请求
+                    // 同步进 app_setting 的选择。旧版本没有该设置时保留磁盘上的现有
+                    // WidgetKit 快照，避免升级启动瞬间擅自变成全量 Agent。
+                    let saved_agents = storage::open_database_read_only(&database_path)
+                        .ok()
+                        .and_then(|connection| {
+                            storage::get_app_setting(
+                                &connection,
+                                widget_snapshot::AGENT_FILTER_SETTING_KEY,
+                            )
+                            .ok()
+                            .flatten()
+                        })
+                        .and_then(|encoded| serde_json::from_str::<Vec<String>>(&encoded).ok())
+                        .map(|agents| widget_snapshot::normalize_agent_filter(&agents))
+                        .filter(|agents| !agents.is_empty());
+                    if let Some(agents) = saved_agents {
+                        if let Err(error) = widget_snapshot::persist(&snapshot, Some(&agents)) {
+                            eprintln!("Metrik could not seed its WidgetKit snapshot ({error:#})");
+                        }
                     }
                 }
                 Err(error) => {
@@ -1147,8 +1188,6 @@ pub fn run() {
             usage_projects,
             project_rules,
             set_project_rules,
-            custom_usage_sources,
-            set_custom_usage_sources,
             export_csv,
             rebuild_local_ledger,
             sync_settings,
@@ -1177,8 +1216,23 @@ pub fn run_statusline() {
 
 #[cfg(target_os = "macos")]
 pub fn publish_widget_snapshot_from_database(database_path: &Path) -> Result<PathBuf> {
-    let snapshot = engine::build_cached_snapshot(database_path, "today")?;
-    widget_snapshot::persist(&snapshot)
+    // 走真正的扫描路径而非只读缓存：这样即便前端面板不可见（用户只看菜单栏/
+    // 桌面组件），被外部定时器周期性起一次的本 helper 也能发现新产生的日志
+    // 并刷新 WidgetKit snapshot。force=false 避免在旁路进程里触发配额 API 限流。
+    let quota_cache: SharedQuotaCache = Arc::new(quota::QuotaCache::default());
+    let snapshot = engine::build_snapshot(database_path, "today", &quota_cache, false)?;
+    // 读回用户在设置里勾选并排过序的 Agent 列表（usage_snapshot command 会把它
+    // 持久化到 app_setting）。CLI 旁路刷新必须带上同一份顺序，否则 Widget 会回退
+    // 到 AGENT_IDS 的固定顺序，与用户在软件里的排列不一致。
+    let agent_filter = storage::open_database_read_only(database_path)
+        .ok()
+        .and_then(|connection| {
+            storage::get_app_setting(&connection, widget_snapshot::AGENT_FILTER_SETTING_KEY)
+                .ok()
+                .flatten()
+        })
+        .and_then(|encoded| serde_json::from_str::<Vec<String>>(&encoded).ok());
+    widget_snapshot::persist(&snapshot, agent_filter.as_deref())
 }
 
 #[cfg(not(target_os = "macos"))]

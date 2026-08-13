@@ -1,6 +1,6 @@
 [package]
 name = "metrik"
-version = "0.15.1"
+version = "0.16.0"
 description = "Local-first AI agent usage monitor"
 authors = ["keros68 <keros68@gmail.com>"]
 edition = "2021"
@@ -46,6 +46,9 @@ libc = "0.2"
 # 菜单栏面板：把 main 窗口换成不抢焦点的 NSPanel。crates.io 上没有 Tauri 2 版本，
 # 只能走 git 分支；上游停更时需要自行维护。
 tauri-nspanel = { git = "https://github.com/ahkohd/tauri-nspanel", branch = "v2" }
+# 直接设置窗口级 NSAppearance（tao 的 set_theme 只动全应用外观，macOS 26 的
+# 标题栏不跟随它）。cocoa/objc 随 tauri-nspanel 已在依赖树中。
+objc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
 # 只剩任务栏进度按钮用得到。WinRT 合成那几个 feature 和 windows-numerics 是
