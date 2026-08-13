@@ -58,8 +58,6 @@ import {
   getUsageProjects,
   getProjectRules,
   setProjectRules,
-  getCustomSources,
-  setCustomSources,
   getUsageSnapshot,
   rebuildLocalLedger,
   removeSyncDevice,
@@ -180,15 +178,6 @@ const AGENT_META = {
     accent: "#3a7ca5",
     iconSrc: qoderAppIcon,
     iconClass: "agent-icon--qoder",
-  },
-  custom: {
-    // 用户自己声明的 Claude 兼容 JSONL 目录，合并成一条。没有品牌图标，
-    // 用字母牌兜底（AgentMark 已支持）。
-    label: "自定义",
-    // 中性灰蓝：不与任何厂商的品牌色抢，一眼看出它不是某个具体产品。
-    accent: "#6b7280",
-    monogram: "自",
-    iconClass: "agent-icon--custom",
   },
 };
 
@@ -2598,123 +2587,6 @@ function AgentsDisplayCard({ widgetAgents, onToggleWidgetAgent, onMoveWidgetAgen
   );
 }
 
-/// 自定义用量来源：我们没接的 Agent，只要日志是 Claude 兼容 JSONL，
-/// 用户指一下目录就能算进总量，不必等我们排期。
-function CustomSourcesCard({ onSnapshotRefresh }) {
-  const [sources, setSources] = useState(null);
-  const [nameInput, setNameInput] = useState("");
-  const [pathInput, setPathInput] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [feedback, setFeedback] = useState(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    getCustomSources()
-      .then((value) => {
-        if (!cancelled) setSources(value);
-      })
-      .catch(() => {
-        if (!cancelled) setFeedback({ tone: "error", message: "自定义来源读取失败。" });
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  const apply = async (next) => {
-    setBusy(true);
-    setFeedback(null);
-    try {
-      // 后端返回归一化后的结果：去重、去空白后可能与输入不同，直接以它为准。
-      const saved = await setCustomSources(next);
-      setSources(saved);
-      onSnapshotRefresh();
-    } catch (error) {
-      setFeedback({ tone: "error", message: `${error}` });
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const add = () => {
-    const name = nameInput.trim();
-    const path = pathInput.trim();
-    if (!name || !path) return;
-    apply([...(sources || []), { name, path }]).then(() => {
-      setNameInput("");
-      setPathInput("");
-    });
-  };
-
-  return (
-    <div className="settings-card">
-      <h2>自定义来源</h2>
-      <p className="settings-muted">
-        我们还没适配的 Agent，只要会话日志是 Claude 兼容 JSONL，指定目录后即可计入统计，
-        合并显示为「自定义」。只读取 token 计数，不读对话内容。
-      </p>
-      <p className="settings-muted">
-        格式不符的目录解析不出事件，如实显示 0，不做猜测。各来源的解析情况见「数据统计」。
-      </p>
-      <div className="rules-add">
-        <input
-          value={nameInput}
-          placeholder="显示名"
-          spellCheck={false}
-          onChange={(event) => setNameInput(event.target.value)}
-          aria-label="自定义来源显示名"
-        />
-        <input
-          value={pathInput}
-          placeholder="会话日志目录，递归查找其下的 *.jsonl"
-          spellCheck={false}
-          onChange={(event) => setPathInput(event.target.value)}
-          onKeyDown={(event) => { if (event.key === "Enter") add(); }}
-          aria-label="自定义来源目录"
-        />
-        <button
-          type="button"
-          className="ledger-button"
-          disabled={!nameInput.trim() || !pathInput.trim() || busy}
-          onClick={add}
-        >
-          添加
-        </button>
-      </div>
-      {sources === null ? (
-        <p className="settings-muted">正在读取…</p>
-      ) : sources.length === 0 ? (
-        <p className="settings-muted">还没有自定义来源。</p>
-      ) : (
-        <ul className="settings-device-list">
-          {sources.map((source) => (
-            <li key={source.path}>
-              <span>{source.name}</span>
-              <small title={source.path}>{source.path}</small>
-              <button
-                type="button"
-                className="ledger-button ledger-button--secondary"
-                disabled={busy}
-                onClick={() => apply(sources.filter((item) => item.path !== source.path))}
-              >
-                移除
-              </button>
-            </li>
-          ))}
-        </ul>
-      )}
-      {feedback && (
-        <p
-          className={`settings-feedback settings-feedback--${feedback.tone}`}
-          role={feedback.tone === "error" ? "alert" : "status"}
-        >
-          {feedback.message}
-        </p>
-      )}
-    </div>
-  );
-}
-
 function QoderQuotaCard({ onSnapshotRefresh }) {
   const [status, setStatus] = useState(null);
   const [cookieInput, setCookieInput] = useState("");
@@ -2980,7 +2852,6 @@ function SettingsSection({ onSnapshotRefresh, widgetAgents, onToggleWidgetAgent,
         )}
         {activeTab.id === "sources" && (
           <>
-            <CustomSourcesCard onSnapshotRefresh={onSnapshotRefresh} />
             <ClaudeHookCard onSnapshotRefresh={onSnapshotRefresh} />
             <QoderQuotaCard onSnapshotRefresh={onSnapshotRefresh} />
           </>
@@ -4576,12 +4447,19 @@ export function App() {
   const activeLoadPeriod = useRef(null);
   const queuedLoadPeriod = useRef(null);
   const currentPeriod = useRef(period);
+  const widgetAgentsRef = useRef(widgetAgents);
   const rebuildInFlight = useRef(false);
   currentPeriod.current = period;
+  widgetAgentsRef.current = widgetAgents;
 
   const loadSnapshot = useCallback(async (nextPeriod, options) => {
     if (loadInFlight.current) {
-      queuedLoadPeriod.current = activeLoadPeriod.current === nextPeriod ? null : nextPeriod;
+      // 普通的同周期轮询仍合并；Agent 勾选/排序变化必须排一次同周期请求，
+      // 否则恰逢已有请求进行中时，WidgetKit 会一直保留旧选择。
+      // 已排队的选择刷新也不能被随后到达的普通轮询清掉。
+      if (options?.ensureLatestWidgetAgents || activeLoadPeriod.current !== nextPeriod) {
+        queuedLoadPeriod.current = nextPeriod;
+      }
       return;
     }
 
@@ -4595,7 +4473,11 @@ export function App() {
         queuedLoadPeriod.current = null;
         const requestId = ++requestSequence.current;
         setLoading(true);
-        const next = await getUsageSnapshot(periodToLoad, forceLoad ? { force: true } : undefined);
+        const next = await getUsageSnapshot(periodToLoad, {
+          force: forceLoad,
+          // 每轮都读 ref：排队请求必须拿到最新勾选，不能沿用创建回调时的闭包。
+          widgetAgents: widgetAgentsRef.current,
+        });
         forceLoad = false;
         if (requestId === requestSequence.current && !queuedLoadPeriod.current) {
           setSnapshot(next);
@@ -4610,8 +4492,9 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    loadSnapshot(period);
-  }, [period, loadSnapshot]);
+    // 周期或 Agent 选择变化都重发快照；选择变化即便撞上在途请求也不能被合并。
+    loadSnapshot(period, { ensureLatestWidgetAgents: true });
+  }, [period, widgetAgents, loadSnapshot]);
 
   useEffect(() => {
     // 历史索引未补齐时快速迭代：每次快照只花掉一小段补齐预算，靠连续刷新把

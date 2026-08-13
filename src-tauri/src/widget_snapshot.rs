@@ -2,8 +2,10 @@
 //!
 //! The widget never reads Metrik's SQLite ledger directly. The host app publishes a
 //! compact, versioned JSON snapshot containing only derived totals and official quota
-//! metadata. This keeps storage ownership in the shared core and gives WidgetKit a
-//! stable contract that can evolve independently from the database schema.
+//! metadata. The signed publisher stores those JSON bytes through the Widget extension's
+//! standard preferences domain, rather than making the extension open a shared file directly.
+//! This keeps storage ownership in the shared core and gives WidgetKit a stable contract
+//! that can evolve independently from the database schema.
 
 use crate::domain::UsageSnapshot;
 use anyhow::{Context, Result};
@@ -17,6 +19,16 @@ use std::process::{Command, Stdio};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
 const SNAPSHOT_FILE_NAME: &str = "widget-snapshot.json";
+pub const AGENT_FILTER_SETTING_KEY: &str = "macos_widget_agents";
+
+pub fn normalize_agent_filter(agent_filter: &[String]) -> Vec<String> {
+    agent_filter.iter().fold(Vec::new(), |mut selected, id| {
+        if crate::domain::AGENT_IDS.contains(&id.as_str()) && !selected.contains(id) {
+            selected.push(id.clone());
+        }
+        selected
+    })
+}
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -57,13 +69,27 @@ fn agent_label(id: &str) -> &'static str {
         "opencode" => "OpenCode",
         "kimi" => "Kimi",
         "antigravity" => "Antigravity",
+        "workbuddy" => "WorkBuddy",
+        "qoder" => "Qoder",
         _ => "Agent",
     }
 }
 
-fn make_payload(snapshot: &UsageSnapshot) -> WidgetSnapshot<'_> {
-    let agents = snapshot
-        .agents
+fn make_payload<'a>(
+    snapshot: &'a UsageSnapshot,
+    agent_filter: Option<&[String]>,
+) -> WidgetSnapshot<'a> {
+    // agent_filter 是用户在设置里勾选的小组件 Agent（顺序即显示顺序）。
+    // None 表示不过滤（启动播种、CLI 导出）；Some 必须严格匹配选择，不能在
+    // 空值或未知值时擅自回退成全量。前端设置本身保证正常交互至少保留一项。
+    let selected: Vec<&crate::domain::AgentSummary> = match agent_filter {
+        Some(filter) => normalize_agent_filter(filter)
+            .iter()
+            .filter_map(|id| snapshot.agents.iter().find(|agent| &agent.id == id))
+            .collect(),
+        None => snapshot.agents.iter().collect(),
+    };
+    let agents = selected
         .iter()
         .map(|agent| {
             let windows = snapshot
@@ -179,8 +205,8 @@ fn write_atomically(path: &Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
-pub fn persist(snapshot: &UsageSnapshot) -> Result<PathBuf> {
-    let bytes = serde_json::to_vec(&make_payload(snapshot))?;
+pub fn persist(snapshot: &UsageSnapshot, agent_filter: Option<&[String]>) -> Result<PathBuf> {
+    let bytes = serde_json::to_vec(&make_payload(snapshot, agent_filter))?;
     let path = if let Some(helper) = publisher_path() {
         publish_with_helper(&helper, &bytes)?
     } else {
@@ -210,11 +236,93 @@ fn reload_timelines() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::{AgentSummary, CostSummary, IndexingView};
 
     #[test]
     fn labels_match_the_public_agent_names() {
         assert_eq!(agent_label("codex"), "ChatGPT");
         assert_eq!(agent_label("zcode"), "GLM");
         assert_eq!(agent_label("opencode"), "OpenCode");
+    }
+
+    fn snapshot_with_agents(ids: &[&str]) -> UsageSnapshot {
+        UsageSnapshot {
+            generated_at: "2026-08-12T20:00:00Z".to_owned(),
+            period: "today".to_owned(),
+            is_demo: false,
+            total_tokens: ids.len() as i64,
+            comparison_percent: 0.0,
+            comparison_available: false,
+            series: Vec::new(),
+            agent_quotas: Vec::new(),
+            agents: ids
+                .iter()
+                .map(|id| AgentSummary {
+                    id: (*id).to_owned(),
+                    tokens: 1,
+                    input_uncached: 1,
+                    cache_read: 0,
+                    cache_write: 0,
+                    output: 0,
+                    share: 0.0,
+                    detected: true,
+                })
+                .collect(),
+            models: Vec::new(),
+            sources: Vec::new(),
+            cost: CostSummary {
+                available: false,
+                total_usd: 0.0,
+                unpriced_tokens: 0,
+                pricing_as_of: String::new(),
+                by_agent: Vec::new(),
+            },
+            indexing: IndexingView { pending: 0 },
+        }
+    }
+
+    fn payload_agent_ids<'a>(payload: &'a WidgetSnapshot<'a>) -> Vec<&'a str> {
+        payload.agents.iter().map(|agent| agent.id).collect()
+    }
+
+    #[test]
+    fn filter_keeps_only_selected_agents_in_selection_order() {
+        let snapshot = snapshot_with_agents(&["codex", "claude", "kimi"]);
+        let filter = vec!["kimi".to_owned(), "codex".to_owned()];
+        let payload = make_payload(&snapshot, Some(&filter));
+        assert_eq!(payload_agent_ids(&payload), ["kimi", "codex"]);
+    }
+
+    #[test]
+    fn empty_or_unknown_filter_stays_empty_instead_of_showing_every_agent() {
+        let snapshot = snapshot_with_agents(&["codex", "claude"]);
+        let filter = vec!["no-such-agent".to_owned()];
+        let payload = make_payload(&snapshot, Some(&filter));
+        assert!(payload_agent_ids(&payload).is_empty());
+    }
+
+    #[test]
+    fn filter_deduplicates_agents_without_changing_order() {
+        let snapshot = snapshot_with_agents(&["codex", "claude"]);
+        let filter = vec!["claude".to_owned(), "claude".to_owned(), "codex".to_owned()];
+        let payload = make_payload(&snapshot, Some(&filter));
+        assert_eq!(payload_agent_ids(&payload), ["claude", "codex"]);
+    }
+
+    #[test]
+    fn filter_normalization_rejects_unknown_agents() {
+        let filter = vec![
+            "kimi".to_owned(),
+            "no-such-agent".to_owned(),
+            "kimi".to_owned(),
+        ];
+        assert_eq!(normalize_agent_filter(&filter), ["kimi"]);
+    }
+
+    #[test]
+    fn no_filter_publishes_every_agent() {
+        let snapshot = snapshot_with_agents(&["codex", "claude", "kimi"]);
+        let payload = make_payload(&snapshot, None);
+        assert_eq!(payload_agent_ids(&payload), ["codex", "claude", "kimi"]);
     }
 }
