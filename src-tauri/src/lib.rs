@@ -358,6 +358,11 @@ async fn usage_snapshot(
         )
         .map_err(|error| error.to_string())?;
 
+        // WidgetKit 只存在于 macOS；其它平台上这个参数没有消费者，
+        // 显式标记已读，避免 clippy 的 unused-variables 报警。
+        #[cfg(not(target_os = "macos"))]
+        let _ = &widget_agents;
+
         #[cfg(target_os = "macos")]
         let widget_agents = widget_agents
             .as_deref()
