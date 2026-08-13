@@ -123,10 +123,6 @@ Reading another project's parser does not substitute for that confirmation. Comp
 
 Where a source reports its own total, `TokenVector::disagrees_with_reported_total` compares it against the components we derived. A mismatch increments `ScanDiagnostics::total_mismatches`, which marks that source incomplete and states in the sources drawer that the displayed numbers may be wrong. This exists because a misread field does not crash — it produces a plausible wrong number that nobody notices. The check converts that silent failure into a visible one, which is what makes it defensible to add adapters based on formats we have not exercised ourselves.
 
-### User-declared sources
-
-Users can point Metrik at a directory of **Claude-compatible JSONL** and have it counted without waiting for a dedicated adapter; those events merge into the `custom` agent slot, and each declared source is listed by name in the sources drawer. The format is fixed on purpose: offering a field-mapping UI would push the very semantic judgement described above onto the user, where getting it wrong is silent. A directory in another format simply parses to no events and reports zero.
-
 ## Runtime boundary
 
 - Compact mode refreshes every five minutes while visible; expanded mode refreshes every minute. While `indexing.pending > 0` the UI polls every 400 ms instead, so each snapshot spends another `PARSE_BUDGET` on the backlog until it is drained. Returning to the window triggers a refresh.

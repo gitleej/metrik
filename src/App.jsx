@@ -57,8 +57,6 @@ import {
   getUsageProjects,
   getProjectRules,
   setProjectRules,
-  getCustomSources,
-  setCustomSources,
   getUsageSnapshot,
   rebuildLocalLedger,
   removeSyncDevice,
@@ -179,15 +177,6 @@ const AGENT_META = {
     accent: "#3a7ca5",
     iconSrc: qoderAppIcon,
     iconClass: "agent-icon--qoder",
-  },
-  custom: {
-    // 用户自己声明的 Claude 兼容 JSONL 目录，合并成一条。没有品牌图标，
-    // 用字母牌兜底（AgentMark 已支持）。
-    label: "自定义",
-    // 中性灰蓝：不与任何厂商的品牌色抢，一眼看出它不是某个具体产品。
-    accent: "#6b7280",
-    monogram: "自",
-    iconClass: "agent-icon--custom",
   },
 };
 
@@ -2571,123 +2560,6 @@ function AgentsDisplayCard({ widgetAgents, onToggleWidgetAgent, onMoveWidgetAgen
   );
 }
 
-/// 自定义用量来源：我们没接的 Agent，只要日志是 Claude 兼容 JSONL，
-/// 用户指一下目录就能算进总量，不必等我们排期。
-function CustomSourcesCard({ onSnapshotRefresh }) {
-  const [sources, setSources] = useState(null);
-  const [nameInput, setNameInput] = useState("");
-  const [pathInput, setPathInput] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [feedback, setFeedback] = useState(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    getCustomSources()
-      .then((value) => {
-        if (!cancelled) setSources(value);
-      })
-      .catch(() => {
-        if (!cancelled) setFeedback({ tone: "error", message: "自定义来源读取失败。" });
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  const apply = async (next) => {
-    setBusy(true);
-    setFeedback(null);
-    try {
-      // 后端返回归一化后的结果：去重、去空白后可能与输入不同，直接以它为准。
-      const saved = await setCustomSources(next);
-      setSources(saved);
-      onSnapshotRefresh();
-    } catch (error) {
-      setFeedback({ tone: "error", message: `${error}` });
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const add = () => {
-    const name = nameInput.trim();
-    const path = pathInput.trim();
-    if (!name || !path) return;
-    apply([...(sources || []), { name, path }]).then(() => {
-      setNameInput("");
-      setPathInput("");
-    });
-  };
-
-  return (
-    <div className="settings-card">
-      <h2>自定义来源</h2>
-      <p className="settings-muted">
-        我们还没适配的 Agent，只要会话日志是 Claude 兼容 JSONL，指定目录后即可计入统计，
-        合并显示为「自定义」。只读取 token 计数，不读对话内容。
-      </p>
-      <p className="settings-muted">
-        格式不符的目录解析不出事件，如实显示 0，不做猜测。各来源的解析情况见「数据统计」。
-      </p>
-      <div className="rules-add">
-        <input
-          value={nameInput}
-          placeholder="显示名"
-          spellCheck={false}
-          onChange={(event) => setNameInput(event.target.value)}
-          aria-label="自定义来源显示名"
-        />
-        <input
-          value={pathInput}
-          placeholder="会话日志目录，递归查找其下的 *.jsonl"
-          spellCheck={false}
-          onChange={(event) => setPathInput(event.target.value)}
-          onKeyDown={(event) => { if (event.key === "Enter") add(); }}
-          aria-label="自定义来源目录"
-        />
-        <button
-          type="button"
-          className="ledger-button"
-          disabled={!nameInput.trim() || !pathInput.trim() || busy}
-          onClick={add}
-        >
-          添加
-        </button>
-      </div>
-      {sources === null ? (
-        <p className="settings-muted">正在读取…</p>
-      ) : sources.length === 0 ? (
-        <p className="settings-muted">还没有自定义来源。</p>
-      ) : (
-        <ul className="settings-device-list">
-          {sources.map((source) => (
-            <li key={source.path}>
-              <span>{source.name}</span>
-              <small title={source.path}>{source.path}</small>
-              <button
-                type="button"
-                className="ledger-button ledger-button--secondary"
-                disabled={busy}
-                onClick={() => apply(sources.filter((item) => item.path !== source.path))}
-              >
-                移除
-              </button>
-            </li>
-          ))}
-        </ul>
-      )}
-      {feedback && (
-        <p
-          className={`settings-feedback settings-feedback--${feedback.tone}`}
-          role={feedback.tone === "error" ? "alert" : "status"}
-        >
-          {feedback.message}
-        </p>
-      )}
-    </div>
-  );
-}
-
 function QoderQuotaCard({ onSnapshotRefresh }) {
   const [status, setStatus] = useState(null);
   const [cookieInput, setCookieInput] = useState("");
@@ -2953,7 +2825,6 @@ function SettingsSection({ onSnapshotRefresh, widgetAgents, onToggleWidgetAgent,
         )}
         {activeTab.id === "sources" && (
           <>
-            <CustomSourcesCard onSnapshotRefresh={onSnapshotRefresh} />
             <ClaudeHookCard onSnapshotRefresh={onSnapshotRefresh} />
             <QoderQuotaCard onSnapshotRefresh={onSnapshotRefresh} />
           </>

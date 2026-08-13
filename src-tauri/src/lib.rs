@@ -3,9 +3,6 @@ mod app_server;
 mod claude_hook;
 mod claude_oauth;
 mod coding_quota;
-mod custom_sources;
-#[cfg(test)]
-mod custom_sources_e2e;
 mod detect;
 mod domain;
 mod engine;
@@ -477,42 +474,6 @@ async fn export_csv(file_name: String, content: String) -> Result<String, String
     })
     .await
     .map_err(|error| format!("csv export task failed: {error}"))?
-}
-
-/// 用户声明的自定义用量来源。只读，供设置页展示。
-#[tauri::command]
-async fn custom_usage_sources(
-    state: State<'_, AppState>,
-) -> Result<Vec<custom_sources::CustomSource>, String> {
-    let database_path = state.database_path.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        let connection =
-            storage::open_database_read_only(&database_path).map_err(|error| error.to_string())?;
-        custom_sources::load(&connection).map_err(|error| error.to_string())
-    })
-    .await
-    .map_err(|error| format!("custom sources task failed: {error}"))?
-}
-
-/// 覆盖式保存。返回归一化后的结果，让界面直接反映实际生效的配置
-/// （去重、去空白后可能与用户输入不同）。
-#[tauri::command]
-async fn set_custom_usage_sources(
-    sources: Vec<custom_sources::CustomSource>,
-    state: State<'_, AppState>,
-) -> Result<Vec<custom_sources::CustomSource>, String> {
-    let database_path = state.database_path.clone();
-    let scan_gate = Arc::clone(&state.scan_gate);
-    tauri::async_runtime::spawn_blocking(move || {
-        let _gate = scan_gate
-            .lock()
-            .map_err(|_| "usage scan lock poisoned".to_owned())?;
-        let connection =
-            storage::open_database(&database_path).map_err(|error| error.to_string())?;
-        custom_sources::save(&connection, sources).map_err(|error| error.to_string())
-    })
-    .await
-    .map_err(|error| format!("set custom sources task failed: {error}"))?
 }
 
 #[tauri::command]
@@ -1147,8 +1108,6 @@ pub fn run() {
             usage_projects,
             project_rules,
             set_project_rules,
-            custom_usage_sources,
-            set_custom_usage_sources,
             export_csv,
             rebuild_local_ledger,
             sync_settings,

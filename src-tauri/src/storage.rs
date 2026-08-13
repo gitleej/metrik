@@ -304,11 +304,8 @@ fn insert_or_merge_usage_event(
     // being completed, and may copy it into a branched session log. Those are
     // observations of one event, so merge each token component monotonically.
     // Fallback Claude keys and all other adapters keep strict payload matching.
-    // 用户声明的自定义来源用的是同一套 Claude 格式，因此有同样的"同一条消息被
-    // 反复观察、计数逐步补齐"行为，必须一并按分量合并；否则每次重扫都会因为
-    // payload 变化被判成身份冲突。
     let mergeable_claude_message =
-        matches!(event.adapter_id, "claude" | "custom") && event.event_key.starts_with("message:");
+        event.adapter_id == "claude" && event.event_key.starts_with("message:");
     // Antigravity has no log: every poll re-reads the live session and returns a
     // full snapshot, so an in-flight generation is observed repeatedly with
     // growing counts. Same shape as Claude — merge component-wise maxima.

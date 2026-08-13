@@ -71,14 +71,6 @@ impl ClaudeAdapter {
         }
     }
 
-    /// 用户在设置里声明的 Claude 兼容 JSONL 目录，合并计入 `custom` 槽位。
-    pub fn for_custom_sources(roots: Vec<PathBuf>) -> Self {
-        Self {
-            roots,
-            adapter_id: "custom",
-        }
-    }
-
     #[cfg(test)]
     fn with_roots(roots: Vec<PathBuf>) -> Self {
         Self {

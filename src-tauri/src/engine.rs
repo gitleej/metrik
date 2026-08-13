@@ -3,7 +3,6 @@ use crate::adapters::{
     ScanDiagnostics, SourceCandidate, WorkbuddyAdapter, ZcodeAdapter,
 };
 use crate::claude_oauth;
-use crate::custom_sources;
 use crate::detect;
 use crate::domain::ProjectReportRow;
 use crate::domain::{
@@ -725,12 +724,6 @@ fn global_event_bounds(connection: &Connection) -> Result<(Option<i64>, Option<i
 /// 按固定的保留期视界摄取日志。需要解析的源按 mtime 倒序排队，在时间预算内尽量
 /// 解析；没轮到的记进 `report.backfill_pending`，由界面显式标注为「补齐中」。
 fn ingest_sources(connection: &mut Connection, horizon_ms: i64) -> Result<ScanReport> {
-    // 用户声明的目录走同一套 Claude 兼容 JSONL 解析，合并计入 custom 槽位。
-    // 没声明时 roots 为空，discover 直接返回空，等于没有这个 adapter。
-    let custom_roots: Vec<std::path::PathBuf> = custom_sources::load(connection)?
-        .into_iter()
-        .map(|source| std::path::PathBuf::from(source.path))
-        .collect();
     let adapters: Vec<Box<dyn AgentAdapter>> = vec![
         Box::new(CodexAdapter::detected()),
         Box::new(ClaudeAdapter::detected()),
@@ -739,7 +732,6 @@ fn ingest_sources(connection: &mut Connection, horizon_ms: i64) -> Result<ScanRe
         Box::new(KimiAdapter::detected()),
         Box::new(AntigravityAdapter::detected()),
         Box::new(WorkbuddyAdapter::detected()),
-        Box::new(ClaudeAdapter::for_custom_sources(custom_roots)),
     ];
     let mut report = ScanReport::default();
     let mut queue: Vec<(usize, SourceCandidate)> = Vec::new();
@@ -1038,8 +1030,6 @@ fn query_snapshot_at(
 
     // 安装探针只碰文件系统与已配置的凭据，一次快照查一遍即可。
     let installed = detect::installed_agents();
-    // 自定义来源没有安装痕迹可探——"声明了"就是"装了"。
-    let declared_custom = !custom_sources::load(connection)?.is_empty();
 
     let mut models: Vec<ModelSummary> = model_totals
         .into_iter()
@@ -1092,9 +1082,7 @@ fn query_snapshot_at(
                     share: share(totals[agent]),
                     // 有用量必然装了；反过来不成立，所以安装痕迹是主判据、
                     // 用量兜底（Antigravity 没有便宜可靠的安装探针）。
-                    detected: installed.contains(agent)
-                        || totals[agent] > 0
-                        || (*agent == "custom" && declared_custom),
+                    detected: installed.contains(agent) || totals[agent] > 0,
                 }
             })
             .collect(),
@@ -1102,14 +1090,7 @@ fn query_snapshot_at(
         indexing: IndexingView {
             pending: report.backfill_pending,
         },
-        sources: source_views(
-            report,
-            sync::sync_view(connection).ok(),
-            custom_sources::load(connection)?
-                .into_iter()
-                .map(|source| source.name)
-                .collect(),
-        ),
+        sources: source_views(report, sync::sync_view(connection).ok()),
         cost,
     })
 }
@@ -1365,11 +1346,7 @@ fn load_quota(connection: &Connection, adapter_id: &str, window_key: &str) -> Re
     }
 }
 
-fn source_views(
-    report: ScanReport,
-    sync_status: Option<SyncView>,
-    custom_labels: Vec<String>,
-) -> Vec<SourceView> {
+fn source_views(report: ScanReport, sync_status: Option<SyncView>) -> Vec<SourceView> {
     let discovered = |id: &str| report.discovered.get(id).copied().unwrap_or(0);
     let refreshed = |id: &str| report.refreshed.get(id).copied().unwrap_or(0);
     let errors = |id: &str| report.errors.get(id).copied().unwrap_or(0);
@@ -1507,34 +1484,6 @@ fn source_views(
             ),
             quality: "exact".into(),
             quality_label: "精确解析".into(),
-        },
-        SourceView {
-            id: "custom-local".into(),
-            kind: "local".into(),
-            label: "自定义来源".into(),
-            detail: format!(
-                "用户在设置里声明的目录，按 Claude 兼容 JSONL 解析并合并计入「自定义」：{}。发现 {} 个会话，本次更新 {} 个。{}格式不符的目录解析不出事件，如实显示 0，不做猜测。",
-                if custom_labels.is_empty() {
-                    "尚未声明".to_owned()
-                } else {
-                    custom_labels.join("、")
-                },
-                discovered("custom"),
-                refreshed("custom"),
-                coverage_detail(&diagnostics("custom"), errors("custom")),
-            ),
-            quality: if diagnostics("custom").partial_sources > 0 || errors("custom") > 0 {
-                "partial"
-            } else {
-                "exact"
-            }
-            .into(),
-            quality_label: if diagnostics("custom").partial_sources > 0 || errors("custom") > 0 {
-                "数据不完整"
-            } else {
-                "精确解析"
-            }
-            .into(),
         },
         SourceView {
             id: "qoder-quota".into(),
@@ -2330,7 +2279,7 @@ mod tests {
             },
         );
 
-        let views = source_views(report, None, Vec::new());
+        let views = source_views(report, None);
         let codex = views
             .iter()
             .find(|source| source.id == "codex-local")
@@ -2354,7 +2303,7 @@ mod tests {
         let mut report = ScanReport::default();
         report.errors.insert("claude".into(), 1);
 
-        let views = source_views(report, None, Vec::new());
+        let views = source_views(report, None);
         let claude = views
             .iter()
             .find(|source| source.id == "claude-local")
@@ -2374,7 +2323,7 @@ mod tests {
             vec!["检测到 OpenCode 1.2+ 的 SQLite 存储（opencode.db），当前版本尚不支持读取，其中的会话未计入统计".into()],
         );
 
-        let views = source_views(report, None, Vec::new());
+        let views = source_views(report, None);
         let opencode = views
             .iter()
             .find(|source| source.id == "opencode-local")
@@ -2400,7 +2349,7 @@ mod tests {
             },
         );
 
-        let claude = source_views(report, None, Vec::new())
+        let claude = source_views(report, None)
             .into_iter()
             .find(|source| source.id == "claude-local")
             .unwrap();
