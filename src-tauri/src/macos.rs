@@ -60,6 +60,8 @@ const ZCODE_MARK: &[u8] = include_bytes!("../../src/assets/zcode-app-icon.png");
 const OPENCODE_MARK: &[u8] = include_bytes!("../../src/assets/opencode-app-icon.png");
 const KIMI_MARK: &[u8] = include_bytes!("../../src/assets/kimi-app-icon.png");
 const ANTIGRAVITY_MARK: &[u8] = include_bytes!("../../src/assets/antigravity-app-icon.png");
+const WORKBUDDY_MARK: &[u8] = include_bytes!("../../src/assets/workbuddy-app-icon.png");
+const QODER_MARK: &[u8] = include_bytes!("../../src/assets/qoder-app-icon.png");
 
 #[derive(Clone, Copy)]
 struct StatusItemSpec {
@@ -68,7 +70,7 @@ struct StatusItemSpec {
     icon: &'static [u8],
 }
 
-const STATUS_ITEMS: [StatusItemSpec; 6] = [
+const STATUS_ITEMS: [StatusItemSpec; 8] = [
     StatusItemSpec {
         id: "codex",
         name: "ChatGPT",
@@ -98,6 +100,16 @@ const STATUS_ITEMS: [StatusItemSpec; 6] = [
         id: "antigravity",
         name: "Antigravity",
         icon: ANTIGRAVITY_MARK,
+    },
+    StatusItemSpec {
+        id: "workbuddy",
+        name: "WorkBuddy",
+        icon: WORKBUDDY_MARK,
+    },
+    StatusItemSpec {
+        id: "qoder",
+        name: "Qoder",
+        icon: QODER_MARK,
     },
 ];
 
@@ -565,6 +577,12 @@ fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_visible_agent_has_a_menu_bar_status_item() {
+        let status_ids = STATUS_ITEMS.map(|item| item.id);
+        assert_eq!(status_ids, crate::domain::AGENT_IDS);
+    }
 
     #[test]
     fn status_title_clamps_percentages_and_marks_stale_data() {

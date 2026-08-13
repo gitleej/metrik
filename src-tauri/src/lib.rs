@@ -364,25 +364,40 @@ async fn usage_snapshot(
         let _ = &widget_agents;
 
         #[cfg(target_os = "macos")]
-        let widget_agents = widget_agents
+        let requested_widget_agents = widget_agents
             .as_deref()
             .map(widget_snapshot::normalize_agent_filter);
 
         #[cfg(target_os = "macos")]
-        if let Some(agents) = widget_agents.as_ref() {
-            let save_result = storage::open_database(&database_path).and_then(|connection| {
-                let encoded = serde_json::to_string(agents)?;
-                storage::set_app_setting(
+        let widget_agents = storage::open_database(&database_path)
+            .and_then(|connection| {
+                let saved = storage::get_app_setting(
                     &connection,
                     widget_snapshot::AGENT_FILTER_SETTING_KEY,
-                    &encoded,
-                )
+                )?;
+
+                // 数据轮询不是设置写入通道：一旦有权威选择，任何窗口携带的旧
+                // widget_agents 都只能被忽略。首次升级没有保存值时，才用调用
+                // 窗口的 localStorage 播种一次。
+                let (resolved, should_persist) = widget_snapshot::resolve_agent_filter(
+                    saved.as_deref(),
+                    requested_widget_agents.as_deref(),
+                );
+                if should_persist {
+                    let agents = resolved.as_ref().expect("initial selection is present");
+                    let encoded = serde_json::to_string(agents)?;
+                    storage::set_app_setting(
+                        &connection,
+                        widget_snapshot::AGENT_FILTER_SETTING_KEY,
+                        &encoded,
+                    )?;
+                }
+                Ok(resolved)
+            })
+            .unwrap_or_else(|error| {
+                eprintln!("Metrik could not read its WidgetKit Agent selection ({error:#})");
+                requested_widget_agents.filter(|agents| !agents.is_empty())
             });
-            if let Err(error) = save_result {
-                // 选择持久化只服务于下次冷启动；当前快照仍应正常发布。
-                eprintln!("Metrik could not remember its WidgetKit Agent selection ({error:#})");
-            }
-        }
 
         #[cfg(target_os = "macos")]
         if let Err(error) = widget_snapshot::persist(&snapshot, widget_agents.as_deref()) {
@@ -395,6 +410,54 @@ async fn usage_snapshot(
     })
     .await
     .map_err(|error| format!("usage scan task failed: {error}"))?
+}
+
+/// 设置窗口显式提交 macOS Agent 选择。它是唯一允许覆盖已保存选择的通道；
+/// 普通 usage_snapshot 轮询只能读取该值，防止隐藏 WebView 用旧状态回滚设置。
+#[tauri::command]
+async fn set_macos_agent_selection(
+    agents: Vec<String>,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let agents = widget_snapshot::normalize_agent_filter(&agents);
+        if agents.is_empty() {
+            return Err("macOS 菜单栏至少保留一个 Agent".into());
+        }
+        let database_path = state.database_path.clone();
+        let scan_gate = Arc::clone(&state.scan_gate);
+        tauri::async_runtime::spawn_blocking(move || {
+            let _gate = scan_gate
+                .lock()
+                .map_err(|_| "usage scan lock poisoned".to_owned())?;
+            let connection =
+                storage::open_database(&database_path).map_err(|error| error.to_string())?;
+            let encoded = serde_json::to_string(&agents).map_err(|error| error.to_string())?;
+            storage::set_app_setting(
+                &connection,
+                widget_snapshot::AGENT_FILTER_SETTING_KEY,
+                &encoded,
+            )
+            .map_err(|error| error.to_string())?;
+            drop(connection);
+
+            // 选择本身不需要重新扫描 Agent 日志；用缓存快照即可立刻更新
+            // WidgetKit 内容与时间线，额度/用量数值保持现有来源语义。
+            let snapshot = engine::build_cached_snapshot(&database_path, "today")
+                .map_err(|error| error.to_string())?;
+            widget_snapshot::persist(&snapshot, Some(&agents))
+                .map_err(|error| error.to_string())?;
+            Ok(())
+        })
+        .await
+        .map_err(|error| format!("macOS Agent selection task failed: {error}"))?
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (agents, state);
+        Err("macOS Agent 选择仅用于 macOS".into())
+    }
 }
 
 /// 只读历史报告：只查询本地账本已有数据，绝不触发日志扫描，不与 `usage_snapshot`
@@ -1204,6 +1267,7 @@ pub fn run() {
             open_expanded_window,
             set_macos_desktop_widget_visible,
             resize_macos_panel,
+            set_macos_agent_selection,
             update_macos_status_items
         ])
         .run(tauri::generate_context!())

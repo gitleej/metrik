@@ -67,6 +67,7 @@ import {
   UI_SCALE_RANGE,
   applyStartupUiScale,
   applyWindowMode,
+  broadcastMacAgentSelection,
   broadcastMacAppearance,
   checkForUpdate,
   closeWindow,
@@ -76,6 +77,7 @@ import {
   isMacPlatform,
   isWindowsPlatform,
   minimizeWindow,
+  onMacAgentSelection,
   onMacAppearance,
   onScaleFactorChanged,
   onTrayShowExpanded,
@@ -4410,27 +4412,28 @@ export function App() {
       window.clearInterval(interval);
     };
   }, [autoUpdateCheck]);
+  const commitWidgetAgents = useCallback((next) => {
+    setWidgetAgents(next);
+    localStorage.setItem("metrik:widgetAgents", JSON.stringify(next));
+    // macOS 的设置页和菜单栏面板不共享 React 状态，也收不到彼此的 storage
+    // 事件。立即广播选择，避免隐藏面板下一轮轮询把旧列表写回菜单栏/WidgetKit。
+    if (IS_MAC) runWindowAction(() => broadcastMacAgentSelection(next));
+  }, []);
   const handleToggleWidgetAgent = useCallback((agentId) => {
-    setWidgetAgents((current) => {
-      // 新勾选的排到末尾（数组顺序就是显示顺序，与胶囊条同一套语义）。
-      const next = current.includes(agentId)
-        ? current.filter((id) => id !== agentId)
-        : [...current, agentId];
-      if (!next.length) return current; // 至少保留一个
-      localStorage.setItem("metrik:widgetAgents", JSON.stringify(next));
-      return next;
-    });
-  }, []);
+    // 新勾选的排到末尾（数组顺序就是显示顺序，与胶囊条同一套语义）。
+    const next = widgetAgents.includes(agentId)
+      ? widgetAgents.filter((id) => id !== agentId)
+      : [...widgetAgents, agentId];
+    if (!next.length) return; // 至少保留一个
+    commitWidgetAgents(next);
+  }, [commitWidgetAgents, widgetAgents]);
   const handleMoveWidgetAgent = useCallback((agentId) => {
-    setWidgetAgents((current) => {
-      const next = [...current];
-      const index = next.indexOf(agentId);
-      if (index <= 0) return current;
-      [next[index - 1], next[index]] = [next[index], next[index - 1]];
-      localStorage.setItem("metrik:widgetAgents", JSON.stringify(next));
-      return next;
-    });
-  }, []);
+    const next = [...widgetAgents];
+    const index = next.indexOf(agentId);
+    if (index <= 0) return;
+    [next[index - 1], next[index]] = [next[index], next[index - 1]];
+    commitWidgetAgents(next);
+  }, [commitWidgetAgents, widgetAgents]);
   const [loading, setLoading] = useState(true);
   const [rebuildState, setRebuildState] = useState({ status: "idle", message: "" });
   const [report, setReport] = useState(null);
@@ -4657,6 +4660,35 @@ export function App() {
       unlistenPromise.then((unlisten) => unlisten());
     };
   }, []);
+
+  useEffect(() => {
+    if (!IS_MAC || !isDesktop()) return undefined;
+    const unlistenPromise = onMacAgentSelection((payload) => {
+      if (!Array.isArray(payload.agents)) return;
+      const next = normalizeVisibleAgentList(payload.agents);
+      if (!next.length) return;
+      // emit 会回到发送窗口；内容相同时保留原数组，避免无意义快照刷新。
+      setWidgetAgents((current) => {
+        if (current.length === next.length && current.every((id, index) => id === next[index])) {
+          return current;
+        }
+        localStorage.setItem("metrik:widgetAgents", JSON.stringify(next));
+        return next;
+      });
+    });
+    return () => {
+      unlistenPromise.then((unlisten) => unlisten());
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!IS_MAC || !isDesktop() || viewMode !== "expanded" || activeNav !== "settings") {
+      return;
+    }
+    // 升级自愈：旧版本可能让设置窗口与隐藏面板各自留下不同 localStorage。
+    // 用户打开设置页时，以屏幕上正在展示的勾选为准主动同步一次，不要求再点一遍。
+    runWindowAction(() => broadcastMacAgentSelection(widgetAgents));
+  }, [activeNav, viewMode]);
 
   // 边缘挂靠：拖到屏幕上缘自动收起，鼠标碰边弹出。
   useEffect(() => {
