@@ -10,7 +10,7 @@ Corrections, insights, and knowledge gaps captured during development.
 
 **Logged**: 2026-08-12T21:55:00+08:00
 **Priority**: high
-**Status**: in_progress
+**Status**: resolved
 **Area**: macOS shell
 
 ### Summary
@@ -28,8 +28,8 @@ Give every local WidgetKit build a monotonically changing bundle build number, t
 - Tags: widgetkit, cache, native-qa
 
 ### Resolution
-- **Reopened**: 2026-08-12T22:05:00+08:00
-- **Notes**: Unique build numbers and a live helper RunLoop made chronod accept the reload and regenerate a timeline, but the user's installed widget still rendered blank. Do not treat timeline acceptance as visual verification. Added privacy-safe extension diagnostics for App Group access, file reads, JSON decoding, and decoded Agent count; diagnosis remains open until the installed card visibly renders.
+- **Resolved**: 2026-08-13T12:46:35+08:00
+- **Notes**: The snapshot publisher and extension were both correct. WidgetKit generated the new timeline but chronod rejected it because the extension alone used a timestamp `CFBundleVersion` that differed from the containing app. Production builds now give the containing app and extension the same build and release versions, and release CI verifies the final bundle. A production-form local install then decoded the live three-Agent snapshot, returned `Reload success` for both widget kinds, updated all four timeline files, and visibly changed the desktop card from 241.7M / GLM 96% to 31.2M / GLM 93%.
 
 ---
 
