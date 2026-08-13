@@ -24,6 +24,10 @@ const publisherInfo = fs.readFileSync(
   "WidgetExtension/MetrikWidgetPublisher.Info.plist",
   "utf8",
 );
+const widgetBuildScript = fs.readFileSync(
+  "scripts/build-macos-widget-extension.sh",
+  "utf8",
+);
 
 test("macOS release embeds the native WidgetKit extension and helpers", () => {
   assert.equal(
@@ -68,4 +72,12 @@ test("production widget never substitutes gallery preview data", () => {
 test("timeline reloader identifies as the containing Metrik app", () => {
   assert.match(reloaderInfo, /<string>app\.metrik\.desktop<\/string>/);
   assert.match(reloaderSource, /RunLoop\.current\.run/);
+});
+
+test("production widget uses the containing app build version", () => {
+  assert.match(widgetBuildScript, /APP_BUILD_NUMBER="\$APP_VERSION"/);
+  assert.doesNotMatch(
+    widgetBuildScript,
+    /APP_BUILD_NUMBER=.*(?:date|GITHUB_RUN_NUMBER)/,
+  );
 });

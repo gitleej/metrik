@@ -75,4 +75,13 @@ jobs:
           test -x "$app_path/Contents/Helpers/metrik-widget-publish"
           test -x "$app_path/Contents/Helpers/metrik-widget-reload"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app_path/Contents/PlugIns/MetrikWidget.appex/Contents/Info.plist")" = "app.metrik.desktop.widget"
+
+          host_info="$app_path/Contents/Info.plist"
+          widget_info="$app_path/Contents/PlugIns/MetrikWidget.appex/Contents/Info.plist"
+          host_build="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$host_info")"
+          widget_build="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$widget_info")"
+          host_release="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$host_info")"
+          widget_release="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$widget_info")"
+          test "$widget_build" = "$host_build"
+          test "$widget_release" = "$host_release"
           codesign --verify --deep --strict --verbose=2 "$app_path"

@@ -108,6 +108,11 @@ change.
 - The optional desktop component is a native WidgetKit extension embedded at
   `Metrik.app/Contents/PlugIns/MetrikWidget.appex`; shipping only its source or
   a standalone preview host does not count as releasing the feature.
+- The containing app and embedded WidgetKit extension use the same
+  `CFBundleVersion` and release version. Production builds never assign a
+  per-build timestamp only to the extension: WidgetKit validates the archived
+  bundle stub against LaunchServices before accepting a refreshed timeline.
+  Release packaging must reject a version mismatch.
 - The WidgetKit snapshot follows the user's compact-widget Agent selection and
   order exactly. Large widgets use a density-responsive grid for every selected
   Agent rather than a fixed six-item slice, and cold startup must not replace a

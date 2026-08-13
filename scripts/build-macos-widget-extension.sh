@@ -14,10 +14,13 @@ APPEX_RESOURCES="$APPEX_BUNDLE/Contents/Resources"
 HELPERS_DIR="$BUILD_DIR/Helpers"
 SDK_PATH="$(xcrun --sdk macosx --show-sdk-path)"
 APP_VERSION="$(node -p "require('$PROJECT_DIR/package.json').version")"
-# Every extension build needs a monotonic value across both local and CI installs:
-# WidgetKit otherwise keeps a previously registered binary/timeline. A UTC build
-# timestamp also prevents a local build from outranking a later CI run number.
-APP_BUILD_NUMBER="$(date -u +%Y%m%d%H%M%S)"
+# WidgetKit archives the extension's bundle stub into every timeline and validates it
+# against LaunchServices before accepting a reload. The extension therefore has to use
+# the containing app's build version; giving only the extension a per-build timestamp
+# leaves upgraded installations with incompatible cached bundle stubs. Release versions
+# are already unique and serialized by CI, while the isolated preview app uses its own
+# bundle identifier and build sequence for local visual iteration.
+APP_BUILD_NUMBER="$APP_VERSION"
 
 # A universal Tauri release needs a universal extension too. Local arm64/x86_64
 # builds may override this to one architecture to keep iteration fast.
