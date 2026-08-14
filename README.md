@@ -15,6 +15,12 @@ Metrik 是一款桌面常驻工具，统一查看本机各个 AI 编程 Agent �
 
 <p align="center"><sub>Windows 实机截图，玻璃外观取透明档。</sub></p>
 
+<p align="center">
+  <img src="design/shot-macos-widget.jpg" alt="Metrik macOS 原生桌面小组件" width="520">
+</p>
+
+<p align="center"><sub>macOS 实机截图，原生 WidgetKit 桌面小组件。</sub></p>
+
 ![完整视图 · 概览](design/shot-overview.png)
 
 > 完整视图截图使用浏览器演示数据，非真实用量。
@@ -31,7 +37,7 @@ Metrik 是一款桌面常驻工具，统一查看本机各个 AI 编程 Agent �
 ## 平台支持
 
 - Windows：320 × 320 桌面小组件，可收缩为横向或纵向配额胶囊条；支持深色 / 浅色 / 透明三档玻璃材质、0.75–2.0 缩放、边缘自动隐藏与置顶常驻。
-- macOS：菜单栏面板，点击展开完整统计页面。
+- macOS：菜单栏状态项与面板、原生 WidgetKit 桌面小组件，点击菜单栏项目可展开完整统计页面。
 
 ## 支持的 Agent
 
