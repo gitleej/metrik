@@ -448,6 +448,9 @@ async fn set_macos_agent_selection(
                 .map_err(|error| error.to_string())?;
             widget_snapshot::persist(&snapshot, Some(&agents))
                 .map_err(|error| error.to_string())?;
+            // 用户显式操作，即时 reload 一次让小组件马上换选择；频率受操作次数
+            // 限制，不会耗尽 WidgetKit 的应用级刷新配额（轮询路径不 reload）。
+            widget_snapshot::reload_timelines();
             Ok(())
         })
         .await
@@ -456,6 +459,36 @@ async fn set_macos_agent_selection(
     #[cfg(not(target_os = "macos"))]
     {
         let _ = (agents, state);
+        Err("macOS Agent 选择仅用于 macOS".into())
+    }
+}
+
+/// 读取后端保存的 macOS Agent 权威选择。macOS 的设置窗口、菜单栏面板、桌面组件
+/// 是各自独立的 WebView，localStorage 互不同步，本地值只能当缓存；各窗口启动时
+/// 以此为准。空数组表示还没有保存过选择（首次启动），窗口退回本地缓存播种。
+#[tauri::command]
+async fn get_macos_agent_selection(state: State<'_, AppState>) -> Result<Vec<String>, String> {
+    #[cfg(target_os = "macos")]
+    {
+        let database_path = state.database_path.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            let connection =
+                storage::open_database(&database_path).map_err(|error| error.to_string())?;
+            let saved =
+                storage::get_app_setting(&connection, widget_snapshot::AGENT_FILTER_SETTING_KEY)
+                    .map_err(|error| error.to_string())?;
+            Ok(
+                widget_snapshot::resolve_agent_filter(saved.as_deref(), None)
+                    .0
+                    .unwrap_or_default(),
+            )
+        })
+        .await
+        .map_err(|error| format!("macOS Agent selection task failed: {error}"))?
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = state;
         Err("macOS Agent 选择仅用于 macOS".into())
     }
 }
@@ -1020,20 +1053,52 @@ fn resize_macos_panel(app: tauri::AppHandle, width: f64, height: f64) -> Result<
 
 /// macOS 菜单栏按用户选择显示 Agent 图标和官方额度；其它平台没有对应状态项，
 /// 前端也不会调用。None 表示额度不可用，不能按 0% 处理。
+/// 显示哪些 Agent 以后端保存的权威选择为准：设置窗口、菜单栏面板、桌面组件是
+/// 各自独立的 WebView，任何窗口携带的旧列表都不能把已勾选的 Agent 抹掉；
+/// 调用方只提供各 Agent 的额度值（按 id 对照，与顺序无关）。
 #[tauri::command]
 fn update_macos_status_items(
     app: tauri::AppHandle,
+    state: State<'_, AppState>,
     agents: Vec<String>,
     remaining: Vec<Option<f64>>,
     stale: Vec<bool>,
 ) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
+        if agents.len() != remaining.len() || agents.len() != stale.len() {
+            return Err("macOS 菜单栏状态项参数长度不一致".into());
+        }
+        let saved = storage::open_database(&state.database_path)
+            .and_then(|connection| {
+                storage::get_app_setting(&connection, widget_snapshot::AGENT_FILTER_SETTING_KEY)
+            })
+            .unwrap_or_else(|error| {
+                eprintln!("Metrik could not read its menu bar Agent selection ({error:#})");
+                None
+            });
+        // 调用方的 agents/remaining/stale 是等长平行数组，先按 id 建值对照表，
+        // 再按权威选择重排；权威选择里缺值的 Agent 按不可用显示 "--"。
+        let mut values: std::collections::HashMap<&str, (Option<f64>, bool)> =
+            std::collections::HashMap::new();
+        for index in 0..agents.len() {
+            values.insert(agents[index].as_str(), (remaining[index], stale[index]));
+        }
+        let (resolved, _) = widget_snapshot::resolve_agent_filter(saved.as_deref(), Some(&agents));
+        let agents = resolved.unwrap_or_default();
+        let remaining: Vec<Option<f64>> = agents
+            .iter()
+            .map(|id| values.get(id.as_str()).and_then(|value| value.0))
+            .collect();
+        let stale: Vec<bool> = agents
+            .iter()
+            .map(|id| values.get(id.as_str()).is_some_and(|value| value.1))
+            .collect();
         macos::update_status_items(&app, &agents, &remaining, &stale)
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = (app, agents, remaining, stale);
+        let _ = (app, state, agents, remaining, stale);
         Err("菜单栏用量状态项仅用于 macOS".into())
     }
 }
@@ -1209,6 +1274,9 @@ pub fn run() {
                         if let Err(error) = widget_snapshot::persist(&snapshot, Some(&agents)) {
                             eprintln!("Metrik could not seed its WidgetKit snapshot ({error:#})");
                         }
+                        // 每次启动 reload 一次：升级安装后让小组件立刻用新快照和新
+                        // extension 重建时间线。每进程一次，不影响刷新配额。
+                        widget_snapshot::reload_timelines();
                     }
                 }
                 Err(error) => {
@@ -1268,6 +1336,7 @@ pub fn run() {
             set_macos_desktop_widget_visible,
             resize_macos_panel,
             set_macos_agent_selection,
+            get_macos_agent_selection,
             update_macos_status_items
         ])
         .run(tauri::generate_context!())

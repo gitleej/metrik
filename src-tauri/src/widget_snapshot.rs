@@ -237,11 +237,16 @@ pub fn persist(snapshot: &UsageSnapshot, agent_filter: Option<&[String]>) -> Res
         write_atomically(&path, &bytes)?;
         path
     };
-    reload_timelines();
+    // 这里刻意不 reload 时间线：persist 挂在数据轮询上（索引期可达每秒数次），
+    // 而 reloadTimelines 消耗 WidgetKit 的应用级刷新配额，配额耗尽后 chronod 会把
+    // 所有刷新推迟一小时以上，小组件反而冻在旧快照。常规刷新由时间线策略
+    // （.after(5min)，不占配额）完成；即时 reload 只在用户显式改勾选时触发。
     Ok(path)
 }
 
-fn reload_timelines() {
+/// 用户显式更改 Agent 选择后调用，让小组件立刻反映新选择。次数受用户操作频率
+/// 限制，不会耗尽 WidgetKit 刷新配额。
+pub fn reload_timelines() {
     let Ok(executable) = std::env::current_exe() else {
         return;
     };

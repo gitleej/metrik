@@ -578,9 +578,17 @@ async function onMacAppearance(handler) {
 async function broadcastMacAgentSelection(agents) {
   if (!isDesktop() || !isMacPlatform()) return;
   const { emit } = await import("@tauri-apps/api/event");
-  // 先让两个 WebView 同帧更新，再持久化为后端权威选择并刷新 WidgetKit。
-  await emit("metrik://mac-agent-selection", { agents }).catch(() => {});
+  // 先落库为后端权威选择，再通知其它窗口；接收窗口收到事件后会立刻刷新
+  // 菜单栏状态项，顺序反过来会让它读到落库前的旧选择。
   await invoke("set_macos_agent_selection", { agents });
+  await emit("metrik://mac-agent-selection", { agents }).catch(() => {});
+}
+
+/// 后端持久化的 macOS Agent 权威选择。各窗口 localStorage 互不同步（独立
+/// WebView），本地值只是缓存；空数组表示后端还没保存过（首次启动）。
+async function getMacAgentSelection() {
+  if (!isDesktop() || !isMacPlatform()) return [];
+  return invoke("get_macos_agent_selection").catch(() => []);
 }
 
 async function onMacAgentSelection(handler) {
@@ -1322,6 +1330,7 @@ export {
   checkForUpdate,
   closeWindow,
   getAutostart,
+  getMacAgentSelection,
   installUpdate,
   isDesktop,
   isMacPlatform,

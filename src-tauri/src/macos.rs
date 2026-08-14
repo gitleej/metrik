@@ -13,11 +13,12 @@
 use std::sync::Mutex;
 
 use image::imageops::FilterType;
+use objc2_foundation::NSString;
 use tauri::image::Image;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{
-    ActivationPolicy, AppHandle, LogicalSize, Manager, PhysicalPosition, Rect, WebviewUrl,
+    ActivationPolicy, AppHandle, LogicalSize, Manager, PhysicalPosition, Rect, Runtime, WebviewUrl,
     WebviewWindowBuilder,
 };
 use tauri_nspanel::cocoa::appkit::{NSMainMenuWindowLevel, NSWindowCollectionBehavior};
@@ -117,6 +118,58 @@ const STATUS_ITEMS: [StatusItemSpec; 8] = [
 /// 用它把面板对齐到图标下方；托盘的任何一次事件（点击/移入/移动）都会刷新。
 static TRAY_RECT: Mutex<Option<(f64, f64, f64, f64)>> = Mutex::new(None);
 
+/// 菜单栏状态槽：一个槽位持有一个长期存活的 NSStatusItem，内容可换、永不删除
+/// （删除后的重建会被 macOS 26 的 ControlCenter 编号机制拒收，见 update_status_items）。
+struct StatusSlot {
+    tray_id: String,
+    agent: Option<String>,
+}
+
+static STATUS_SLOTS: std::sync::LazyLock<Mutex<Vec<StatusSlot>>> =
+    std::sync::LazyLock::new(|| Mutex::new(Vec::new()));
+
+fn status_slot_autosave_name(index: usize) -> String {
+    format!("app.metrik.desktop.status-slot-{index}")
+}
+
+/// tray-icon 0.24.1 的 set_visible(false) 会从 NSStatusBar 删除 NSStatusItem；
+/// 原生 isVisible 虽保留对象，但 Tahoe 会把重新显示的项插到新位置。保持所有项
+/// 始终 visible，仅用 length=0 折叠空槽，既不留 18px 空位，也不改变槽位顺序。
+fn set_native_status_slot_collapsed<R: Runtime>(
+    tray: &tauri::tray::TrayIcon<R>,
+    collapsed: bool,
+) -> Result<(), String> {
+    tray.with_inner_tray_icon(move |inner| {
+        let status_item = inner
+            .ns_status_item()
+            .ok_or_else(|| "macOS NSStatusItem 不可用".to_owned())?;
+        status_item.setLength(if collapsed { 0.0 } else { -1.0 });
+        Ok::<(), String>(())
+    })
+    .map_err(|error| error.to_string())?
+}
+
+/// 多状态项应用应给每个长期槽设置稳定 autosaveName。设置后立即用原生
+/// length=0 折叠初始空槽，避免八个 18px 空白按钮闪现在菜单栏。
+fn initialize_native_status_slot<R: Runtime>(
+    tray: &tauri::tray::TrayIcon<R>,
+    autosave_name: String,
+) -> Result<(), String> {
+    tray.with_inner_tray_icon(move |inner| {
+        let status_item = inner
+            .ns_status_item()
+            .ok_or_else(|| "macOS NSStatusItem 不可用".to_owned())?;
+        let autosave_name = NSString::from_str(&autosave_name);
+        status_item.setAutosaveName(Some(&autosave_name));
+        // autosaveName 会恢复上次持久化的可见性；旧测试版可能把它存成 false。
+        // 固定槽必须始终留在 ControlCenter 集合中，隐藏只由零长度承担。
+        status_item.setVisible(true);
+        status_item.setLength(0.0);
+        Ok::<(), String>(())
+    })
+    .map_err(|error| error.to_string())?
+}
+
 fn normalized_percent(value: Option<f64>) -> Option<u8> {
     value
         .filter(|value| value.is_finite())
@@ -190,36 +243,65 @@ pub fn update_status_items(
     }
 
     eprintln!("Metrik status items requested: {}", agents.join(","));
-    for spec in STATUS_ITEMS {
-        let Some(tray) = app.tray_by_id(spec.id) else {
-            return Err(format!("macOS {} 菜单栏状态项不存在", spec.name));
-        };
-        let selected_index = agents.iter().position(|agent| agent == spec.id);
-        tray.set_visible(selected_index.is_some())
-            .map_err(|error| error.to_string())?;
-        eprintln!(
-            "Metrik status item {} visible={}",
-            spec.id,
-            selected_index.is_some()
-        );
-        let Some(index) = selected_index else {
+    let mut slots = STATUS_SLOTS.lock().unwrap();
+    // 8 个状态槽在启动时一次性建齐（见 setup_tray），会话内只更新内容并通过
+    // NSStatusItem.length 在 0 / variable 之间折叠和展开：
+    // macOS 26 的 ControlCenter 给状态项密集编号并异步托管，会话中途新建或
+    // 删除重建都可能被静默拒托管或显示错位，isVisible 重新显示还会改变顺序。
+    // 取消勾选会折叠并清空槽位，但底层 NSStatusItem 始终可见、存活且不离队。
+    for index in 0..slots.len() {
+        let Some(tray) = app.tray_by_id(&slots[index].tray_id) else {
+            eprintln!("Metrik 菜单栏状态槽 {} 不存在，跳过", slots[index].tray_id);
             continue;
         };
-        let item_remaining = remaining[index];
-        let item_stale = stale[index];
-        tray.set_title(Some(status_item_title(item_remaining, item_stale)))
-            .map_err(|error| error.to_string())?;
-        let label = match normalized_percent(item_remaining) {
-            Some(percent) => format!("{} {percent}% 剩余", spec.name),
-            None => format!("{} 配额不可用", spec.name),
-        };
-        let suffix = if item_stale {
-            " · 数据可能已过期"
-        } else {
-            ""
-        };
-        tray.set_tooltip(Some(format!("Metrik · {label}{suffix}")))
-            .map_err(|error| error.to_string())?;
+        if index < agents.len() {
+            // 槽位 0 最先创建、位置最靠右；把选择列表末尾的 Agent 放槽 0，
+            // 菜单栏从左到右就与选择列表的顺序一致。
+            let position = agents.len() - 1 - index;
+            let agent = &agents[position];
+            let Some(spec) = STATUS_ITEMS.iter().find(|spec| spec.id == agent) else {
+                eprintln!("Metrik 未知 Agent {agent}，跳过菜单栏状态项");
+                continue;
+            };
+            let agent_changed = slots[index].agent.as_deref() != Some(agent.as_str());
+            if agent_changed {
+                // 换 Agent 时先折叠，避免 icon/title 分步更新期间短暂组合出旧标题
+                // + 新图标；状态项仍在托管集合中，物理顺序不变。
+                set_native_status_slot_collapsed(&tray, true)?;
+                let icon = provider_status_icon(spec.icon)?;
+                tray.set_icon_with_as_template(Some(icon), true)
+                    .map_err(|error| error.to_string())?;
+            }
+            let item_remaining = remaining[position];
+            let item_stale = stale[position];
+            tray.set_title(Some(status_item_title(item_remaining, item_stale)))
+                .map_err(|error| error.to_string())?;
+            let label = match normalized_percent(item_remaining) {
+                Some(percent) => format!("{} {percent}% 剩余", spec.name),
+                None => format!("{} 配额不可用", spec.name),
+            };
+            let suffix = if item_stale {
+                " · 数据可能已过期"
+            } else {
+                ""
+            };
+            tray.set_tooltip(Some(format!("Metrik · {label}{suffix}")))
+                .map_err(|error| error.to_string())?;
+            slots[index].agent = Some(agent.clone());
+            set_native_status_slot_collapsed(&tray, false)?;
+            eprintln!("Metrik status slot {} = {}", slots[index].tray_id, agent);
+        } else if slots[index].agent.take().is_some() {
+            // tray-icon 0.24.1 在 macOS 上把 set_title(None) 实现为 no-op，必须传
+            // 空字符串才能真正覆盖旧百分比；否则就会留下无图标的 “97%” 幻影。
+            set_native_status_slot_collapsed(&tray, true)?;
+            tray.set_title(Some(""))
+                .map_err(|error| error.to_string())?;
+            tray.set_icon_with_as_template(None, true)
+                .map_err(|error| error.to_string())?;
+            tray.set_tooltip(Some("Metrik"))
+                .map_err(|error| error.to_string())?;
+            eprintln!("Metrik status slot {} cleared", slots[index].tray_id);
+        }
     }
 
     Ok(())
@@ -500,23 +582,16 @@ fn remember_tray_rect(window_scale: f64, rect: Rect) {
     *TRAY_RECT.lock().unwrap() = Some((position.x, position.y, size.width, size.height));
 }
 
-fn build_status_item(
-    app: &mut tauri::App,
-    spec: StatusItemSpec,
-    icon: Image<'static>,
-    visible: bool,
-) -> tauri::Result<()> {
-    // 每个 Agent 状态项都能独立打开同一个面板，右键菜单也保持一致。
+fn build_status_slot(app: &AppHandle, tray_id: &str, slot_index: usize) -> tauri::Result<()> {
+    // 每个状态槽都能独立打开同一个面板，右键菜单也保持一致。
     let toggle = MenuItem::with_id(app, "toggle", "显示 / 隐藏", true, None::<&str>)?;
     let expanded = MenuItem::with_id(app, "expanded", "完整视图", true, None::<&str>)?;
     let settings = MenuItem::with_id(app, "settings", "设置", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "退出 Metrik", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&toggle, &expanded, &settings, &quit])?;
 
-    let tray = TrayIconBuilder::with_id(spec.id)
-        .tooltip(format!("Metrik · {}", spec.name))
-        .title(status_item_title(None, false))
-        .icon(icon)
+    let tray = TrayIconBuilder::with_id(tray_id)
+        .tooltip("Metrik")
         .icon_as_template(true)
         .menu(&menu)
         .show_menu_on_left_click(false)
@@ -557,19 +632,27 @@ fn build_status_item(
             }
         })
         .build(app)?;
-    tray.set_visible(visible)?;
+    initialize_native_status_slot(&tray, status_slot_autosave_name(slot_index))
+        .map_err(|error| tauri::Error::Anyhow(anyhow::Error::msg(error)))?;
     Ok(())
 }
 
 fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
     // Metrik 自己的状态栏语法：每个已选 Agent 一个品牌状态项，只带额度数字。
     // 不复制第三方工具的多账户、重置倒计时或菜单布局。
-    // macOS 会把后创建的状态项放在左侧，所以反向创建，最终视觉顺序与设置列表一致。
-    for spec in STATUS_ITEMS.into_iter().rev() {
-        let icon = provider_status_icon(spec.icon)
-            .map_err(|error| tauri::Error::Anyhow(anyhow::Error::msg(error)))?;
-        let visible = matches!(spec.id, "codex" | "claude");
-        build_status_item(app, spec, icon, visible)?;
+    // 全部槽位在启动时一次建齐并设稳定 autosaveName，之后整个会话只做内容更新
+    // 和原生 length 折叠/展开：
+    // macOS 26 的 ControlCenter 对会话中途新建/删除的状态项会静默拒托管或错位，
+    // 底层 NSStatusItem 绝不删除或重建。
+    let handle = app.app_handle();
+    let mut slots = STATUS_SLOTS.lock().unwrap();
+    for index in 0..STATUS_ITEMS.len() {
+        let tray_id = format!("metrik-status-{index}");
+        build_status_slot(handle, &tray_id, index)?;
+        slots.push(StatusSlot {
+            tray_id,
+            agent: None,
+        });
     }
     Ok(())
 }
@@ -603,5 +686,15 @@ mod tests {
             assert!(icon.rgba().chunks_exact(4).any(|pixel| pixel[3] > 200));
             assert!(icon.rgba().chunks_exact(4).any(|pixel| pixel[3] == 0));
         }
+    }
+
+    #[test]
+    fn status_slots_have_stable_unique_autosave_names() {
+        let names: Vec<_> = (0..STATUS_ITEMS.len())
+            .map(status_slot_autosave_name)
+            .collect();
+        let unique: std::collections::HashSet<_> = names.iter().collect();
+        assert_eq!(unique.len(), STATUS_ITEMS.len());
+        assert_eq!(names[0], "app.metrik.desktop.status-slot-0");
     }
 }
