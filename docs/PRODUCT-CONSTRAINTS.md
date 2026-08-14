@@ -117,6 +117,11 @@ change.
   order exactly. Large widgets use a density-responsive grid for every selected
   Agent rather than a fixed six-item slice, and cold startup must not replace a
   saved selection with the full registry.
+- Timeline reloads are budgeted by WidgetKit at the app level, so snapshot
+  publishing never calls `reloadTimelines`: routine freshness comes from the
+  five-minute timeline policy, and explicit reloads fire only on a user Agent
+  selection change and once per app launch. Burning the budget on polling
+  freezes the widget on a stale snapshot.
 - Gallery placeholders may use illustrative data, but an installed production
   widget whose shared snapshot is unavailable renders an explicit empty state;
   it never presents the six-Agent gallery preview as live user data.
@@ -153,11 +158,23 @@ change.
 - The menu bar uses Metrik's own minimal grammar: one monochrome provider icon
   plus official remaining percentage for every selected agent, `--` for
   unavailable data, and `~` for stale data.
+- Status items are fixed slots with stable AppKit autosave names, all created
+  once at app startup and never removed or re-created within a session.
+  Every native item remains visible to ControlCenter; deselecting an agent
+  clears the slot and collapses its `NSStatusItem.length` to zero, while
+  selecting it restores variable length. Toggling `NSStatusItem.isVisible`
+  retains the object but Tahoe reinserts it at a new menu-bar position, so it
+  cannot preserve the user's order. Removing/recreating items can additionally
+  be silently rejected or misassociated. Empty titles must be written as an
+  empty string because the current tray dependency treats a `None` title as
+  “leave unchanged”.
 - Clicking any status item opens the anchored compact panel. Agent selection
   updates immediately across the separate settings window, compact panel,
   WidgetKit snapshot, and menu-bar status items, and always keeps at least one
-  agent. A hidden window must never write an older selection back over the
-  current one during its next data refresh.
+  agent. The backend database holds the single authoritative selection: every
+  window reads it on startup and only an explicit settings toggle may overwrite
+  it, so a hidden window can never write an older selection back over the
+  current one — not during a data refresh, and not from its stale local cache.
 - Provider names are not repeated as menu-bar text, and the menu structure must
   not copy another product's layout or multi-account detail.
 

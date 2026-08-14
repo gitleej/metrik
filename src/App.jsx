@@ -71,6 +71,7 @@ import {
   broadcastMacAppearance,
   checkForUpdate,
   closeWindow,
+  getMacAgentSelection,
   getAutostart,
   installUpdate,
   isDesktop,
@@ -4682,13 +4683,29 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    if (!IS_MAC || !isDesktop() || viewMode !== "expanded" || activeNav !== "settings") {
-      return;
-    }
-    // 升级自愈：旧版本可能让设置窗口与隐藏面板各自留下不同 localStorage。
-    // 用户打开设置页时，以屏幕上正在展示的勾选为准主动同步一次，不要求再点一遍。
-    runWindowAction(() => broadcastMacAgentSelection(widgetAgents));
-  }, [activeNav, viewMode]);
+    if (!IS_MAC || !isDesktop()) return undefined;
+    let cancelled = false;
+    // 权威 Agent 选择在后端数据库：设置窗口、菜单栏面板、桌面组件各有独立的
+    // localStorage（WKWebView 不共享），本地值只是缓存。启动时以后端为准，
+    // 任何窗口的旧缓存都不能把已勾选的 Agent 从菜单栏和 WidgetKit 抹掉；
+    // 后端还没保存过（首次启动）时保留本地缓存，由首轮轮询播种。
+    getMacAgentSelection()
+      .then((agents) => {
+        const next = normalizeVisibleAgentList(agents || []);
+        if (cancelled || !next.length) return;
+        setWidgetAgents((current) => {
+          if (current.length === next.length && current.every((id, index) => id === next[index])) {
+            return current;
+          }
+          localStorage.setItem("metrik:widgetAgents", JSON.stringify(next));
+          return next;
+        });
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // 边缘挂靠：拖到屏幕上缘自动收起，鼠标碰边弹出。
   useEffect(() => {
