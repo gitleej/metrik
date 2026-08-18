@@ -1,13 +1,17 @@
 name: Release
 
-# 推送 v* 标签时构建安装包并上传 workflow artifacts。fork 的 GITHUB_TOKEN
-# 无法访问 Releases API，发布页由已授权的维护者账号在构建成功后创建。
+# 推送 v* 标签时，三平台并行构建并上传 workflow artifacts；全部构建成功后，
+# 由唯一的 release job 使用 fork 的 RELEASE_TOKEN 创建 Release 并统一上传。
 on:
   push:
     tags: ["v*"]
 
 permissions:
   contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   build:
@@ -19,16 +23,19 @@ jobs:
             args: ""
             rust-targets: ""
             widget-archs: ""
+            artifact-name: windows-x86_64
           # Intel + Apple Silicon 通用包。macOS 尚未实机验收，Release 说明里
           # 必须标明这一点。
           - platform: macos-latest
             args: "--target universal-apple-darwin"
             rust-targets: "aarch64-apple-darwin,x86_64-apple-darwin"
             widget-archs: "arm64 x86_64"
+            artifact-name: macos-universal
           - platform: ubuntu-24.04
             args: "--target x86_64-unknown-linux-gnu --bundles deb,appimage"
             rust-targets: "x86_64-unknown-linux-gnu"
             widget-archs: ""
+            artifact-name: linux-x86_64
 
     runs-on: ${{ matrix.platform }}
     steps:
@@ -68,31 +75,9 @@ jobs:
       # fork 的 Actions secrets 中，因此显式关闭 updater artifact。
       - uses: tauri-apps/tauri-action@v0
         env:
-          GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN }}
           METRIK_WIDGET_ARCHS: ${{ matrix.widget-archs }}
           APPIMAGE_EXTRACT_AND_RUN: ${{ runner.os == 'Linux' && '1' || '' }}
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: Metrik ${{ github.ref_name }}
-          releaseBody: |
-            ## Ubuntu 24.04 x86_64 正式支持
-
-            Metrik 现已提供 Ubuntu 24.04 x86_64 原生桌面安装包。Linux 小窗插件会在启动时恢复上次位置，置顶模式支持托盘菜单切换和快速悬停淡出/隐藏。
-
-            ### 本次亮点
-
-            - **原生 Linux 分发**：提供 `.deb` 与 `.AppImage`。
-            - **小窗体验优化**：位置持久化、置顶悬停反馈、托盘置顶/取消置顶。
-            - **平台隔离**：Windows 与 macOS 运行时行为保持不变。
-
-            ### Ubuntu 安装
-
-            ```bash
-            sudo apt install ./Metrik_*_amd64.deb
-            ```
-          releaseDraft: false
-          prerelease: false
-          includeUpdaterJson: false
           args: >-
             ${{ matrix.args }}
             --config '{"bundle":{"createUpdaterArtifacts":false}}'
@@ -117,3 +102,80 @@ jobs:
           test "$widget_build" = "$host_build"
           test "$widget_release" = "$host_release"
           codesign --verify --deep --strict --verbose=2 "$app_path"
+
+      - name: Upload release packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: Metrik-${{ matrix.artifact-name }}-${{ github.ref_name }}
+          path: |
+            src-tauri/target/**/release/bundle/**/*.deb
+            src-tauri/target/**/release/bundle/**/*.AppImage
+            src-tauri/target/**/release/bundle/**/*.dmg
+            src-tauri/target/**/release/bundle/**/*.msi
+            src-tauri/target/**/release/bundle/**/*-setup.exe
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download release packages
+        uses: actions/download-artifact@v4
+        with:
+          pattern: Metrik-*-${{ github.ref_name }}
+          path: release-assets
+          merge-multiple: true
+
+      - name: Verify token and release packages
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+        run: |
+          test -n "$GH_TOKEN" || {
+            echo '::error::Repository secret RELEASE_TOKEN is not configured.'
+            exit 1
+          }
+          gh api "repos/$GITHUB_REPOSITORY" --jq '.full_name'
+          test -n "$(find release-assets -type f -name '*.deb' -print -quit)"
+          test -n "$(find release-assets -type f -name '*.AppImage' -print -quit)"
+          test -n "$(find release-assets -type f -name '*.dmg' -print -quit)"
+          test -n "$(find release-assets -type f -name '*.msi' -print -quit)"
+          test -n "$(find release-assets -type f -name '*-setup.exe' -print -quit)"
+          find release-assets -type f -print
+
+      - name: Publish Release
+        uses: softprops/action-gh-release@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Metrik ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+          fail_on_unmatched_files: true
+          body: |
+            ## Ubuntu 24.04 x86_64 正式支持
+
+            Metrik 现已提供 Ubuntu 24.04 x86_64 原生桌面安装包。Linux 小窗插件会在启动时恢复上次位置，置顶模式支持托盘菜单切换和快速悬停淡出/隐藏。
+
+            ### 本次亮点
+
+            - **原生 Linux 分发**：提供 `.deb` 与 `.AppImage`。
+            - **小窗体验优化**：位置持久化、置顶悬停反馈、托盘置顶/取消置顶。
+            - **平台隔离**：Windows 与 macOS 运行时行为保持不变。
+
+            ### Ubuntu 安装
+
+            ```bash
+            sudo apt install ./Metrik_*_amd64.deb
+            ```
+
+            > macOS 通用包由 CI 构建并完成签名结构校验，尚未进行实体设备验收。
+          files: |
+            release-assets/**/*.deb
+            release-assets/**/*.AppImage
+            release-assets/**/*.dmg
+            release-assets/**/*.msi
+            release-assets/**/*-setup.exe
