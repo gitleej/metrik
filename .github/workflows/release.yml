@@ -1,6 +1,7 @@
 name: Release
 
-# 推送 v* 标签时构建安装包并发布草稿 Release，由维护者确认后发布。
+# 推送 v* 标签时构建安装包并上传 workflow artifacts。fork 的 GITHUB_TOKEN
+# 无法访问 Releases API，发布页由已授权的维护者账号在构建成功后创建。
 on:
   push:
     tags: ["v*"]
@@ -64,46 +65,23 @@ jobs:
         run: npm ci
 
       # 此 fork 发布可直接安装的桌面包。更新器的 minisign 私钥不应存放在
-      # fork 的 Actions secrets 中，因此显式关闭 updater artifact，避免包已
-      # 构建成功后因缺少私钥而让整个 Release 失败。应用的运行时行为不受影响。
+      # fork 的 Actions secrets 中，因此显式关闭 updater artifact。
       - uses: tauri-apps/tauri-action@v0
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           METRIK_WIDGET_ARCHS: ${{ matrix.widget-archs }}
           APPIMAGE_EXTRACT_AND_RUN: ${{ runner.os == 'Linux' && '1' || '' }}
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: Metrik ${{ github.ref_name }}
-          releaseBody: |
-            ## Ubuntu 24.04 x86_64 正式支持
-
-            Metrik 现已提供 Ubuntu 24.04 x86_64 的原生桌面安装包。Linux 小窗插件可记住上次位置，启动时直接在该位置显示；置顶状态也可以从托盘菜单快速开启或取消。
-
-            ### 本次亮点
-
-            - **原生 Linux 分发**：同时提供 `.deb` 与 `.AppImage`，无需自行编译。
-            - **更自然的小窗体验**：胶囊显示、置顶悬停淡出/隐藏，以及位置持久化均为 Linux 平台专属实现。
-            - **不改变既有平台行为**：Windows 与 macOS 保持原有窗口和交互逻辑。
-
-            ### 安装 Ubuntu `.deb`
-
-            下载 `Metrik_*_amd64.deb` 后执行：
-
-            ```bash
-            sudo apt install ./Metrik_*_amd64.deb
-            ```
-
-            安装后可从应用菜单启动；小窗、置顶和显示/隐藏均可通过托盘菜单控制。
-
-            ---
-
-            如果升级后窗口位置不符合预期，可在设置中移动小窗一次，后续启动将使用新的位置。
-          releaseDraft: true
-          prerelease: false
-          includeUpdaterJson: false
           args: >-
             ${{ matrix.args }}
             --config '{"bundle":{"createUpdaterArtifacts":false}}'
+
+      - name: Upload release packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: Metrik-${{ matrix.platform }}-packages
+          path: src-tauri/target/**/release/bundle/**
+          if-no-files-found: error
+          retention-days: 7
 
       - name: Verify WidgetKit extension is embedded
         if: runner.os == 'macOS'
