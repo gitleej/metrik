@@ -24,6 +24,10 @@ jobs:
             args: "--target universal-apple-darwin"
             rust-targets: "aarch64-apple-darwin,x86_64-apple-darwin"
             widget-archs: "arm64 x86_64"
+          - platform: ubuntu-24.04
+            args: "--target x86_64-unknown-linux-gnu --bundles deb,appimage"
+            rust-targets: "x86_64-unknown-linux-gnu"
+            widget-archs: ""
 
     runs-on: ${{ matrix.platform }}
     steps:
@@ -41,6 +45,18 @@ jobs:
         with:
           targets: ${{ matrix.rust-targets }}
 
+      - name: Install Linux desktop dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libxdo-dev \
+            libssl-dev \
+            patchelf
+
       # 发布不频繁，且通用构建的 target 布局会让缓存的路径校验在 post 步骤
       # 报错、把已成功的构建标红。发布流程不缓存，换取稳定的绿。
 
@@ -57,9 +73,34 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           METRIK_WIDGET_ARCHS: ${{ matrix.widget-archs }}
+          APPIMAGE_EXTRACT_AND_RUN: ${{ runner.os == 'Linux' && '1' || '' }}
         with:
           tagName: ${{ github.ref_name }}
           releaseName: Metrik ${{ github.ref_name }}
+          releaseBody: |
+            ## Ubuntu 24.04 x86_64 正式支持
+
+            Metrik 现已提供 Ubuntu 24.04 x86_64 的原生桌面安装包。Linux 小窗插件可记住上次位置，启动时直接在该位置显示；置顶状态也可以从托盘菜单快速开启或取消。
+
+            ### 本次亮点
+
+            - **原生 Linux 分发**：同时提供 `.deb` 与 `.AppImage`，无需自行编译。
+            - **更自然的小窗体验**：胶囊显示、置顶悬停淡出/隐藏，以及位置持久化均为 Linux 平台专属实现。
+            - **不改变既有平台行为**：Windows 与 macOS 保持原有窗口和交互逻辑。
+
+            ### 安装 Ubuntu `.deb`
+
+            下载 `Metrik_*_amd64.deb` 后执行：
+
+            ```bash
+            sudo apt install ./Metrik_*_amd64.deb
+            ```
+
+            安装后可从应用菜单启动；小窗、置顶和显示/隐藏均可通过托盘菜单控制。
+
+            ---
+
+            如果升级后窗口位置不符合预期，可在设置中移动小窗一次，后续启动将使用新的位置。
           releaseDraft: true
           prerelease: false
           includeUpdaterJson: true
