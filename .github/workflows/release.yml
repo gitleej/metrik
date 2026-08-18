@@ -63,15 +63,12 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
-      # 安装包没有代码签名证书（Windows 会提示"未知发布者"，macOS 会提示
-      # 无法验证开发者），这是已知且在 README 声明的边界。下面这对密钥是
-      # Tauri 更新器自己的 minisign 签名，只保证更新包在分发链路上没被掉包。
-      # 同时会生成 latest.json（更新器的检查端点）并一并上传到 Release。
+      # 此 fork 发布可直接安装的桌面包。更新器的 minisign 私钥不应存放在
+      # fork 的 Actions secrets 中，因此显式关闭 updater artifact，避免包已
+      # 构建成功后因缺少私钥而让整个 Release 失败。应用的运行时行为不受影响。
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           METRIK_WIDGET_ARCHS: ${{ matrix.widget-archs }}
           APPIMAGE_EXTRACT_AND_RUN: ${{ runner.os == 'Linux' && '1' || '' }}
         with:
@@ -103,8 +100,10 @@ jobs:
             如果升级后窗口位置不符合预期，可在设置中移动小窗一次，后续启动将使用新的位置。
           releaseDraft: true
           prerelease: false
-          includeUpdaterJson: true
-          args: ${{ matrix.args }}
+          includeUpdaterJson: false
+          args: >-
+            ${{ matrix.args }}
+            --config '{"bundle":{"createUpdaterArtifacts":false}}'
 
       - name: Verify WidgetKit extension is embedded
         if: runner.os == 'macOS'
