@@ -2194,11 +2194,13 @@ dependencies = [
 
 [[package]]
 name = "metrik"
-version = "0.16.3"
+version = "0.16.4"
 dependencies = [
  "anyhow",
  "chrono",
  "dirs 6.0.0",
+ "gdkx11",
+ "gtk",
  "hex",
  "image",
  "libc",
