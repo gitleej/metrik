@@ -63,6 +63,7 @@ const KIMI_MARK: &[u8] = include_bytes!("../../src/assets/kimi-app-icon.png");
 const ANTIGRAVITY_MARK: &[u8] = include_bytes!("../../src/assets/antigravity-app-icon.png");
 const WORKBUDDY_MARK: &[u8] = include_bytes!("../../src/assets/workbuddy-app-icon.png");
 const QODER_MARK: &[u8] = include_bytes!("../../src/assets/qoder-app-icon.png");
+const GROK_MARK: &[u8] = include_bytes!("../../src/assets/grok-app-icon.png");
 
 #[derive(Clone, Copy)]
 struct StatusItemSpec {
@@ -71,7 +72,7 @@ struct StatusItemSpec {
     icon: &'static [u8],
 }
 
-const STATUS_ITEMS: [StatusItemSpec; 8] = [
+const STATUS_ITEMS: [StatusItemSpec; 9] = [
     StatusItemSpec {
         id: "codex",
         name: "ChatGPT",
@@ -111,6 +112,11 @@ const STATUS_ITEMS: [StatusItemSpec; 8] = [
         id: "qoder",
         name: "Qoder",
         icon: QODER_MARK,
+    },
+    StatusItemSpec {
+        id: "grok",
+        name: "Grok",
+        icon: GROK_MARK,
     },
 ];
 

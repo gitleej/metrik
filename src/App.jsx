@@ -39,6 +39,7 @@ import claudeAppIcon from "./assets/claude-app-icon.jpg";
 import kimiAppIcon from "./assets/kimi-app-icon.png";
 import opencodeAppIcon from "./assets/opencode-app-icon.png";
 import qoderAppIcon from "./assets/qoder-app-icon.png";
+import grokAppIcon from "./assets/grok-app-icon.png";
 import workbuddyAppIcon from "./assets/workbuddy-app-icon.png";
 import zcodeAppIcon from "./assets/zcode-app-icon.png";
 import { glassShellAppearance, nextGlassTint, resolveGlassMode } from "./glassAppearance.js";
@@ -189,6 +190,14 @@ const AGENT_META = {
     accent: "#3a7ca5",
     iconSrc: qoderAppIcon,
     iconClass: "agent-icon--qoder",
+  },
+  grok: {
+    // xAI Grok Build：本地单轮 usage + CLI 日志里的周 Credits 快照。
+    label: "Grok",
+    // 中性灰蓝：xAI 品牌本身是黑白，中性色既贴合品牌又与八家彩色拉开。
+    accent: "#6e7681",
+    iconSrc: grokAppIcon,
+    iconClass: "agent-icon--grok",
   },
 };
 
