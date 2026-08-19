@@ -51,6 +51,14 @@ fn kimi_code_dir() -> PathBuf {
         .unwrap_or_else(|| home().join(".kimi-code"))
 }
 
+/// Grok Build 的数据根：与 `GrokAdapter::detected()` / `grok_home()` 同源。
+fn grok_home_dir() -> PathBuf {
+    std::env::var_os("GROK_HOME")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .unwrap_or_else(|| home().join(".grok"))
+}
+
 pub fn table() -> Vec<AgentProbe> {
     let home = home();
     vec![
@@ -87,6 +95,10 @@ pub fn table() -> Vec<AgentProbe> {
         AgentProbe {
             id: "qoder",
             probe: Probe::Credential(|| coding_quota::qoder_cookie_source().is_some()),
+        },
+        AgentProbe {
+            id: "grok",
+            probe: Probe::Paths(vec![grok_home_dir()]),
         },
     ]
 }
@@ -156,6 +168,8 @@ mod tests {
             paths(by_id("kimi")),
             vec![kimi_code_dir(), home.join(".kimi")]
         );
+        // grok 同样受 GROK_HOME 覆盖。
+        assert_eq!(paths(by_id("grok")), vec![grok_home_dir()]);
     }
 
     #[test]

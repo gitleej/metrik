@@ -1,6 +1,6 @@
 use crate::adapters::{
-    AgentAdapter, AntigravityAdapter, ClaudeAdapter, CodexAdapter, KimiAdapter, OpencodeAdapter,
-    ScanDiagnostics, SourceCandidate, WorkbuddyAdapter, ZcodeAdapter,
+    AgentAdapter, AntigravityAdapter, ClaudeAdapter, CodexAdapter, GrokAdapter, KimiAdapter,
+    OpencodeAdapter, ScanDiagnostics, SourceCandidate, WorkbuddyAdapter, ZcodeAdapter,
 };
 use crate::claude_oauth;
 use crate::detect;
@@ -732,6 +732,7 @@ fn ingest_sources(connection: &mut Connection, horizon_ms: i64) -> Result<ScanRe
         Box::new(KimiAdapter::detected()),
         Box::new(AntigravityAdapter::detected()),
         Box::new(WorkbuddyAdapter::detected()),
+        Box::new(GrokAdapter::detected()),
     ];
     let mut report = ScanReport::default();
     let mut queue: Vec<(usize, SourceCandidate)> = Vec::new();
@@ -1490,6 +1491,37 @@ fn source_views(report: ScanReport, sync_status: Option<SyncView>) -> Vec<Source
             kind: "official".into(),
             label: "Qoder 官方 Credits".into(),
             detail: "账户级 Credits 覆盖 Qoder、QoderWork 与 Qoder CLI；通过用户提供的官网 Cookie 读取，不读取或解密客户端登录凭据，也不把本地遥测的零 token 当作用量。".into(),
+            quality: "official".into(),
+            quality_label: "官方".into(),
+        },
+        SourceView {
+            id: "grok-local".into(),
+            kind: "local".into(),
+            label: "Grok Build 本地 Token".into(),
+            detail: format!(
+                "发现 {} 个 updates.jsonl，本次更新 {} 个。{}只计 `_x.ai/session/update` 中带 usage 的单轮记录（按 prompt_id 去重取最后一次）；未安装 Grok Build 时保持为 0，不做推算。",
+                discovered("grok"),
+                refreshed("grok"),
+                coverage_detail(&diagnostics("grok"), errors("grok"))
+            ),
+            quality: if diagnostics("grok").partial_sources > 0 || errors("grok") > 0 {
+                "partial"
+            } else {
+                "exact"
+            }
+            .into(),
+            quality_label: if diagnostics("grok").partial_sources > 0 || errors("grok") > 0 {
+                "数据不完整"
+            } else {
+                "精确解析"
+            }
+            .into(),
+        },
+        SourceView {
+            id: "grok-quota".into(),
+            kind: "official".into(),
+            label: "Grok Build 官方配额".into(),
+            detail: "读取 Grok CLI 统一日志中的 billing credits 快照（creditUsagePercent + 周期结束时间）；质量为官方快照，非实时 HTTP 拉取。未运行过 grok 或日志无账单记录时显示不可用。".into(),
             quality: "official".into(),
             quality_label: "官方".into(),
         },
