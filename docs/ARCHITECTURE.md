@@ -16,11 +16,13 @@ Codex JSONL ─────┐
 Claude JSONL ────┤
 ZCode SQLite ────┼─ adapter ─ normalized event ─ SQLite ledger ─ period query ─ UI
 OpenCode JSON ───┤
-Kimi wire.jsonl ─┘
+Kimi wire.jsonl ─┤
+Grok updates ────┘
 
-Codex app-server ────────┐
-Claude statusLine hook ──┼─ official quota snapshot ──────────────┘
-Claude OAuth (opt-in) ───┘
+Codex app-server ─────────┐
+Claude statusLine hook ───┼─ official quota snapshot ──────────────┘
+Claude OAuth (opt-in) ────┤
+Grok CLI billing log ─────┘
 ```
 
 The UI invokes one asynchronous Tauri command, `usage_snapshot(period)`. Blocking discovery, parsing, SQLite work, and the local quota subprocess run inside `spawn_blocking`, guarded by a single scan lock. On each request the engine:
