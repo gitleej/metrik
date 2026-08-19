@@ -125,7 +125,7 @@ Where a source reports its own total, `TokenVector::disagrees_with_reported_tota
 
 ## Runtime boundary
 
-- Compact mode refreshes every five minutes while visible; expanded mode refreshes every minute. While `indexing.pending > 0` the UI polls every 400 ms instead, so each snapshot spends another `PARSE_BUDGET` on the backlog until it is drained. Returning to the window triggers a refresh.
+- Compact mode refreshes every five minutes while visible; expanded mode refreshes every minute. While `indexing.pending > 0` the UI polls every 400 ms instead, so each snapshot spends another `PARSE_BUDGET` on the backlog until it is drained. Returning to the window triggers a refresh. A hidden window also keeps the five-minute cadence while the Windows tray quota badge is enabled, because the taskbar number must not freeze.
 - One in-flight request is allowed from the UI; duplicate period requests are coalesced. The Rust scan remains serialized by one lock.
 - A desktop single-instance guard focuses the existing window instead of starting a second scanner.
 - Unchanged files are cheap metadata checks. A changed file is still reparsed from the beginning, so very large active logs remain the main CPU and disk bottleneck until an append cursor with durable parser state is implemented. The budget bounds a snapshot between files, not within one, so a single very large file can still overrun it.

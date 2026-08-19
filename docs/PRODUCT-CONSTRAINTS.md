@@ -95,6 +95,13 @@ change.
   drift and verify the full design viewport rather than trusting HWND size alone.
 - Strip window size is measured from rendered content. Constants may seed the
   first frame but are not the source of truth.
+- The notification-area icon can become a quota badge: while the setting is on,
+  the tray icon shows the remaining percentage of the first agent in the widget
+  list instead of the app mark. The number follows the compact-row rule
+  (tightest window), shows `--` when no reliable quota exists, colors stale
+  readings, and the tooltip names the agent and exact value. A hidden window
+  keeps refreshing at the compact cadence so the badge never freezes; turning
+  the setting off restores the default app icon.
 - Compact and strip have independent continuous UI scales in the range
   0.75–2.0, applied on the next entry into that form. Expanded mode is freely
   resizable and keeps webview zoom at 1.
