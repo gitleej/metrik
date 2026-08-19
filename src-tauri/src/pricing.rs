@@ -1,7 +1,7 @@
 //! 成本估算定价表（美元每百万 token）。
 //!
 //! 数据来源：LiteLLM 的公开价格表（`model_prices_and_context_window.json`），
-//! 只取 openai / anthropic / moonshot / zai / gemini 五个官方第一方 API 的
+//! 只取 openai / anthropic / moonshot / zai / gemini / xai 六个官方第一方 API 的
 //! provider，构建期由 `scripts/update-pricing.mjs` 生成 `pricing_table.rs`
 //! （`npm run pricing:update`）。运行时不联网——价格随发版更新，留在 git 里可审计。
 //!
@@ -18,7 +18,7 @@
 //!
 //! ## 覆盖范围
 //!
-//! 表内是五个第一方官方 API 的价目（生成时剥掉 LiteLLM 键的 provider 前缀，
+//! 表内是六个第一方官方 API 的价目（生成时剥掉 LiteLLM 键的 provider 前缀，
 //! 按裸模型名匹配）。OpenCode、Antigravity 等直连这些官方 API 的用量因此可以
 //! 计价（如 kimi-k2.5、glm-4.6、gemini-3-flash-preview）。
 //!
@@ -93,12 +93,20 @@ const MANUAL_PRICING: &[(&str, Pricing)] = &[
 ];
 
 /// 订阅制 coding plan 的模型 ID → 同一模型的官方第一方 API 价（估算口径）。
-/// 仅限"同一模型"：Kimi Code 订阅记的 `kimi-code/k3` 就是 kimi-k3 本身，
-/// 官方称 Extra Usage"接近开放平台官方 API 价"；成本页始终标注为估算。
+/// 仅限"同一模型"，且要有官方佐证，不是看名字像就归一：
+/// - Kimi Code 订阅记的 `kimi-code/k3` 就是 kimi-k3 本身，
+///   官方称 Extra Usage"接近开放平台官方 API 价"；成本页始终标注为估算。
+/// - ZCode coding-plan 记的 `GLM-5.2` 只是 glm-5.2 的大小写变体，同一模型。
+/// - Grok Build 订阅记的 `grok-4.5-build`：docs.x.ai 模型页里 grok-4.5 的官方
+///   别名就含 `grok-build-latest`（Build 产品线 = grok-4.5，2026-08-19 核对），
+///   故按 grok-4.5 官方 API 价估算。
+///
 /// 没有官方价的订阅 ID（kimi-for-coding 等）继续 unpriced。
-/// ZCode coding-plan 记的 `GLM-5.2` 只是 glm-5.2 的大小写变体，同一模型。
-const SUBSCRIPTION_ALIASES: &[(&str, &str)] =
-    &[("GLM-5.2", "glm-5.2"), ("kimi-code/k3", "kimi-k3")];
+const SUBSCRIPTION_ALIASES: &[(&str, &str)] = &[
+    ("GLM-5.2", "glm-5.2"),
+    ("kimi-code/k3", "kimi-k3"),
+    ("grok-4.5-build", "grok-4.5"),
+];
 
 /// 返回 `model` 的定价；表里没有则返回 `None`（调用方归入 unpriced，
 /// 不得臆造价格）。见模块文档：只精确匹配，日期快照后缀与订阅别名除外。
@@ -218,6 +226,23 @@ mod tests {
         assert_eq!(aliased.output, direct.output);
         // 其他订阅 ID 仍不得蒙混（见上一条测试）。
         assert!(price_for("kimi-code/k4").is_none());
+    }
+
+    #[test]
+    fn grok_45_build_priced_from_official_api_rates() {
+        // Grok Build 订阅记的 grok-4.5-build 按 grok-4.5 官方 API 价估算：
+        // docs.x.ai 模型页 grok-4.5 的官方别名含 grok-build-latest（Build
+        // 产品线 = grok-4.5；in $2 / cache $0.30 / out $6，2026-08-19 与
+        // LiteLLM 交叉一致）。直连 xAI API 的裸名也照表计价。
+        let aliased = price_for("grok-4.5-build").expect("alias priced");
+        assert_eq!(aliased.input, 2.0);
+        assert_eq!(aliased.cache_read, 0.3);
+        assert_eq!(aliased.output, 6.0);
+        let direct = price_for("grok-4.5").expect("api name priced");
+        assert_eq!(direct.input, aliased.input);
+        assert_eq!(direct.output, aliased.output);
+        // 未佐证的其他订阅变体不得蒙混：前缀匹配是事故，不重演。
+        assert!(price_for("grok-4.6-build").is_none());
     }
 
     #[test]
