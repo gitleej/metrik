@@ -253,6 +253,14 @@ mod tests {
         assert!(price_for("glm-4.6").is_some());
         assert!(price_for("gemini-3-flash-preview").is_some());
         assert!(price_for("gemini-2.5-pro").is_some());
+        // xAI 两个易混淆的裸名都要在表：4.6 的缓存价与 4.5 不同，
+        // grok-build-0.1 是独立定价的代码快模型（别名 grok-code-fast 族）。
+        // 钉在测试里：LiteLLM 若将来掉条目，重新生成会静默失价。
+        let forty_six = price_for("grok-4.6").expect("grok-4.6 priced");
+        assert_eq!(forty_six.cache_read, 0.5);
+        let build_code = price_for("grok-build-0.1").expect("grok-build-0.1 priced");
+        assert_eq!(build_code.input, 1.0);
+        assert_eq!(build_code.output, 2.0);
     }
 
     #[test]
