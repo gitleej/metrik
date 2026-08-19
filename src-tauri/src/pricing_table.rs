@@ -1,6 +1,6 @@
 //! 由 scripts/update-pricing.mjs 生成，请勿手改。
 //! 来源：LiteLLM 的 model_prices_and_context_window.json
-//! （只取 openai / anthropic / moonshot / zai / gemini 官方第一方 API）。
+//! （只取 openai / anthropic / moonshot / zai / gemini / xai 官方第一方 API）。
 //! 重新生成：node scripts/update-pricing.mjs
 //!
 //! 单位：美元 / 百万 token。表按模型名有序，供 price_for 二分查找。
@@ -8,7 +8,7 @@
 use super::Pricing;
 
 /// 价格表的生成日期，透传给前端做"估算截至"标注。
-pub const PRICING_AS_OF: &str = "2026-08-01";
+pub const PRICING_AS_OF: &str = "2026-08-19";
 
 // 每行一个模型：rustfmt 会把它拆成每条六行（近千行），生成结果与格式化结果
 // 互相打架。这是生成文件，保持一行一条更好读也更好 diff。
@@ -23,6 +23,8 @@ pub const PRICING_TABLE: &[(&str, Pricing)] = &[
     ("claude-fable-5", Pricing { input: 10.0, cache_read: 1.0, cache_write: 12.5, output: 50.0 }),
     ("claude-haiku-4-5", Pricing { input: 1.0, cache_read: 0.1, cache_write: 1.25, output: 5.0 }),
     ("claude-haiku-4-5-20251001", Pricing { input: 1.0, cache_read: 0.1, cache_write: 1.25, output: 5.0 }),
+    ("claude-mythos-5", Pricing { input: 10.0, cache_read: 1.0, cache_write: 12.5, output: 50.0 }),
+    ("claude-mythos-preview", Pricing { input: 10.0, cache_read: 1.0, cache_write: 12.5, output: 50.0 }),
     ("claude-opus-4-1", Pricing { input: 15.0, cache_read: 1.5, cache_write: 18.75, output: 75.0 }),
     ("claude-opus-4-1-20250805", Pricing { input: 15.0, cache_read: 1.5, cache_write: 18.75, output: 75.0 }),
     ("claude-opus-4-20250514", Pricing { input: 15.0, cache_read: 1.5, cache_write: 18.75, output: 75.0 }),
@@ -77,6 +79,7 @@ pub const PRICING_TABLE: &[(&str, Pricing)] = &[
     ("gemini-3.5-flash", Pricing { input: 1.5, cache_read: 0.15, cache_write: 0.0, output: 9.0 }),
     ("gemini-3.5-flash-lite", Pricing { input: 0.3, cache_read: 0.03, cache_write: 0.0, output: 2.5 }),
     ("gemini-3.6-flash", Pricing { input: 1.5, cache_read: 0.15, cache_write: 0.0, output: 7.5 }),
+    ("gemini-3.7-flash", Pricing { input: 0.75, cache_read: 0.075, cache_write: 0.0, output: 3.75 }),
     ("gemini-exp-1114", Pricing { input: 0.0, cache_read: 0.0, cache_write: 0.0, output: 0.0 }),
     ("gemini-exp-1206", Pricing { input: 0.0, cache_read: 0.0, cache_write: 0.0, output: 0.0 }),
     ("gemini-flash-latest", Pricing { input: 0.3, cache_read: 0.075, cache_write: 0.0, output: 2.5 }),
@@ -86,6 +89,9 @@ pub const PRICING_TABLE: &[(&str, Pricing)] = &[
     ("gemini-omni-flash-preview", Pricing { input: 1.5, cache_read: 1.5, cache_write: 0.0, output: 9.0 }),
     ("gemini-pro-latest", Pricing { input: 1.25, cache_read: 0.125, cache_write: 0.0, output: 10.0 }),
     ("gemini-robotics-er-1.5-preview", Pricing { input: 0.3, cache_read: 0.0, cache_write: 0.0, output: 2.5 }),
+    ("gemini-robotics-er-1.6-preview", Pricing { input: 1.0, cache_read: 1.0, cache_write: 0.0, output: 5.0 }),
+    ("gemini-robotics-er-2-preview", Pricing { input: 2.0, cache_read: 0.2, cache_write: 0.0, output: 10.0 }),
+    ("gemini-robotics-er-2-streaming-preview", Pricing { input: 2.0, cache_read: 2.0, cache_write: 0.0, output: 10.0 }),
     ("gemma-3-27b-it", Pricing { input: 0.0, cache_read: 0.0, cache_write: 0.0, output: 0.0 }),
     ("glm-4-32b-0414-128k", Pricing { input: 0.1, cache_read: 0.1, cache_write: 0.0, output: 0.1 }),
     ("glm-4.5", Pricing { input: 0.6, cache_read: 0.6, cache_write: 0.0, output: 2.2 }),
@@ -182,6 +188,50 @@ pub const PRICING_TABLE: &[(&str, Pricing)] = &[
     ("gpt-audio-mini", Pricing { input: 0.6, cache_read: 0.6, cache_write: 0.0, output: 2.4 }),
     ("gpt-audio-mini-2025-10-06", Pricing { input: 0.6, cache_read: 0.6, cache_write: 0.0, output: 2.4 }),
     ("gpt-audio-mini-2025-12-15", Pricing { input: 0.6, cache_read: 0.6, cache_write: 0.0, output: 2.4 }),
+    ("grok-2", Pricing { input: 2.0, cache_read: 2.0, cache_write: 0.0, output: 10.0 }),
+    ("grok-2-1212", Pricing { input: 2.0, cache_read: 2.0, cache_write: 0.0, output: 10.0 }),
+    ("grok-2-latest", Pricing { input: 2.0, cache_read: 2.0, cache_write: 0.0, output: 10.0 }),
+    ("grok-2-vision", Pricing { input: 2.0, cache_read: 2.0, cache_write: 0.0, output: 10.0 }),
+    ("grok-2-vision-1212", Pricing { input: 2.0, cache_read: 2.0, cache_write: 0.0, output: 10.0 }),
+    ("grok-2-vision-latest", Pricing { input: 2.0, cache_read: 2.0, cache_write: 0.0, output: 10.0 }),
+    ("grok-3", Pricing { input: 3.0, cache_read: 0.75, cache_write: 0.0, output: 15.0 }),
+    ("grok-3-beta", Pricing { input: 3.0, cache_read: 0.75, cache_write: 0.0, output: 15.0 }),
+    ("grok-3-fast-beta", Pricing { input: 5.0, cache_read: 1.25, cache_write: 0.0, output: 25.0 }),
+    ("grok-3-fast-latest", Pricing { input: 5.0, cache_read: 1.25, cache_write: 0.0, output: 25.0 }),
+    ("grok-3-latest", Pricing { input: 3.0, cache_read: 0.75, cache_write: 0.0, output: 15.0 }),
+    ("grok-3-mini", Pricing { input: 0.3, cache_read: 0.075, cache_write: 0.0, output: 0.5 }),
+    ("grok-3-mini-beta", Pricing { input: 0.3, cache_read: 0.075, cache_write: 0.0, output: 0.5 }),
+    ("grok-3-mini-fast", Pricing { input: 0.6, cache_read: 0.15, cache_write: 0.0, output: 4.0 }),
+    ("grok-3-mini-fast-beta", Pricing { input: 0.6, cache_read: 0.15, cache_write: 0.0, output: 4.0 }),
+    ("grok-3-mini-fast-latest", Pricing { input: 0.6, cache_read: 0.15, cache_write: 0.0, output: 4.0 }),
+    ("grok-3-mini-latest", Pricing { input: 0.3, cache_read: 0.075, cache_write: 0.0, output: 0.5 }),
+    ("grok-4", Pricing { input: 3.0, cache_read: 3.0, cache_write: 0.0, output: 15.0 }),
+    ("grok-4-0709", Pricing { input: 3.0, cache_read: 3.0, cache_write: 0.0, output: 15.0 }),
+    ("grok-4-1-fast", Pricing { input: 0.2, cache_read: 0.05, cache_write: 0.0, output: 0.5 }),
+    ("grok-4-1-fast-non-reasoning", Pricing { input: 0.2, cache_read: 0.05, cache_write: 0.0, output: 0.5 }),
+    ("grok-4-1-fast-non-reasoning-latest", Pricing { input: 0.2, cache_read: 0.05, cache_write: 0.0, output: 0.5 }),
+    ("grok-4-1-fast-reasoning", Pricing { input: 0.2, cache_read: 0.05, cache_write: 0.0, output: 0.5 }),
+    ("grok-4-1-fast-reasoning-latest", Pricing { input: 0.2, cache_read: 0.05, cache_write: 0.0, output: 0.5 }),
+    ("grok-4-fast-non-reasoning", Pricing { input: 0.2, cache_read: 0.05, cache_write: 0.0, output: 0.5 }),
+    ("grok-4-fast-reasoning", Pricing { input: 0.2, cache_read: 0.05, cache_write: 0.0, output: 0.5 }),
+    ("grok-4-latest", Pricing { input: 3.0, cache_read: 3.0, cache_write: 0.0, output: 15.0 }),
+    ("grok-4.20-0309-non-reasoning", Pricing { input: 1.25, cache_read: 0.2, cache_write: 0.0, output: 2.5 }),
+    ("grok-4.20-0309-reasoning", Pricing { input: 1.25, cache_read: 0.2, cache_write: 0.0, output: 2.5 }),
+    ("grok-4.20-beta-0309-non-reasoning", Pricing { input: 1.25, cache_read: 0.2, cache_write: 0.0, output: 2.5 }),
+    ("grok-4.20-beta-0309-reasoning", Pricing { input: 1.25, cache_read: 0.2, cache_write: 0.0, output: 2.5 }),
+    ("grok-4.20-multi-agent-0309", Pricing { input: 1.25, cache_read: 0.2, cache_write: 0.0, output: 2.5 }),
+    ("grok-4.20-multi-agent-beta-0309", Pricing { input: 1.25, cache_read: 0.2, cache_write: 0.0, output: 2.5 }),
+    ("grok-4.3", Pricing { input: 1.25, cache_read: 0.2, cache_write: 0.0, output: 2.5 }),
+    ("grok-4.3-latest", Pricing { input: 1.25, cache_read: 0.2, cache_write: 0.0, output: 2.5 }),
+    ("grok-4.5", Pricing { input: 2.0, cache_read: 0.3, cache_write: 0.0, output: 6.0 }),
+    ("grok-4.5-latest", Pricing { input: 2.0, cache_read: 0.3, cache_write: 0.0, output: 6.0 }),
+    ("grok-4.6", Pricing { input: 2.0, cache_read: 0.5, cache_write: 0.0, output: 6.0 }),
+    ("grok-beta", Pricing { input: 5.0, cache_read: 5.0, cache_write: 0.0, output: 15.0 }),
+    ("grok-build-0.1", Pricing { input: 1.0, cache_read: 0.2, cache_write: 0.0, output: 2.0 }),
+    ("grok-code-fast", Pricing { input: 1.0, cache_read: 0.2, cache_write: 0.0, output: 2.0 }),
+    ("grok-code-fast-1", Pricing { input: 1.0, cache_read: 0.2, cache_write: 0.0, output: 2.0 }),
+    ("grok-code-fast-1-0825", Pricing { input: 1.0, cache_read: 0.2, cache_write: 0.0, output: 2.0 }),
+    ("grok-vision-beta", Pricing { input: 5.0, cache_read: 5.0, cache_write: 0.0, output: 15.0 }),
     ("kimi-k2-0711-preview", Pricing { input: 0.6, cache_read: 0.15, cache_write: 0.0, output: 2.5 }),
     ("kimi-k2-0905-preview", Pricing { input: 0.6, cache_read: 0.15, cache_write: 0.0, output: 2.5 }),
     ("kimi-k2-thinking", Pricing { input: 0.6, cache_read: 0.15, cache_write: 0.0, output: 2.5 }),

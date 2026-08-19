@@ -19,7 +19,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 const SOURCE =
   "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json";
 const OUT = "src-tauri/src/pricing_table.rs";
-const PROVIDERS = new Set(["openai", "anthropic", "moonshot", "zai", "gemini"]);
+const PROVIDERS = new Set(["openai", "anthropic", "moonshot", "zai", "gemini", "xai"]);
 
 const localPath = process.argv[2];
 let raw;
@@ -103,7 +103,7 @@ writeFileSync(
   OUT,
   `//! 由 scripts/update-pricing.mjs 生成，请勿手改。
 //! 来源：LiteLLM 的 model_prices_and_context_window.json
-//! （只取 openai / anthropic / moonshot / zai / gemini 官方第一方 API）。
+//! （只取 openai / anthropic / moonshot / zai / gemini / xai 官方第一方 API）。
 //! 重新生成：node scripts/update-pricing.mjs
 //!
 //! 单位：美元 / 百万 token。表按模型名有序，供 price_for 二分查找。

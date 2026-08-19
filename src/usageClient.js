@@ -168,11 +168,11 @@ function demoSnapshot(period = "today") {
     ],
     cost: {
       available: true,
-      // 演示值按 gpt-5.2 / claude 价目的量级粗算。
-      totalUsd: 5.62 * scale,
-      // ZCode / OpenCode / Kimi / Antigravity / WorkBuddy / Grok 未计价：演示数据也如实反映这一点。
-      unpricedTokens: zcodeTokens + opencodeTokens + kimiTokens + antigravityTokens + workbuddyTokens + grokTokens,
-      pricingAsOf: "2026-07-13",
+      // 演示值按 gpt-5.2 / claude / grok-4.5 价目的量级粗算。
+      totalUsd: 5.84 * scale,
+      // ZCode / OpenCode / Kimi / Antigravity / WorkBuddy 未计价：演示数据也如实反映这一点。
+      unpricedTokens: zcodeTokens + opencodeTokens + kimiTokens + antigravityTokens + workbuddyTokens,
+      pricingAsOf: "2026-08-19",
       byAgent: [
         { agent: "codex", usd: 2.31 * scale, unpricedTokens: 0 },
         { agent: "claude", usd: 3.31 * scale, unpricedTokens: 0 },
@@ -181,7 +181,7 @@ function demoSnapshot(period = "today") {
         { agent: "kimi", usd: 0, unpricedTokens: kimiTokens },
         { agent: "antigravity", usd: 0, unpricedTokens: antigravityTokens },
         { agent: "workbuddy", usd: 0, unpricedTokens: workbuddyTokens },
-        { agent: "grok", usd: 0, unpricedTokens: grokTokens },
+        { agent: "grok", usd: 0.22 * scale, unpricedTokens: 0 },
       ],
     },
     models: [
