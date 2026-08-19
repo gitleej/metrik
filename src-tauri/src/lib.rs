@@ -918,6 +918,89 @@ async fn set_taskbar_button(window: tauri::WebviewWindow, visible: bool) -> Resu
     Ok(())
 }
 
+/// Windows 托盘余量徽标：把前端渲染好的 RGBA 位图换成任务栏托盘图标。
+/// 隐藏窗口后任务栏按钮本身就没了，能常驻显示数字的只有通知区域的托盘图标；
+/// 位图由 webview 里的 canvas 画出（渲染权威在前端，与悬浮窗尺寸同一套哲学），
+/// 后端只做校验和登记。icon 为 None 时恢复应用默认图标。
+#[derive(Debug, serde::Deserialize)]
+struct TrayQuotaIcon {
+    rgba: Vec<u8>,
+    width: u32,
+    height: u32,
+}
+
+/// 托盘图标尺寸上限：徽标实际是 32×32，这里只拦离谱的输入，不当作配置项。
+const TRAY_ICON_MAX_EDGE: u32 = 256;
+
+/// 负载校验：尺寸有界且 RGBA 长度与宽高一致。独立成函数供单测，不依赖平台。
+fn validate_tray_quota_icon(icon: &TrayQuotaIcon) -> Result<(), String> {
+    if icon.width == 0
+        || icon.height == 0
+        || icon.width > TRAY_ICON_MAX_EDGE
+        || icon.height > TRAY_ICON_MAX_EDGE
+    {
+        return Err(format!(
+            "托盘图标尺寸超出范围：{}×{}",
+            icon.width, icon.height
+        ));
+    }
+    let expected = icon.width as usize * icon.height as usize * 4;
+    if icon.rgba.len() != expected {
+        return Err(format!(
+            "托盘图标像素数据长度不匹配：{} ≠ {expected}",
+            icon.rgba.len()
+        ));
+    }
+    Ok(())
+}
+
+/// 设置 Windows 托盘图标为余量徽标；icon 为 None 时恢复默认图标与默认提示。
+/// 其它平台没有这条路径（前端只在 Windows 调用），这里是 no-op。
+#[tauri::command]
+fn set_tray_quota_icon(
+    app: tauri::AppHandle,
+    icon: Option<TrayQuotaIcon>,
+    tooltip: Option<String>,
+) -> Result<(), String> {
+    // 校验放在平台分支之前：非 Windows 构建里也读字段、走同一契约，
+    // 否则 dead_code 会把 TrayQuotaIcon、校验函数和上限常量判成死代码。
+    if let Some(payload) = icon.as_ref() {
+        validate_tray_quota_icon(payload)?;
+    }
+    #[cfg(windows)]
+    {
+        let Some(tray) = app.tray_by_id("main") else {
+            return Err("任务栏托盘图标不存在".into());
+        };
+        match icon {
+            Some(payload) => {
+                let image =
+                    tauri::image::Image::new_owned(payload.rgba, payload.width, payload.height);
+                tray.set_icon(Some(image))
+                    .map_err(|error| error.to_string())?;
+            }
+            None => {
+                let fallback = app
+                    .default_window_icon()
+                    .cloned()
+                    .ok_or_else(|| "默认应用图标不可用".to_string())?;
+                tray.set_icon(Some(fallback))
+                    .map_err(|error| error.to_string())?;
+            }
+        }
+        // 提示文本跟着数字走（如 "Metrik · Claude 剩余 87%"）；恢复时回到默认。
+        let tooltip = tooltip.filter(|text| !text.trim().is_empty());
+        tray.set_tooltip(tooltip.as_deref().or(Some("Metrik")))
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (app, icon, tooltip);
+        Ok(())
+    }
+}
+
 #[tauri::command]
 async fn claude_hook_status() -> Result<claude_hook::ClaudeHookStatus, String> {
     tauri::async_runtime::spawn_blocking(|| {
@@ -1331,6 +1414,7 @@ pub fn run() {
             qoder_cookie_status,
             configure_qoder_cookie,
             set_taskbar_button,
+            set_tray_quota_icon,
             set_native_theme,
             open_expanded_window,
             set_macos_desktop_widget_visible,
@@ -1599,6 +1683,41 @@ mod tests {
         migrate_legacy_database(&legacy, &local).unwrap();
 
         assert!(!local.exists());
+    }
+
+    #[test]
+    fn tray_quota_icon_payloads_are_validated_before_use() {
+        let badge = TrayQuotaIcon {
+            rgba: vec![10; 32 * 32 * 4],
+            width: 32,
+            height: 32,
+        };
+        assert_eq!(validate_tray_quota_icon(&badge), Ok(()));
+
+        let truncated = TrayQuotaIcon {
+            rgba: vec![10; 100],
+            width: 32,
+            height: 32,
+        };
+        assert!(validate_tray_quota_icon(&truncated)
+            .unwrap_err()
+            .contains("长度不匹配"));
+
+        let oversize = TrayQuotaIcon {
+            rgba: vec![0; (TRAY_ICON_MAX_EDGE as usize + 1) * 4],
+            width: TRAY_ICON_MAX_EDGE + 1,
+            height: 1,
+        };
+        assert!(validate_tray_quota_icon(&oversize)
+            .unwrap_err()
+            .contains("尺寸超出范围"));
+
+        let empty = TrayQuotaIcon {
+            rgba: Vec::new(),
+            width: 0,
+            height: 0,
+        };
+        assert!(validate_tray_quota_icon(&empty).is_err());
     }
 }
 #[test]

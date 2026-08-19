@@ -6,6 +6,10 @@ import {
 } from "./glassAppearance.js";
 import { detectRuntimePlatform } from "./platformDetection";
 import {
+  renderTrayQuotaBadge,
+  trayBadgeKey,
+} from "./trayBadge.js";
+import {
   monitorForWindowPosition,
   physicalWindowSize,
   viewportCorrectedPhysicalSize,
@@ -672,6 +676,32 @@ async function updateMacStatusItems(items) {
     ),
     stale: items.map((item) => Boolean(item.stale)),
   });
+}
+
+/// 把列表最上方 Agent 的余量画进 Windows 任务栏托盘图标。spec 为 null 时
+/// 恢复应用默认图标。同一状态只下发一次：快照每次刷新都会重跑，但数字没变
+/// 就不该再碰托盘。下发失败不记账，下一次快照会自动重试。
+let appliedTrayBadgeKey = null;
+
+async function updateTrayQuotaBadge(spec) {
+  if (!isDesktop() || !isWindowsPlatform()) return;
+  const nextKey = spec ? trayBadgeKey(spec) : null;
+  if (nextKey === appliedTrayBadgeKey) return;
+  if (!spec) {
+    await invoke("set_tray_quota_icon", { icon: null, tooltip: null });
+    appliedTrayBadgeKey = null;
+    return;
+  }
+  const rendered = renderTrayQuotaBadge(spec.percent, spec.stale);
+  await invoke("set_tray_quota_icon", {
+    icon: {
+      rgba: Array.from(rendered.rgba),
+      width: rendered.width,
+      height: rendered.height,
+    },
+    tooltip: spec.tooltip,
+  });
+  appliedTrayBadgeKey = nextKey;
 }
 
 async function applyWindowMode(mode, options = {}) {
@@ -1353,6 +1383,7 @@ export {
   setAutostart,
   setNativeTheme,
   updateMacStatusItems,
+  updateTrayQuotaBadge,
   setStripScale,
   setWindowGlass,
   setWindowPinned,
