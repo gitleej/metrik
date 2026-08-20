@@ -196,6 +196,20 @@ pub fn refresh_all(connection: &Connection, cache: &QuotaCache, force: bool) -> 
             storage::upsert_quota(connection, sample)?;
         }
     }
+    prune_unmanaged_quota_rows(connection)?;
+    Ok(())
+}
+
+/// 清除注册表已不存在的 adapter 的残留配额行。0.17.2 把 pi 配额源移除后，
+/// 0.17.1 写入的 pi 行若不清理，卡片/胶囊会继续显示一个不再有来源的配额。
+/// 只删“不再有 provider”的 adapter；仍在注册表里的（含 kimiwork 这类内部源）
+/// 即使本轮拉空也保留旧行（陈旧展示由展示层负责）。
+pub fn prune_unmanaged_quota_rows(connection: &Connection) -> Result<()> {
+    let managed: Vec<&str> = registry().iter().map(|p| p.adapter_id()).collect();
+    let placeholders = vec!["?"; managed.len()].join(",");
+    let sql = format!("DELETE FROM quota_snapshot WHERE adapter_id NOT IN ({placeholders})");
+    let mut statement = connection.prepare(&sql)?;
+    statement.execute(rusqlite::params_from_iter(managed))?;
     Ok(())
 }
 
@@ -328,6 +342,43 @@ mod tests {
             .execute_batch(include_str!("../migrations/001_init.sql"))
             .unwrap();
         connection
+    }
+
+    #[test]
+    fn prune_removes_rows_of_removed_quota_sources_only() {
+        use crate::domain::QuotaSample;
+        let connection = memory_ledger();
+        // pi 曾是配额源（0.17.1），0.17.2 移除；kimiwork 仍在注册表。
+        for adapter in ["pi", "kimiwork"] {
+            storage::upsert_quota(
+                &connection,
+                &QuotaSample {
+                    adapter_id: adapter,
+                    window_key: "five_hour".into(),
+                    remaining_percent: 99.0,
+                    resets_at_ms: None,
+                    collected_at_ms: 0,
+                    source_label: "x".into(),
+                    quality: "official_live",
+                },
+            )
+            .unwrap();
+        }
+        prune_unmanaged_quota_rows(&connection).unwrap();
+        let left: Vec<String> = {
+            let mut s = connection
+                .prepare("SELECT adapter_id FROM quota_snapshot ORDER BY adapter_id")
+                .unwrap();
+            s.query_map([], |row| row.get(0))
+                .unwrap()
+                .map(|r| r.unwrap())
+                .collect()
+        };
+        assert_eq!(
+            left,
+            vec!["kimiwork".to_string()],
+            "pi 残留应被清除、kimiwork 保留"
+        );
     }
 
     #[test]
