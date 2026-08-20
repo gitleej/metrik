@@ -79,33 +79,12 @@ const KIMIWORK_STATS_URL: &str =
 pub fn fetch_zcode_quota(timeout: Duration) -> Result<Vec<QuotaSample>> {
     let candidates = resolve_glm_credentials();
     if candidates.is_empty() {
-        bail!("未找到 GLM/ZCode 的 API key（zcode 配置、环境变量或 OpenCode auth.json）");
+        bail!("未找到 GLM/ZCode 的 API key（zcode 配置、环境变量、OpenCode auth.json 或 pi auth.json）");
     }
     let agent = ureq::AgentBuilder::new().timeout(timeout).build();
     let mut last_error = None;
     for cred in candidates {
         match fetch_glm_once(&agent, &cred, "zcode") {
-            Ok(samples) => return Ok(samples),
-            Err(error) => last_error = Some(error),
-        }
-    }
-    Err(last_error.expect("candidates 非空则必有错误"))
-}
-
-/// pi 的 GLM Coding Plan 配额。key 存在 pi 自己的 auth.json 里（明文、与
-/// OpenCode auth.json 同形），仅在内存里用于一次请求。响应形状与 zcode 用的
-/// 同一套（已在真机核验），只是落库身份换成 pi 卡片。
-/// qwen-token-plan* 同在这份文件里，但那是百炼的另一产品，不打这套端点，
-/// 不逐把试。
-pub fn fetch_pi_quota(timeout: Duration) -> Result<Vec<QuotaSample>> {
-    let candidates = resolve_pi_glm_credentials();
-    if candidates.is_empty() {
-        bail!("未找到 pi 的 GLM Coding Plan key（~/.pi/agent/auth.json）");
-    }
-    let agent = ureq::AgentBuilder::new().timeout(timeout).build();
-    let mut last_error = None;
-    for cred in candidates {
-        match fetch_glm_once(&agent, &cred, "pi") {
             Ok(samples) => return Ok(samples),
             Err(error) => last_error = Some(error),
         }
@@ -965,6 +944,11 @@ fn resolve_glm_credentials() -> Vec<GlmCredential> {
     if let Some(token) = nonempty(opencode.get("zhipuai-coding-plan")) {
         push(token, GlmRegion::Bigmodel);
     }
+    // pi 是 harness 不是配额身份：它 auth.json 里的 GLM key 与 zcode 桌面端
+    // 是同一套餐，配额读数同样归 GLM 卡片（与用量归属一致）。
+    for cred in resolve_pi_glm_credentials() {
+        push(cred.token, cred.region);
+    }
     if let Some(token) = nonempty(opencode.get("zai-coding-plan")) {
         push(token, GlmRegion::Zai);
     }
@@ -1006,6 +990,11 @@ fn pi_auth_paths() -> Vec<PathBuf> {
     ]
 }
 
+/// pi 是 harness，不是配额身份：它 auth.json 里的 GLM key 与 zcode 桌面端
+/// 是同一套餐，配额读数归 GLM 卡片（与用量归属一致）。这里只作为
+/// resolve_glm_credentials 的一个凭据来源。
+/// qwen-token-plan* 同在这份文件里，但那是百炼的另一产品，不打这套端点，
+/// 不逐把试。
 fn resolve_pi_glm_credentials() -> Vec<GlmCredential> {
     for path in pi_auth_paths() {
         let Ok(raw) = std::fs::read_to_string(&path) else {
@@ -1611,23 +1600,6 @@ mod tests {
                 sample.window_key, sample.remaining_percent, sample.resets_at_ms
             );
             assert_eq!(sample.adapter_id, "zcode");
-            assert!((0.0..=100.0).contains(&sample.remaining_percent));
-        }
-    }
-
-    /// 打真实 bigmodel/z.ai 接口的 pi 卡片烟测：需要本机 pi 登录过 GLM Coding
-    /// Plan（~/.pi/agent/auth.json 里有 zai-coding-cn 或 zai key）。
-    #[test]
-    #[ignore = "reads local pi credentials and calls the live quota API"]
-    fn live_pi_quota_smoke_test() {
-        let samples = fetch_pi_quota(Duration::from_secs(15)).expect("fetch pi glm quota");
-        assert!(!samples.is_empty(), "配额响应里没有可用窗口");
-        for sample in &samples {
-            println!(
-                "pi quota: window={} remaining={:.1}% resets_at={:?}",
-                sample.window_key, sample.remaining_percent, sample.resets_at_ms
-            );
-            assert_eq!(sample.adapter_id, "pi");
             assert!((0.0..=100.0).contains(&sample.remaining_percent));
         }
     }

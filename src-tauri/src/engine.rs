@@ -1531,7 +1531,7 @@ fn source_views(report: ScanReport, sync_status: Option<SyncView>) -> Vec<Source
             kind: "local".into(),
             label: "Pi 本地 Token".into(),
             detail: format!(
-                "发现 {} 个会话文件，本次更新 {} 个。{}逐请求计数按 provider 响应标识去重，fork/clone 复制不重复入账；摘要生成与工具内嵌调用的用量一并计入；项目归属只取会话头里的工作目录。",
+                "发现 {} 个会话文件，本次更新 {} 个。{}pi 是 harness，自身没有 coding plan：逐请求计数按 provider 响应标识去重，并按 provider 归属到对应计量卡片（GLM Coding Plan 记入 GLM、Qwen Token Plan 记入 Qwen、其余留在 Pi）；fork/clone 复制不重复入账，摘要生成与工具内嵌调用的用量一并计入，项目归属只取会话头里的工作目录。",
                 discovered("pi"),
                 refreshed("pi"),
                 coverage_detail(&diagnostics("pi"), errors("pi"))
@@ -1548,14 +1548,6 @@ fn source_views(report: ScanReport, sync_status: Option<SyncView>) -> Vec<Source
                 "精确解析"
             }
             .into(),
-        },
-        SourceView {
-            id: "pi-quota".into(),
-            kind: "official".into(),
-            label: "Pi 官方配额".into(),
-            detail: "用 pi 自己存储的 GLM Coding Plan key（~/.pi/agent/auth.json）直查官方接口，得 5 小时与每周滚动窗；key 仅在内存中用于一次请求，不入库不同步。同一账户的额度与 GLM 卡片读数同源。".into(),
-            quality: "official".into(),
-            quality_label: "官方".into(),
         },
         SourceView {
             id: "qwen-quota".into(),

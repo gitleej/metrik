@@ -132,7 +132,6 @@ pub fn registry() -> Vec<Box<dyn QuotaProvider>> {
         ("kimiwork", coding_quota::fetch_kimiwork_quota),
         ("qoder", coding_quota::fetch_qoder_quota),
         ("workbuddy", coding_quota::fetch_workbuddy_quota),
-        ("pi", coding_quota::fetch_pi_quota),
         ("qwen", coding_quota::fetch_qwen_quota),
     ] {
         providers.push(Box::new(HttpQuota { adapter_id, fetch }));
@@ -349,7 +348,6 @@ mod tests {
                 "grok",
                 "kimi",
                 "kimiwork",
-                "pi",
                 "qoder",
                 "qwen",
                 "workbuddy",

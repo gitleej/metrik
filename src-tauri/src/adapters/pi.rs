@@ -61,6 +61,8 @@ struct PiEntry {
 struct PiMessage {
     role: Option<String>,
     model: Option<String>,
+    /// 发起这次调用的 provider id（pi 目录里的名字，如 zai-coding-cn）。
+    provider: Option<String>,
     /// provider 生成的响应标识；aborted 消息可能缺失。
     #[serde(rename = "responseId")]
     response_id: Option<String>,
@@ -107,6 +109,8 @@ struct PendingEvent {
     event_key: String,
     model: Option<String>,
     tokens: TokenVector,
+    /// 事件归属的计量 Agent（pi 是 harness，见 `pi_providers`）。
+    credited_agent: &'static str,
 }
 
 impl PiAdapter {
@@ -143,6 +147,9 @@ impl AgentAdapter for PiAdapter {
         let mut session_id: Option<String> = None;
         let mut project: Option<String> = None;
         let mut saw_content = false;
+        // 会话当前 provider（model_change 之外没有显式标记，assistant 消息的
+        // provider 即当前值；摘要生成归属跟随它）。
+        let mut session_provider: Option<String> = None;
         // 头之前出现未知记录时丢弃整个文件：那不是 Pi 的会话文件（或格式已
         // 变），读下去只会读错。
         let mut discard_file = false;
@@ -209,7 +216,7 @@ impl AgentAdapter for PiAdapter {
             };
             let session = session_id.clone().unwrap_or_default();
             let timestamp = timestamp_str_ms(entry.timestamp.as_deref());
-            let (usage, model, identity) = match entry.entry_type.as_str() {
+            let (usage, model, provider, identity) = match entry.entry_type.as_str() {
                 "message" => {
                     let Some(message) = entry.message else {
                         continue;
@@ -219,6 +226,17 @@ impl AgentAdapter for PiAdapter {
                             let Some(usage) = message.usage else {
                                 continue;
                             };
+                            let provider = message
+                                .provider
+                                .as_deref()
+                                .map(str::trim)
+                                .filter(|value| !value.is_empty())
+                                .map(str::to_owned);
+                            // 会话当前 provider 随每条 assistant 消息更新，
+                            // 供摘要生成归属使用。
+                            if provider.is_some() {
+                                session_provider = provider.clone();
+                            }
                             let identity = match message
                                 .response_id
                                 .as_deref()
@@ -228,7 +246,8 @@ impl AgentAdapter for PiAdapter {
                                 Some(response_id) => format!("response:{response_id}"),
                                 None => fallback_identity(&entry.id, timestamp),
                             };
-                            (usage, message.model, identity)
+                            let model = message.model;
+                            (usage, model, provider, identity)
                         }
                         // 工具内嵌 LLM 调用的用量：真实计费，但没有 provider
                         // 响应标识，退回事件内身份。
@@ -236,9 +255,17 @@ impl AgentAdapter for PiAdapter {
                             let Some(usage) = message.usage else {
                                 continue;
                             };
+                            let provider = message
+                                .provider
+                                .as_deref()
+                                .map(str::trim)
+                                .filter(|value| !value.is_empty())
+                                .map(str::to_owned);
+                            let model = message.model;
                             (
                                 usage,
-                                message.model,
+                                model,
+                                provider,
                                 fallback_identity(&entry.id, timestamp),
                             )
                         }
@@ -255,9 +282,12 @@ impl AgentAdapter for PiAdapter {
                         "branch"
                     };
                     // 身份同样不含会话 id：fork/clone 会连 compaction 条目一起复制。
+                    // 摘要生成沿用会话当前 provider（记录里不再重复），归属同样
+                    // 跟随该 provider；拿不到时留在 pi。
                     (
                         usage,
                         None,
+                        session_provider.clone(),
                         format!("{prefix}:{}", entry.id.as_deref().unwrap_or("?")),
                     )
                 }
@@ -287,6 +317,7 @@ impl AgentAdapter for PiAdapter {
                 event_key: identity.clone(),
                 model: model.clone(),
                 tokens: tokens.clone(),
+                credited_agent: crate::pi_providers::credited_agent(provider.as_deref()),
             };
             match events.get_mut(&identity) {
                 Some(stored) => {
@@ -297,6 +328,15 @@ impl AgentAdapter for PiAdapter {
                         _ => false,
                     };
                     if model_conflict {
+                        events.remove(&identity);
+                        rejected_keys.insert(identity);
+                        diagnostics.rejected_events += 1;
+                        continue;
+                    }
+                    // 同 key 同模型：正常只会在文件被原样复制时出现（fork/clone），
+                    // 分量取最大值即可；真异常由口径自检兜底。provider 冲突
+                    // 同样拒绝（同一响应不可能来自两家 provider）。
+                    if stored.credited_agent != candidate_event.credited_agent {
                         events.remove(&identity);
                         rejected_keys.insert(identity);
                         diagnostics.rejected_events += 1;
@@ -328,7 +368,9 @@ impl AgentAdapter for PiAdapter {
             .into_values()
             .map(|event| {
                 UsageEvent::new(
-                    self.id(),
+                    // 归属在 adapter 层落库：pi 是 harness，GLM/Qwen 等 coding
+                    // plan 的用量记到对应计量 Agent（见 `pi_providers`）。
+                    event.credited_agent,
                     event.event_key,
                     event.timestamp,
                     event.session_id,
@@ -410,6 +452,76 @@ mod tests {
 
     const HEADER: &str = r#"{"type":"session","version":3,"id":"01a01c94-3c09-7714-b020-f054ef4540aa","timestamp":"2026-08-20T00:31:11.882Z","cwd":"D:\\work\\usage"}"#;
 
+    /// pi 会话里混用多家 provider 时，各事件归属各自的计量 Agent；
+    /// 摘要生成跟随会话当前 provider；直连 provider 留在 pi。
+    #[test]
+    fn provider_determines_the_credited_agent_per_event() {
+        let path = session_file(
+            "providers",
+            &concat!(
+                r#"{"type":"session","id":"ses-mixed","cwd":"/tmp"}"#,
+                "\n",
+                r#"{"type":"message","id":"m1","timestamp":"2026-08-20T00:32:00.000Z","message":{"role":"assistant","provider":"zai-coding-cn","model":"glm-5.3","responseId":"r-glm","usage":{"input":100,"output":10,"totalTokens":110}}}"#,
+                "\n",
+                r#"{"type":"message","id":"m2","timestamp":"2026-08-20T00:33:00.000Z","message":{"role":"assistant","provider":"qwen-token-plan-cn","model":"qwen3.8-max","responseId":"r-qwen","usage":{"input":200,"output":20,"totalTokens":220}}}"#,
+                "\n",
+                r#"{"type":"message","id":"m3","timestamp":"2026-08-20T00:34:00.000Z","message":{"role":"assistant","provider":"anthropic","model":"claude-sonnet-5","responseId":"r-direct","usage":{"input":50,"output":5,"totalTokens":55}}}"#,
+                "\n",
+                // 摘要生成发生在最后一条 assistant 之后：会话当前 provider 是 anthropic，
+                // 但摘要本身计费跟随它——这里断言它留在 pi（直连不经过既有额度）。
+                // 换成 GLM 在前的会话时，compaction 会归 zcode（见下一个测试）。
+                r#"{"type":"compaction","id":"c1","timestamp":"2026-08-20T00:35:00.000Z","summary":"…","tokensBefore":50000,"usage":{"input":80,"output":8,"totalTokens":88}}"#,
+                "\n",
+            ),
+        );
+
+        let parsed = PiAdapter::with_roots(vec![])
+            .parse(&candidate_for(&path), i64::MIN)
+            .unwrap();
+
+        let by_key = |key: &str| {
+            parsed
+                .source
+                .events
+                .iter()
+                .find(|event| event.event_key == key)
+                .unwrap_or_else(|| panic!("missing {key}"))
+        };
+        assert_eq!(by_key("response:r-glm").adapter_id, "zcode");
+        assert_eq!(by_key("response:r-qwen").adapter_id, "qwen");
+        assert_eq!(by_key("response:r-direct").adapter_id, "pi");
+        assert_eq!(by_key("compaction:c1").adapter_id, "pi");
+        std::fs::remove_file(path).ok();
+    }
+
+    /// compaction 前最后一条 assistant 是 GLM 时，摘要生成的用量归属 zcode。
+    #[test]
+    fn compaction_follows_the_session_provider() {
+        let path = session_file(
+            "compaction-provider",
+            &concat!(
+                r#"{"type":"session","id":"ses-glm","cwd":"/tmp"}"#,
+                "\n",
+                r#"{"type":"message","id":"m1","timestamp":"2026-08-20T00:32:00.000Z","message":{"role":"assistant","provider":"zai-coding-cn","model":"glm-5.3","responseId":"r-glm","usage":{"input":100,"output":10,"totalTokens":110}}}"#,
+                "\n",
+                r#"{"type":"compaction","id":"c1","timestamp":"2026-08-20T00:35:00.000Z","summary":"…","tokensBefore":50000,"usage":{"input":80,"output":8,"totalTokens":88}}"#,
+                "\n",
+            ),
+        );
+
+        let parsed = PiAdapter::with_roots(vec![])
+            .parse(&candidate_for(&path), i64::MIN)
+            .unwrap();
+        let compaction = parsed
+            .source
+            .events
+            .iter()
+            .find(|event| event.event_key == "compaction:c1")
+            .unwrap();
+        assert_eq!(compaction.adapter_id, "zcode");
+        std::fs::remove_file(path).ok();
+    }
+
     #[test]
     fn assistant_usage_is_counted_with_response_identity_and_header_cwd() {
         // 字段形状取自本机真实日志（zai-coding-cn / glm-5.3）。
@@ -430,6 +542,8 @@ mod tests {
         assert_eq!(parsed.source.events.len(), 1);
         let event = &parsed.source.events[0];
         assert_eq!(event.event_key, "response:202608171505273491557405ff476a");
+        // pi 是 harness：zai-coding-cn 的用量归属 GLM（zcode）卡片。
+        assert_eq!(event.adapter_id, "zcode");
         assert_eq!(event.tokens.input_uncached, 2_882);
         assert_eq!(event.tokens.cache_read, 1_088);
         assert_eq!(event.tokens.output, 561);
@@ -452,7 +566,7 @@ mod tests {
             &concat!(
                 r#"{"type":"session","version":3,"id":"ses-1","cwd":"/tmp"}"#,
                 "\n",
-                r#"{"type":"message","id":"c6115304","timestamp":"2026-08-19T00:30:00.000Z","message":{"role":"assistant","provider":"zai-coding-cn","model":"glm-5.3","usage":{"input":100,"output":20,"cacheRead":0,"cacheWrite":0,"totalTokens":120},"stopReason":"aborted"}}"#,
+                r#"{"type":"message","id":"c6115304","timestamp":"2026-08-19T00:30:00.000Z","message":{"role":"assistant","model":"glm-5.3","usage":{"input":100,"output":20,"cacheRead":0,"cacheWrite":0,"totalTokens":120},"stopReason":"aborted"}}"#,
                 "\n",
             ),
         );
@@ -463,6 +577,8 @@ mod tests {
 
         assert_eq!(parsed.source.events.len(), 1);
         assert_eq!(parsed.source.events[0].event_key, "fallback:c6115304");
+        // 无 provider 的 aborted 消息留在 pi 名下。
+        assert_eq!(parsed.source.events[0].adapter_id, "pi");
         assert_eq!(parsed.source.events[0].tokens.processed(), 120);
         std::fs::remove_file(path).ok();
     }
