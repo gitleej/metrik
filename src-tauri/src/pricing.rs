@@ -22,6 +22,15 @@
 //! 按裸模型名匹配）。OpenCode、Antigravity 等直连这些官方 API 的用量因此可以
 //! 计价（如 kimi-k2.5、glm-4.6、gemini-3-flash-preview）。
 //!
+//! 生成表覆盖不到的官方 API（DeepSeek、阿里云百炼的 Qwen）按官方定价页手动
+//! 补在 MANUAL_PRICING，规则不变：只认官方第一方价目，不借第三方转售价。
+//!
+//! ## 分时定价
+//!
+//! DeepSeek 按 UTC 时段分峰谷，谷段是峰段的 5 折。所以 `price_for` 收事件
+//! 时间戳：成本必须逐事件计价，先按模型汇总再乘单价会把时段信息抹掉。
+//! 表里存峰段（标准）价，谷段在查表时打折，见 OFF_PEAK_HALF_PRICE。
+//!
 //! 订阅制 coding plan 的专属模型 ID 一律 unpriced：Kimi Code 的 kimi-for-coding 等。
 //! 订阅额度按周期重置、不按 token 卖；
 //! LiteLLM 里那些名字的 Bedrock/Azure/Cloudflare 条目是第三方转售价，拿来当
@@ -54,6 +63,18 @@ pub struct Pricing {
     pub output: f64,
 }
 
+impl Pricing {
+    /// 谷段 5 折：四个分量同比例打折（DeepSeek 官方谷段价正是峰段的一半）。
+    fn halved(self) -> Self {
+        Self {
+            input: self.input / 2.0,
+            cache_read: self.cache_read / 2.0,
+            cache_write: self.cache_write / 2.0,
+            output: self.output / 2.0,
+        }
+    }
+}
+
 /// 手动补充的官方第一方价目（生成表之外）：模型太新、LiteLLM 尚未收录时
 /// 按官方定价页临时补齐，收录后即可删。查找时先于生成表命中。
 /// 来源：
@@ -64,7 +85,32 @@ pub struct Pricing {
 ///   佐证来源可信）。缓存写入官方标注限时免费 → 记 0。
 /// - glm-5.3：同页（2026-08-20 核对），官方定价与 glm-5.2 相同：输入 $1.4/M、
 ///   缓存命中 $0.26/M、输出 $4.4/M。同价是官方定价如此，不是沿用旧价。
+/// - deepseek-v4-pro / deepseek-v4-flash：DeepSeek 官方定价页
+///   api-docs.deepseek.com/quick_start/pricing（2026-08-20 核对）。存的是峰段
+///   标准价，谷段由 OFF_PEAK_HALF_PRICE 打 5 折。缓存写入官方不单独计费 → 记 0。
+/// - qwen3.8-max：阿里云百炼（2026-08-20 核对）。输入 $2/M、输出 $6/M 是官方
+///   公布价；缓存两项官方尚未逐模型列出，按百炼计费文档的通用规则推算——
+///   命中按输入价 10%（$0.2/M）、显式缓存写入按 125%（$2.5/M）。这两项是
+///   规则推算不是逐模型报价，官方列出后应替换。
 const MANUAL_PRICING: &[(&str, Pricing)] = &[
+    (
+        "deepseek-v4-flash",
+        Pricing {
+            input: 0.44,
+            cache_read: 0.014,
+            cache_write: 0.0,
+            output: 1.32,
+        },
+    ),
+    (
+        "deepseek-v4-pro",
+        Pricing {
+            input: 1.32,
+            cache_read: 0.044,
+            cache_write: 0.0,
+            output: 3.96,
+        },
+    ),
     (
         "glm-5-turbo",
         Pricing {
@@ -101,7 +147,21 @@ const MANUAL_PRICING: &[(&str, Pricing)] = &[
             output: 15.0,
         },
     ),
+    (
+        "qwen3.8-max",
+        Pricing {
+            input: 2.0,
+            cache_read: 0.2,
+            cache_write: 2.5,
+            output: 6.0,
+        },
+    ),
 ];
+
+/// 官方按 UTC 时段分价的模型：谷段单价 = 表内标准价 × 0.5。
+/// DeepSeek 定价页（2026-08-20 核对）：峰段 01:00–04:00 与 06:00–10:00 UTC，
+/// 其余时段为谷段、5 折。表内存峰段标准价，与其他模型「存官方标价」一致。
+const OFF_PEAK_HALF_PRICE: &[&str] = &["deepseek-v4-flash", "deepseek-v4-pro"];
 
 /// 订阅制 coding plan 的模型 ID → 同一模型的官方第一方 API 价（估算口径）。
 /// 仅限"同一模型"，且要有官方佐证，不是看名字像就归一：
@@ -112,6 +172,9 @@ const MANUAL_PRICING: &[(&str, Pricing)] = &[
 /// - Grok Build 订阅记的 `grok-4.5-build`：docs.x.ai 模型页里 grok-4.5 的官方
 ///   别名就含 `grok-build-latest`（Build 产品线 = grok-4.5，2026-08-19 核对），
 ///   故按 grok-4.5 官方 API 价估算。
+/// - Codex 自动评审记的 `codex-auto-review`：OpenAI 官方页
+///   alignment.openai.com/auto-review 明写「Auto-review uses GPT-5.4 Thinking
+///   (low reasoning)」（2026-08-20 核对），故按 gpt-5.4 官方 API 价估算。
 ///
 /// 没有官方价的订阅 ID（kimi-for-coding 等）继续 unpriced。
 const SUBSCRIPTION_ALIASES: &[(&str, &str)] = &[
@@ -119,14 +182,45 @@ const SUBSCRIPTION_ALIASES: &[(&str, &str)] = &[
     ("GLM-5.3", "glm-5.3"),
     ("kimi-code/k3", "kimi-k3"),
     ("grok-4.5-build", "grok-4.5"),
+    ("codex-auto-review", "gpt-5.4"),
 ];
 
-/// 返回 `model` 的定价；表里没有则返回 `None`（调用方归入 unpriced，
-/// 不得臆造价格）。见模块文档：只精确匹配，日期快照后缀与订阅别名除外。
-pub fn price_for(model: &str) -> Option<Pricing> {
-    exact(model)
-        .or_else(|| exact(strip_date_suffix(model)?))
-        .or_else(|| subscription_alias(model).and_then(exact))
+/// 返回 `model` 在 `occurred_at_ms` 时刻的定价；表里没有则返回 `None`
+/// （调用方归入 unpriced，不得臆造价格）。见模块文档：只精确匹配，日期快照
+/// 后缀与订阅别名除外。时间戳只对 OFF_PEAK_HALF_PRICE 里的模型有影响，
+/// 其余模型全天一价。
+pub fn price_for(model: &str, occurred_at_ms: i64) -> Option<Pricing> {
+    let (canonical, price) = resolve(model)?;
+    Some(if in_off_peak(canonical, occurred_at_ms) {
+        price.halved()
+    } else {
+        price
+    })
+}
+
+/// 归一到表里的规范名，连同标准价一起返回。规范名（而不是调用方传进来的
+/// 别名）才是查分时定价的依据。
+fn resolve(model: &str) -> Option<(&str, Pricing)> {
+    if let Some(pricing) = exact(model) {
+        return Some((model, pricing));
+    }
+    if let Some(base) = strip_date_suffix(model) {
+        if let Some(pricing) = exact(base) {
+            return Some((base, pricing));
+        }
+    }
+    let target = subscription_alias(model)?;
+    exact(target).map(|pricing| (target, pricing))
+}
+
+/// DeepSeek 峰段是 01:00–04:00 与 06:00–10:00 UTC（左闭右开），其余为谷段。
+fn in_off_peak(canonical: &str, occurred_at_ms: i64) -> bool {
+    if !OFF_PEAK_HALF_PRICE.contains(&canonical) {
+        return false;
+    }
+    // Unix 纪元起点就是 UTC 00:00，UTC 又没有夏令时，整除即可，不必引 chrono。
+    let hour = occurred_at_ms.div_euclid(3_600_000).rem_euclid(24);
+    !((1..4).contains(&hour) || (6..10).contains(&hour))
 }
 
 fn exact(model: &str) -> Option<Pricing> {
@@ -161,6 +255,10 @@ fn strip_date_suffix(model: &str) -> Option<&str> {
 mod tests {
     use super::*;
 
+    /// 峰谷之外的模型全天一价，用哪个时刻都一样；固定一个（2026-08-20 12:30
+    /// UTC）省得每条断言各写各的。
+    const ANY_TIME_MS: i64 = 1_787_229_000_000;
+
     #[test]
     fn table_is_sorted_and_nonempty_so_binary_search_is_valid() {
         assert!(PRICING_TABLE.len() > 50, "生成的价格表异常地小");
@@ -172,22 +270,25 @@ mod tests {
 
     #[test]
     fn dated_snapshot_falls_back_to_the_undated_alias() {
-        let base = price_for("claude-haiku-4-5").expect("priced");
+        let base = price_for("claude-haiku-4-5", ANY_TIME_MS).expect("priced");
         // LiteLLM 恰好也收录了这个日期版；剥后缀的回退对它未收录的新快照才关键。
-        let dated = price_for("claude-haiku-4-5-20251001").expect("priced");
+        let dated = price_for("claude-haiku-4-5-20251001", ANY_TIME_MS).expect("priced");
         assert_eq!(base.input, dated.input);
         assert_eq!(base.output, dated.output);
 
         // 表里没有的未来快照，靠剥后缀命中别名。
-        let future = price_for("claude-opus-4-8-20260401").expect("priced");
-        assert_eq!(future.input, price_for("claude-opus-4-8").unwrap().input);
+        let future = price_for("claude-opus-4-8-20260401", ANY_TIME_MS).expect("priced");
+        assert_eq!(
+            future.input,
+            price_for("claude-opus-4-8", ANY_TIME_MS).unwrap().input
+        );
     }
 
     #[test]
     fn new_generation_never_borrows_an_older_models_price() {
         // 这是回归测试：前缀匹配曾让 gpt-5.6-sol 命中 gpt-5 的价格，低估 74%。
-        let sol = price_for("gpt-5.6-sol").expect("priced");
-        let five = price_for("gpt-5").expect("priced");
+        let sol = price_for("gpt-5.6-sol", ANY_TIME_MS).expect("priced");
+        let five = price_for("gpt-5", ANY_TIME_MS).expect("priced");
         assert_ne!(
             sol.input, five.input,
             "gpt-5.6-sol 必须用自己的价格，不能退回 gpt-5",
@@ -202,35 +303,35 @@ mod tests {
     fn subscription_only_model_ids_stay_unpriced() {
         // 订阅 coding plan 的专属 ID 没有官方按 token 价目：不得借第三方
         // 转售价或同系模型的价格蒙混（Kimi Code 订阅等）。
-        assert!(price_for("kimi-code/kimi-for-coding").is_none());
-        assert!(price_for("kimi-for-coding").is_none());
+        assert!(price_for("kimi-code/kimi-for-coding", ANY_TIME_MS).is_none());
+        assert!(price_for("kimi-for-coding", ANY_TIME_MS).is_none());
         // 有 -preview 后缀的官方价也不补给稳定版名字。
-        assert!(price_for("gemini-3.1-pro").is_none());
+        assert!(price_for("gemini-3.1-pro", ANY_TIME_MS).is_none());
     }
 
     #[test]
     fn glm_priced_from_official_rates_including_case_alias() {
         // z.ai 官方定价页（2026-07-20 核对）：glm-5.2 输入 $1.4、缓存 $0.26、
         // 输出 $4.4；glm-5-turbo 输入 $1.2、缓存 $0.24、输出 $4.0。
-        let direct = price_for("glm-5.2").expect("glm-5.2 priced");
+        let direct = price_for("glm-5.2", ANY_TIME_MS).expect("glm-5.2 priced");
         assert_eq!(direct.input, 1.4);
         assert_eq!(direct.cache_read, 0.26);
         assert_eq!(direct.output, 4.4);
-        let turbo = price_for("glm-5-turbo").expect("glm-5-turbo priced");
+        let turbo = price_for("glm-5-turbo", ANY_TIME_MS).expect("glm-5-turbo priced");
         assert_eq!(turbo.input, 1.2);
         assert_eq!(turbo.output, 4.0);
         // ZCode coding-plan 记的大写 GLM-5.2 是同一模型的大小写变体，同价。
-        let aliased = price_for("GLM-5.2").expect("alias priced");
+        let aliased = price_for("GLM-5.2", ANY_TIME_MS).expect("alias priced");
         assert_eq!(aliased.input, direct.input);
         assert_eq!(aliased.output, direct.output);
 
         // glm-5.3 官方定价与 5.2 相同（2026-08-20 核对）；claude/pi 适配器记
         // 小写裸名，ZCode 记大写，两种写法都要计价。
-        let five_three = price_for("glm-5.3").expect("glm-5.3 priced");
+        let five_three = price_for("glm-5.3", ANY_TIME_MS).expect("glm-5.3 priced");
         assert_eq!(five_three.input, 1.4);
         assert_eq!(five_three.cache_read, 0.26);
         assert_eq!(five_three.output, 4.4);
-        let five_three_upper = price_for("GLM-5.3").expect("alias priced");
+        let five_three_upper = price_for("GLM-5.3", ANY_TIME_MS).expect("alias priced");
         assert_eq!(five_three_upper.input, five_three.input);
         assert_eq!(five_three_upper.output, five_three.output);
     }
@@ -239,16 +340,16 @@ mod tests {
     fn kimi_k3_priced_from_official_rates_including_subscription_alias() {
         // 手动补充的官方价（LiteLLM 未收录时临时补齐）：K3 输入 $3、
         // 缓存 $0.3、输出 $15（2026-07-18 官方定价页核对）。
-        let direct = price_for("kimi-k3").expect("kimi-k3 priced");
+        let direct = price_for("kimi-k3", ANY_TIME_MS).expect("kimi-k3 priced");
         assert_eq!(direct.input, 3.0);
         assert_eq!(direct.cache_read, 0.3);
         assert_eq!(direct.output, 15.0);
         // 窄例外：Kimi Code 订阅的 kimi-code/k3 就是 K3 本身，按同一官方价估算。
-        let aliased = price_for("kimi-code/k3").expect("alias priced");
+        let aliased = price_for("kimi-code/k3", ANY_TIME_MS).expect("alias priced");
         assert_eq!(aliased.input, direct.input);
         assert_eq!(aliased.output, direct.output);
         // 其他订阅 ID 仍不得蒙混（见上一条测试）。
-        assert!(price_for("kimi-code/k4").is_none());
+        assert!(price_for("kimi-code/k4", ANY_TIME_MS).is_none());
     }
 
     #[test]
@@ -257,40 +358,91 @@ mod tests {
         // docs.x.ai 模型页 grok-4.5 的官方别名含 grok-build-latest（Build
         // 产品线 = grok-4.5；in $2 / cache $0.30 / out $6，2026-08-19 与
         // LiteLLM 交叉一致）。直连 xAI API 的裸名也照表计价。
-        let aliased = price_for("grok-4.5-build").expect("alias priced");
+        let aliased = price_for("grok-4.5-build", ANY_TIME_MS).expect("alias priced");
         assert_eq!(aliased.input, 2.0);
         assert_eq!(aliased.cache_read, 0.3);
         assert_eq!(aliased.output, 6.0);
-        let direct = price_for("grok-4.5").expect("api name priced");
+        let direct = price_for("grok-4.5", ANY_TIME_MS).expect("api name priced");
         assert_eq!(direct.input, aliased.input);
         assert_eq!(direct.output, aliased.output);
         // 未佐证的其他订阅变体不得蒙混：前缀匹配是事故，不重演。
-        assert!(price_for("grok-4.6-build").is_none());
+        assert!(price_for("grok-4.6-build", ANY_TIME_MS).is_none());
     }
 
     #[test]
     fn first_party_api_models_are_priced_by_bare_name() {
         // OpenCode / Antigravity 等直连官方 API 的用量按第一方价目计价
         // （LiteLLM 键的 provider 前缀在生成时已剥掉）。
-        assert!(price_for("kimi-k2.5").is_some());
-        assert!(price_for("glm-4.6").is_some());
-        assert!(price_for("gemini-3-flash-preview").is_some());
-        assert!(price_for("gemini-2.5-pro").is_some());
+        assert!(price_for("kimi-k2.5", ANY_TIME_MS).is_some());
+        assert!(price_for("glm-4.6", ANY_TIME_MS).is_some());
+        assert!(price_for("gemini-3-flash-preview", ANY_TIME_MS).is_some());
+        assert!(price_for("gemini-2.5-pro", ANY_TIME_MS).is_some());
         // xAI 两个易混淆的裸名都要在表：4.6 的缓存价与 4.5 不同，
         // grok-build-0.1 是独立定价的代码快模型（别名 grok-code-fast 族）。
         // 钉在测试里：LiteLLM 若将来掉条目，重新生成会静默失价。
-        let forty_six = price_for("grok-4.6").expect("grok-4.6 priced");
+        let forty_six = price_for("grok-4.6", ANY_TIME_MS).expect("grok-4.6 priced");
         assert_eq!(forty_six.cache_read, 0.5);
-        let build_code = price_for("grok-build-0.1").expect("grok-build-0.1 priced");
+        let build_code = price_for("grok-build-0.1", ANY_TIME_MS).expect("grok-build-0.1 priced");
         assert_eq!(build_code.input, 1.0);
         assert_eq!(build_code.output, 2.0);
     }
 
     #[test]
+    fn deepseek_switches_between_peak_and_off_peak_rates() {
+        // DeepSeek 官方定价页（2026-08-20 核对）：峰段 01:00–04:00 与
+        // 06:00–10:00 UTC 是标准价，其余时段 5 折。表内存峰段价。
+        let peak = price_for("deepseek-v4-pro", 1_787_193_000_000).expect("peak priced");
+        assert_eq!(peak.input, 1.32);
+        assert_eq!(peak.cache_read, 0.044);
+        assert_eq!(peak.output, 3.96);
+        let off_peak = price_for("deepseek-v4-pro", 1_787_229_000_000).expect("off-peak priced");
+        assert_eq!(off_peak.input, 0.66);
+        assert_eq!(off_peak.cache_read, 0.022);
+        assert_eq!(off_peak.output, 1.98);
+
+        // 边界左闭右开：09:30 还在峰段，10:30 已经出峰段。
+        assert_eq!(
+            price_for("deepseek-v4-pro", 1_787_218_200_000)
+                .unwrap()
+                .input,
+            1.32,
+        );
+        assert_eq!(
+            price_for("deepseek-v4-pro", 1_787_221_800_000)
+                .unwrap()
+                .input,
+            0.66,
+        );
+
+        // 分时只对 DeepSeek 生效，别的模型全天一价。
+        let glm_peak = price_for("glm-5.3", 1_787_193_000_000).expect("priced");
+        let glm_off = price_for("glm-5.3", 1_787_229_000_000).expect("priced");
+        assert_eq!(glm_peak.input, glm_off.input);
+    }
+
+    #[test]
+    fn qwen_and_codex_auto_review_are_priced_from_official_sources() {
+        // 阿里云百炼 qwen3.8-max：输入 $2、输出 $6 是官方公布价；缓存两项按
+        // 官方计费规则推算（命中 10%、显式缓存写入 125%）。
+        let qwen = price_for("qwen3.8-max", ANY_TIME_MS).expect("qwen3.8-max priced");
+        assert_eq!(qwen.input, 2.0);
+        assert_eq!(qwen.cache_read, 0.2);
+        assert_eq!(qwen.cache_write, 2.5);
+        assert_eq!(qwen.output, 6.0);
+
+        // codex-auto-review 按 OpenAI 官方声明的 GPT-5.4 计价，不是自成一档。
+        let review = price_for("codex-auto-review", ANY_TIME_MS).expect("alias priced");
+        let gpt = price_for("gpt-5.4", ANY_TIME_MS).expect("gpt-5.4 priced");
+        assert_eq!(review.input, gpt.input);
+        assert_eq!(review.cache_read, gpt.cache_read);
+        assert_eq!(review.output, gpt.output);
+    }
+
+    #[test]
     fn unknown_model_is_unpriced() {
-        assert!(price_for("unknown").is_none());
-        assert!(price_for("").is_none());
+        assert!(price_for("unknown", ANY_TIME_MS).is_none());
+        assert!(price_for("", ANY_TIME_MS).is_none());
         // 未知模型带日期后缀也不能靠剥后缀蒙混过关。
-        assert!(price_for("totally-made-up-20260101").is_none());
+        assert!(price_for("totally-made-up-20260101", ANY_TIME_MS).is_none());
     }
 }
