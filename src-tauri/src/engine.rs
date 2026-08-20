@@ -1,6 +1,6 @@
 use crate::adapters::{
     AgentAdapter, AntigravityAdapter, ClaudeAdapter, CodexAdapter, GrokAdapter, KimiAdapter,
-    OpencodeAdapter, ScanDiagnostics, SourceCandidate, WorkbuddyAdapter, ZcodeAdapter,
+    OpencodeAdapter, PiAdapter, ScanDiagnostics, SourceCandidate, WorkbuddyAdapter, ZcodeAdapter,
 };
 use crate::claude_oauth;
 use crate::detect;
@@ -733,6 +733,7 @@ fn ingest_sources(connection: &mut Connection, horizon_ms: i64) -> Result<ScanRe
         Box::new(AntigravityAdapter::detected()),
         Box::new(WorkbuddyAdapter::detected()),
         Box::new(GrokAdapter::detected()),
+        Box::new(PiAdapter::detected()),
     ];
     let mut report = ScanReport::default();
     let mut queue: Vec<(usize, SourceCandidate)> = Vec::new();
@@ -1465,7 +1466,7 @@ fn source_views(report: ScanReport, sync_status: Option<SyncView>) -> Vec<Source
             kind: "local".into(),
             label: "Kimi 本地 Token".into(),
             detail: format!(
-                "发现 {} 个 wire.jsonl，本次更新 {} 个。{}只计单轮增量（usageScope=turn）与旧版 StatusUpdate（按 message_id 取分量最大值）；未安装 Kimi 时保持为 0，不做推算。尚未在装有 Kimi 的机器上实机验收。",
+                "发现 {} 个 wire.jsonl，本次更新 {} 个。{}只计单轮增量（usageScope=turn）与旧版 StatusUpdate（按 message_id 取分量最大值）；Kimi Work 桌面版内嵌同源内核，其会话目录一并扫描，项目归属取自各自的会话索引；未安装时保持为 0，不做推算。",
                 discovered("kimi"),
                 refreshed("kimi"),
                 coverage_detail(&kimi_diagnostics, errors("kimi"))
@@ -1522,6 +1523,45 @@ fn source_views(report: ScanReport, sync_status: Option<SyncView>) -> Vec<Source
             kind: "official".into(),
             label: "Grok Build 官方配额".into(),
             detail: "读取 Grok CLI 统一日志中的 billing credits 快照（creditUsagePercent + 周期结束时间）；质量为官方快照，非实时 HTTP 拉取。未运行过 grok 或日志无账单记录时显示不可用。".into(),
+            quality: "official".into(),
+            quality_label: "官方".into(),
+        },
+        SourceView {
+            id: "pi-local".into(),
+            kind: "local".into(),
+            label: "Pi 本地 Token".into(),
+            detail: format!(
+                "发现 {} 个会话文件，本次更新 {} 个。{}逐请求计数按 provider 响应标识去重，fork/clone 复制不重复入账；摘要生成与工具内嵌调用的用量一并计入；项目归属只取会话头里的工作目录。",
+                discovered("pi"),
+                refreshed("pi"),
+                coverage_detail(&diagnostics("pi"), errors("pi"))
+            ),
+            quality: if diagnostics("pi").partial_sources > 0 || errors("pi") > 0 {
+                "partial"
+            } else {
+                "exact"
+            }
+            .into(),
+            quality_label: if diagnostics("pi").partial_sources > 0 || errors("pi") > 0 {
+                "数据不完整"
+            } else {
+                "精确解析"
+            }
+            .into(),
+        },
+        SourceView {
+            id: "pi-quota".into(),
+            kind: "official".into(),
+            label: "Pi 官方配额".into(),
+            detail: "用 pi 自己存储的 GLM Coding Plan key（~/.pi/agent/auth.json）直查官方接口，得 5 小时与每周滚动窗；key 仅在内存中用于一次请求，不入库不同步。同一账户的额度与 GLM 卡片读数同源。".into(),
+            quality: "official".into(),
+            quality_label: "官方".into(),
+        },
+        SourceView {
+            id: "qwen-quota".into(),
+            kind: "official".into(),
+            label: "Qwen Token Plan 官方配额".into(),
+            detail: "阿里百炼个人 Token Plan 是账户级套餐（pi 等客户端用它的 sk-sp- key 消耗），额度只能从百炼控制台读取：用你提供的登录 cookie 查询 5 小时与每周滚动窗，cookie 仅明文保存在本机、不入账本不同步，可随时清除。".into(),
             quality: "official".into(),
             quality_label: "官方".into(),
         },
@@ -3052,6 +3092,7 @@ mod tests {
             Box::new(OpencodeAdapter::detected()),
             Box::new(KimiAdapter::detected()),
             Box::new(WorkbuddyAdapter::detected()),
+            Box::new(PiAdapter::detected()),
         ];
 
         for adapter in adapters {

@@ -82,7 +82,11 @@ for asset in \
   zcode-app-icon.png \
   opencode-app-icon.png \
   kimi-app-icon.png \
-  antigravity-app-icon.png
+  antigravity-app-icon.png \
+  workbuddy-app-icon.png \
+  qoder-app-icon.png \
+  grok-app-icon.png \
+  pi-app-icon.png \n  qwen-app-icon.png
 do
   ditto "$PROJECT_DIR/src/assets/$asset" "$APPEX_RESOURCES/$asset"
 done

@@ -311,11 +311,18 @@ fn insert_or_merge_usage_event(
     // growing counts. Same shape as Claude — merge component-wise maxima.
     let mergeable_antigravity_response =
         event.adapter_id == "antigravity" && event.event_key.starts_with("response:");
-    let mergeable = mergeable_claude_message || mergeable_antigravity_response;
+    // Pi entries are final values, but /fork and /clone copy them verbatim into a
+    // new session file: the copied observation carries the new session id in its
+    // payload, so strict matching would reject the copy as a collision. Merge
+    // component-wise maxima (identical copies are no-ops) and reject only a
+    // contradictory model, exactly like Claude.
+    let mergeable_pi_entry = event.adapter_id == "pi";
+    let mergeable =
+        mergeable_claude_message || mergeable_antigravity_response || mergeable_pi_entry;
     // A contradictory model makes the provider message ambiguous. Reject only
     // this observation; the caller will commit the source's other valid events
     // and surface partial coverage through scan diagnostics.
-    if mergeable_claude_message {
+    if mergeable_claude_message || mergeable_pi_entry {
         if let (Some(stored_model), Some(candidate_model)) =
             (stored.model.as_deref(), event.model.as_deref())
         {
@@ -688,6 +695,67 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM usage_event", [], |row| row.get(0))
             .unwrap();
         assert_eq!(count, 1);
+    }
+
+    /// pi 的 /fork、/clone 把同一 responseId 的条目原样复制进新会话文件；
+    /// 复制品的 payload 带新会话 id，必须在账本层合并为一个事件，而不是报
+    /// 身份冲突把整个源打掉。
+    #[test]
+    fn pi_fork_copy_observes_one_event() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(include_str!("../migrations/001_init.sql"))
+            .unwrap();
+        let tokens = TokenVector {
+            input_uncached: 2882,
+            cache_read: 1088,
+            output: 561,
+            ..Default::default()
+        };
+        let original = UsageEvent::new(
+            "pi",
+            "response:resp-1".into(),
+            100,
+            "session-parent".into(),
+            Some("glm-5.3".into()),
+            tokens.clone(),
+            "exact",
+        );
+        let copied = UsageEvent::new(
+            "pi",
+            "response:resp-1".into(),
+            100,
+            "session-fork".into(),
+            Some("glm-5.3".into()),
+            tokens,
+            "exact",
+        );
+
+        replace_source(
+            &mut connection,
+            &source("source-parent", "pi", vec![original]),
+            0,
+        )
+        .unwrap();
+        replace_source(
+            &mut connection,
+            &source("source-fork", "pi", vec![copied]),
+            0,
+        )
+        .unwrap();
+
+        let (events, observations, processed): (i64, i64, i64) = connection
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM usage_event),
+                        (SELECT COUNT(*) FROM event_observation),
+                        (SELECT MAX(processed_tokens) FROM usage_event)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(events, 1, "fork 副本必须并入同一事件");
+        assert_eq!(observations, 2, "两个源各自登记观察");
+        assert_eq!(processed, 4_531, "相同分量合并后不叠加");
     }
 
     #[test]

@@ -29,6 +29,11 @@ struct MetrikWidgetAgent: Decodable, Identifiable {
         case "opencode": ("opencode-app-icon", "png")
         case "kimi": ("kimi-app-icon", "png")
         case "antigravity": ("antigravity-app-icon", "png")
+        case "workbuddy": ("workbuddy-app-icon", "png")
+        case "qoder": ("qoder-app-icon", "png")
+        case "grok": ("grok-app-icon", "png")
+        case "pi": ("pi-app-icon", "png")
+        case "qwen": ("qwen-app-icon", "png")
         default: nil
         }
     }

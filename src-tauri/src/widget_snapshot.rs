@@ -92,6 +92,8 @@ fn agent_label(id: &str) -> &'static str {
         "antigravity" => "Antigravity",
         "workbuddy" => "WorkBuddy",
         "qoder" => "Qoder",
+        "pi" => "Pi",
+        "qwen" => "Qwen",
         _ => "Agent",
     }
 }
@@ -269,6 +271,7 @@ mod tests {
         assert_eq!(agent_label("codex"), "ChatGPT");
         assert_eq!(agent_label("zcode"), "GLM");
         assert_eq!(agent_label("opencode"), "OpenCode");
+        assert_eq!(agent_label("pi"), "Pi");
     }
 
     fn snapshot_with_agents(ids: &[&str]) -> UsageSnapshot {

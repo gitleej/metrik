@@ -40,12 +40,21 @@ change.
 - Gemini CLI is explicitly outside the supported scope.
 - Kimi Code and Kimi Work are one visible agent and one quota identity: show
   only `Kimi`. Their credential sources stay separate internally, while
-  duplicate official windows keep the fresher reliable sample. The monthly OMNI
+  duplicate official windows keep the fresher reliable sample. Usage from both
+  is collected under the same `Kimi` counter: Kimi Work embeds the same
+  kimi-code kernel and writes the same wire.jsonl under its daimon runtime
+  home, with project attribution from its session index. The monthly OMNI
   cycle remains visible; gift and booster balances remain hidden.
 - Qoder, QoderWork, and Qoder CLI are one visible `Qoder` quota identity.
   Their account-level Credits are shared, so they must never create separate
   agent counters or be summed. Qoder CLI's local telemetry is not a token
   source when it reports zero counters.
+- Qoder Credits and the Bailian personal Token Plan (shown as `Qwen`) are
+  separate account-level quotas from the same vendor group: different plans,
+  accounts, and quota hosts. Never merge, sum, or cross-fill their windows or
+  cookies. Qwen is quota-only; token usage of clients spending its `sk-sp-`
+  key (for example Pi) stays attributed to those clients, never re-attributed
+  to the Qwen card.
 - Do not expose credentials or raw provider responses through UI, logs, storage,
   sync, fixtures, or diagnostics.
 
