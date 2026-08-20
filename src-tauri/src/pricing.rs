@@ -62,6 +62,8 @@ pub struct Pricing {
 /// - glm-5.2 / glm-5-turbo：z.ai 官方定价页 docs.z.ai/guides/overview/pricing
 ///   （2026-07-20 核对；同页 glm-5/glm-5.1 数值与 LiteLLM 生成表完全一致，
 ///   佐证来源可信）。缓存写入官方标注限时免费 → 记 0。
+/// - glm-5.3：同页（2026-08-20 核对），官方定价与 glm-5.2 相同：输入 $1.4/M、
+///   缓存命中 $0.26/M、输出 $4.4/M。同价是官方定价如此，不是沿用旧价。
 const MANUAL_PRICING: &[(&str, Pricing)] = &[
     (
         "glm-5-turbo",
@@ -74,6 +76,15 @@ const MANUAL_PRICING: &[(&str, Pricing)] = &[
     ),
     (
         "glm-5.2",
+        Pricing {
+            input: 1.4,
+            cache_read: 0.26,
+            cache_write: 0.0,
+            output: 4.4,
+        },
+    ),
+    (
+        "glm-5.3",
         Pricing {
             input: 1.4,
             cache_read: 0.26,
@@ -96,7 +107,8 @@ const MANUAL_PRICING: &[(&str, Pricing)] = &[
 /// 仅限"同一模型"，且要有官方佐证，不是看名字像就归一：
 /// - Kimi Code 订阅记的 `kimi-code/k3` 就是 kimi-k3 本身，
 ///   官方称 Extra Usage"接近开放平台官方 API 价"；成本页始终标注为估算。
-/// - ZCode coding-plan 记的 `GLM-5.2` 只是 glm-5.2 的大小写变体，同一模型。
+/// - ZCode coding-plan 记的 `GLM-5.2`、`GLM-5.3` 只是 glm-5.2、glm-5.3 的
+///   大小写变体，同一模型。
 /// - Grok Build 订阅记的 `grok-4.5-build`：docs.x.ai 模型页里 grok-4.5 的官方
 ///   别名就含 `grok-build-latest`（Build 产品线 = grok-4.5，2026-08-19 核对），
 ///   故按 grok-4.5 官方 API 价估算。
@@ -104,6 +116,7 @@ const MANUAL_PRICING: &[(&str, Pricing)] = &[
 /// 没有官方价的订阅 ID（kimi-for-coding 等）继续 unpriced。
 const SUBSCRIPTION_ALIASES: &[(&str, &str)] = &[
     ("GLM-5.2", "glm-5.2"),
+    ("GLM-5.3", "glm-5.3"),
     ("kimi-code/k3", "kimi-k3"),
     ("grok-4.5-build", "grok-4.5"),
 ];
@@ -210,6 +223,16 @@ mod tests {
         let aliased = price_for("GLM-5.2").expect("alias priced");
         assert_eq!(aliased.input, direct.input);
         assert_eq!(aliased.output, direct.output);
+
+        // glm-5.3 官方定价与 5.2 相同（2026-08-20 核对）；claude/pi 适配器记
+        // 小写裸名，ZCode 记大写，两种写法都要计价。
+        let five_three = price_for("glm-5.3").expect("glm-5.3 priced");
+        assert_eq!(five_three.input, 1.4);
+        assert_eq!(five_three.cache_read, 0.26);
+        assert_eq!(five_three.output, 4.4);
+        let five_three_upper = price_for("GLM-5.3").expect("alias priced");
+        assert_eq!(five_three_upper.input, five_three.input);
+        assert_eq!(five_three_upper.output, five_three.output);
     }
 
     #[test]
