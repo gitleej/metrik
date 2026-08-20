@@ -18,6 +18,10 @@ const AGENT_LINE_COLORS = {
   kimi: { stroke: "#c4719f", fill: "rgba(196, 113, 159, 0.09)" },
   antigravity: { stroke: "#d1a34e", fill: "rgba(209, 163, 78, 0.09)" },
   workbuddy: { stroke: "#5fa671", fill: "rgba(95, 166, 113, 0.09)" },
+  grok: { stroke: "#8a919a", fill: "rgba(138, 145, 154, 0.09)" },
+  qoder: { stroke: "#4a7fa5", fill: "rgba(74, 127, 165, 0.09)" },
+  qwen: { stroke: "#8f76e0", fill: "rgba(143, 118, 224, 0.09)" },
+  pi: { stroke: "#9aa0a6", fill: "rgba(154, 160, 166, 0.09)" },
   default: { stroke: "#5586d4", fill: "rgba(85, 134, 212, 0.09)" },
 };
 

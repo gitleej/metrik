@@ -207,8 +207,9 @@ const AGENT_META = {
     // pi（badlogic/pi-mono）是 harness：本地会话用量按 provider 归属到
     // 对应计量卡片（GLM / Qwen / 其余留 Pi）；pi 自身没有独立套餐，不显示配额。
     label: "Pi",
-    // 自制 π 字母牌（同 Grok 字母牌规格）；深红与 Claude 的珊瑚橙拉开明暗。
-    accent: "#c1121f",
+    // 官方 logo 是黑白单色几何 π（pi.dev/logo-auto.svg），非红色；
+    // 强调色取中性银灰，暗/亮主题都可见。
+    accent: "#9aa0a6",
     iconSrc: piAppIcon,
     iconClass: "agent-icon--pi",
   },
