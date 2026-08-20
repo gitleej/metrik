@@ -52,9 +52,14 @@ change.
 - Qoder Credits and the Bailian personal Token Plan (shown as `Qwen`) are
   separate account-level quotas from the same vendor group: different plans,
   accounts, and quota hosts. Never merge, sum, or cross-fill their windows or
-  cookies. Qwen is quota-only; token usage of clients spending its `sk-sp-`
-  key (for example Pi) stays attributed to those clients, never re-attributed
-  to the Qwen card.
+  cookies.
+- Pi is a harness, not a quota identity: it has no coding plan of its own.
+  Its session usage is attributed by provider — GLM Coding Plan providers to
+  the GLM card, Qwen Token Plan providers to the Qwen card, direct providers
+  (Anthropic, OpenAI, …) to the Pi card. The Pi card therefore carries local
+  usage only and never a quota; the GLM quota source additionally accepts the
+  key pi stores so a pi-only install still shows the GLM quota on the GLM
+  card.
 - Do not expose credentials or raw provider responses through UI, logs, storage,
   sync, fixtures, or diagnostics.
 

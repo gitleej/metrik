@@ -8,6 +8,7 @@ mod domain;
 mod engine;
 #[cfg(target_os = "macos")]
 mod macos;
+mod pi_providers;
 mod pricing;
 mod projects;
 mod quota;
