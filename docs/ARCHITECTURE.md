@@ -25,7 +25,7 @@ Claude statusLine hook ───┼─ official quota snapshot ─────�
 Claude OAuth (opt-in) ────┤
 Grok CLI billing log ─────┤
 GLM/Kimi/Qoder/WorkBuddy ─┤
-Pi (GLM key from pi) ─────┘
+GLM key from pi auth ─────┘
 ```
 
 The UI invokes one asynchronous Tauri command, `usage_snapshot(period)`. Blocking discovery, parsing, SQLite work, and the local quota subprocess run inside `spawn_blocking`, guarded by a single scan lock. On each request the engine:
@@ -79,7 +79,13 @@ Quota rows are replaced wholesale, never merged, so a window a plan no longer ha
 - **Codex**: `primary` and `secondary` are slots, not window semantics — a plan may carry a weekly window in the `primary` slot and have no `secondary` at all. Windows are classified by `windowDurationMins` (≤ 1440 minutes is a session window, otherwise weekly); the slot name is only a fallback when the duration is absent. A successful `app-server` read replaces the whole Codex row set.
 - **Claude**: the statusLine hook file is the zero-credential source. Every platform handles the hook natively inside `metrik --statusline`, invoked directly by Claude Code before desktop initialization; there is no external interpreter dependency. The chained delegate and the absolute quota-file path live in `metrik-statusline.json` metadata; the delegate runs through the platform shell (`cmd.exe` on Windows, `/bin/sh` on Unix) and is force-terminated by process tree/group after a 10-second timeout. Legacy generated hook scripts (`.ps1` on Windows, `.py` on Unix) are migrated to the native entry on startup. The opt-in OAuth source (off by default) reads the token Claude Code already stores and queries the official usage endpoint; the token is never persisted, uploaded, or logged. A successful read from either source replaces the whole Claude row set; a failed OAuth read falls back to the hook file rather than to a guess. That token expires within hours and only Claude Code itself renews it — on a real Mac `claude auth status --json` exited 0 reporting a logged-in account while the keychain `expiresAt` stayed ten hours in the past, and `claude auth` exposes no refresh command. Metrik does not spend the stored refresh token, since rotation would invalidate the copy Claude Code holds and could log the user out of their own client; an expired token short-circuits to the hook instead of spending a request that would be rejected.
 - **Qoder**: Qoder, QoderWork, and Qoder CLI share one account-level Credits quota. The existing dashboard-cookie source reads that one quota only; it does not decrypt CLI credentials. Qoder CLI local telemetry with zero token counters is ignored rather than counted.
-- **Pi**: the quota reads the GLM Coding Plan through the API key pi itself stores in `~/.pi/agent/auth.json` (`zai-coding-cn` or `zai`), against the same already-verified z.ai/bigmodel response shape the GLM card uses. The key is used in memory for one request only. `qwen-token-plan*` keys in the same file belong to a different Bailian product and are not used by this source.
+- **Pi**: pi is a harness, not a quota identity — it has no coding plan of its
+  own. Its session usage is attributed per provider: GLM Coding Plan providers
+  (`zai*`) count under the GLM card, Qwen Token Plan providers under the Qwen
+  card, and direct providers (Anthropic, OpenAI, …) stay under Pi. The GLM
+  quota source additionally accepts the key pi stores in
+  `~/.pi/agent/auth.json`, so a pi-only install still shows the GLM quota on
+  the GLM card. The Pi card carries local usage only, never a quota.
 - **Qwen**: the Bailian personal Token Plan is an account-level subscription consumed by any client holding its `sk-sp-` key, but its quota is only exposed through the Bailian console login. The cookie-based source (same storage rules as Qoder) calls the console gateway verified on a real account in 2026-08: `tool/user/info.json` yields a `secToken`, then a form-encoded `BroadScopeAspnGateway` call to `bailian-cs.console.aliyun.com` returns `per5Hour*`/`per1Week*` used **ratios (0..1, not percentage points)** and millisecond reset times; a request missing `sec_token`/`region` is bounced to an error page that looks like a WAF block. Absent windows are omitted, never fabricated.
 - A window whose reset time has passed without fresh data renders as `--`, not as its last known percentage.
 

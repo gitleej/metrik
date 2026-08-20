@@ -12,7 +12,9 @@ use std::path::{Path, PathBuf};
 // double-counting the parent thread's usage (and stop showing as unknown model).
 // Version 5 rebuilds every source so already-ledgered events pick up the project
 // working directory their adapters now report.
-pub const PARSER_VERSION: i64 = 5;
+// Version 6 rebuilds every source so pi events re-attribute to their provider's
+// metering card (GLM/Qwen/Pi) instead of all landing under pi.
+pub const PARSER_VERSION: i64 = 6;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ReplaceSourceOutcome {

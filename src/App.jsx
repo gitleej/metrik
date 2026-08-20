@@ -204,8 +204,8 @@ const AGENT_META = {
     iconClass: "agent-icon--grok",
   },
   pi: {
-    // pi（badlogic/pi-mono）：会话日志覆盖 pi 内配置的全部 provider，
-    // 配额源是其中的 GLM Coding Plan key。
+    // pi（badlogic/pi-mono）是 harness：本地会话用量按 provider 归属到
+    // 对应计量卡片（GLM / Qwen / 其余留 Pi）；pi 自身没有独立套餐，不显示配额。
     label: "Pi",
     // 自制 π 字母牌（同 Grok 字母牌规格）；深红与 Claude 的珊瑚橙拉开明暗。
     accent: "#c1121f",
