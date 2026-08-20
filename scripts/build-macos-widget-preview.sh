@@ -70,8 +70,8 @@ for asset in \
   workbuddy-app-icon.png \
   qoder-app-icon.png \
   grok-app-icon.png \
-  pi-app-icon.png \n  qwen-app-icon.png \
-  pi-app-icon.png \n  qwen-app-icon.png
+  pi-app-icon.png \
+  qwen-app-icon.png
 do
   ditto "$PROJECT_DIR/src/assets/$asset" "$APPEX_RESOURCES/$asset"
 done
