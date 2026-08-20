@@ -85,10 +85,27 @@ impl KimiAdapter {
             .map(PathBuf::from)
             .filter(|path| path.is_absolute())
             .unwrap_or_else(|| home.join(".kimi-code"));
+        // Kimi Work（kimi-desktop）内嵌同源 kimi-code 内核，把会话写在
+        // daimon 运行时的 home 下（2026-08 真机核实：wire.jsonl 逐字段同构，
+        // 含 usageScope=turn；项目归属在 home/session_index.jsonl）。与
+        // coding_quota::kimiwork_token_paths 的根一致。
+        let kimi_work = dirs::config_dir()
+            .map(|config| {
+                config
+                    .join("kimi-desktop")
+                    .join("daimon-share")
+                    .join("daimon")
+                    .join("runtime")
+                    .join("kimi-code")
+                    .join("home")
+                    .join("sessions")
+            })
+            .unwrap_or_else(|| home.join(".kimi-desktop-missing"));
         Self {
             roots: vec![
                 kimi_code.join("sessions"),
                 home.join(".kimi").join("sessions"),
+                kimi_work,
             ],
         }
     }
@@ -132,27 +149,59 @@ struct KimiWorkspace {
     root: Option<String>,
 }
 
-/// 新版路径 `<data>/sessions/<workspace>/<session>/agents/<agent>/wire.jsonl`
-/// 里的 `<workspace>` 只是工作区 ID（`wd_agentteam_578762e1c526`），真实目录在
-/// `<data>/workspaces.json` 的 `workspaces.<id>.root`。查不到就返回 None：
-/// 旧版 `~/.kimi/sessions/<group>/…` 的 `<group>` 不是工作区 ID，不能当路径用。
+/// 项目归属映射，两个来源逐个尝试（会话目录都在 `sessions/<id>/…` 下）：
+/// - CLI：`<home>/workspaces.json` 的 `workspaces.<workspace-id>.root`；
+/// - Kimi Work：`<home>/session_index.jsonl` 每行 `{sessionId, workDir}`，
+///   后行覆盖前行。两者都查不到时返回 None：不拿目录名里的工作区 ID
+///   冒充路径（旧版 `~/.kimi/sessions/<group>/…` 的 `<group>` 不是工作区 ID）。
 fn project_root_from_path(path: &Path) -> Option<String> {
     let sessions_dir = path
         .ancestors()
         .find(|dir| dir.file_name().and_then(|name| name.to_str()) == Some("sessions"))?;
-    let workspace_id = path
-        .strip_prefix(sessions_dir)
-        .ok()?
-        .iter()
-        .next()?
-        .to_str()?;
-    let raw = std::fs::read_to_string(sessions_dir.parent()?.join("workspaces.json")).ok()?;
-    serde_json::from_str::<KimiWorkspaces>(&raw)
-        .ok()?
-        .workspaces
-        .get(workspace_id)?
-        .root
-        .clone()
+    let home = sessions_dir.parent()?;
+    let mut segments = path.strip_prefix(sessions_dir).ok()?.iter();
+    let workspace_id = segments.next()?.to_str()?;
+    let session_id = segments.next().and_then(|value| value.to_str());
+
+    if let Ok(raw) = std::fs::read_to_string(home.join("workspaces.json")) {
+        if let Some(root) = serde_json::from_str::<KimiWorkspaces>(&raw)
+            .ok()
+            .and_then(|parsed| parsed.workspaces.get(workspace_id)?.root.clone())
+        {
+            return Some(root);
+        }
+    }
+    if let Some(session_id) = session_id {
+        if let Ok(raw) = std::fs::read_to_string(home.join("session_index.jsonl")) {
+            if let Some(dir) = work_dir_from_session_index(&raw, session_id) {
+                return Some(dir);
+            }
+        }
+    }
+    None
+}
+
+#[derive(Deserialize)]
+struct SessionIndexEntry {
+    #[serde(rename = "sessionId")]
+    session_id: Option<String>,
+    #[serde(rename = "workDir")]
+    work_dir: Option<String>,
+}
+
+/// Kimi Work 的会话索引（home/session_index.jsonl）：每行一个会话，
+/// `workDir` 是真实工作目录。同 sessionId 多行时后行覆盖（目录可能被改）。
+fn work_dir_from_session_index(raw: &str, session_id: &str) -> Option<String> {
+    let mut found: Option<String> = None;
+    for line in raw.lines() {
+        let Ok(entry) = serde_json::from_str::<SessionIndexEntry>(line) else {
+            continue;
+        };
+        if entry.session_id.as_deref() == Some(session_id) {
+            found = entry.work_dir.filter(|dir| !dir.trim().is_empty());
+        }
+    }
+    found
 }
 
 impl AgentAdapter for KimiAdapter {
@@ -389,6 +438,80 @@ mod tests {
         assert_eq!(parsed.source.events[0].session_id, "session-a/main");
         assert_eq!(parsed.source.events[0].tokens.cache_read, 14_848);
         std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    /// Kimi Work（kimi-desktop）的 wire.jsonl 与 CLI 同构（真机核实），只是
+    /// home 在 daimon 运行时下；项目归属走 session_index.jsonl 的 sessionId 映射。
+    #[test]
+    fn kimi_work_sessions_parse_and_map_the_work_dir() {
+        let path = wire_file(
+            "kimi-work",
+            &[
+                "sessions",
+                "wd_aidraw_4befc391f392",
+                "conv-1f6e",
+                "agents",
+                "main",
+            ],
+            concat!(
+                r#"{"type":"usage.record","model":"k2d6-agent","usage":{"inputOther":12445,"output":46,"inputCacheRead":13312,"inputCacheCreation":0},"usageScope":"turn","time":1784991559431}"#,
+                "\n",
+            ),
+        );
+        let sessions_dir = path
+            .ancestors()
+            .find(|dir| dir.file_name().and_then(|name| name.to_str()) == Some("sessions"))
+            .unwrap();
+        let home = sessions_dir.parent().unwrap().to_path_buf();
+        // 没有索引文件时不归属（与 CLI 同一条纪律：不拿工作区 ID 冒充路径）。
+        let unmapped = KimiAdapter::with_roots(vec![])
+            .parse(&candidate_for(&path), i64::MIN)
+            .unwrap();
+        assert_eq!(unmapped.source.events[0].project_path, None);
+
+        std::fs::write(
+            home.join("session_index.jsonl"),
+            concat!(
+                r#"{"sessionId":"conv-other","sessionDir":"…","workDir":"D:/other"}"#,
+                "\n",
+                r#"{"sessionId":"conv-1f6e","sessionDir":"…","workDir":"D:\\work\\AIdraw"}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        let parsed = KimiAdapter::with_roots(vec![])
+            .parse(&candidate_for(&path), i64::MIN)
+            .unwrap();
+
+        assert_eq!(parsed.source.events.len(), 1);
+        // 会话 ID 与 CLI 新版同构：<session>/<agent>。
+        assert_eq!(parsed.source.events[0].session_id, "conv-1f6e/main");
+        assert_eq!(parsed.source.events[0].tokens.processed(), 25_803);
+        assert_eq!(
+            parsed.source.events[0].project_path.as_deref(),
+            Some("D:/work/AIdraw")
+        );
+        std::fs::remove_dir_all(home).ok();
+    }
+
+    #[test]
+    fn detected_roots_cover_cli_and_kimi_work() {
+        let home = dirs::home_dir().unwrap_or_default();
+        let config = dirs::config_dir().unwrap_or_default();
+        let roots = KimiAdapter::detected().roots;
+        assert_eq!(roots[0], home.join(".kimi-code").join("sessions"));
+        assert_eq!(roots[1], home.join(".kimi").join("sessions"));
+        assert_eq!(
+            roots[2],
+            config
+                .join("kimi-desktop")
+                .join("daimon-share")
+                .join("daimon")
+                .join("runtime")
+                .join("kimi-code")
+                .join("home")
+                .join("sessions")
+        );
     }
 
     #[test]

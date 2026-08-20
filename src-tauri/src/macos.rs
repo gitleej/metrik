@@ -64,6 +64,8 @@ const ANTIGRAVITY_MARK: &[u8] = include_bytes!("../../src/assets/antigravity-app
 const WORKBUDDY_MARK: &[u8] = include_bytes!("../../src/assets/workbuddy-app-icon.png");
 const QODER_MARK: &[u8] = include_bytes!("../../src/assets/qoder-app-icon.png");
 const GROK_MARK: &[u8] = include_bytes!("../../src/assets/grok-app-icon.png");
+const PI_MARK: &[u8] = include_bytes!("../../src/assets/pi-app-icon.png");
+const QWEN_MARK: &[u8] = include_bytes!("../../src/assets/qwen-app-icon.png");
 
 #[derive(Clone, Copy)]
 struct StatusItemSpec {
@@ -72,7 +74,7 @@ struct StatusItemSpec {
     icon: &'static [u8],
 }
 
-const STATUS_ITEMS: [StatusItemSpec; 9] = [
+const STATUS_ITEMS: [StatusItemSpec; 11] = [
     StatusItemSpec {
         id: "codex",
         name: "ChatGPT",
@@ -117,6 +119,16 @@ const STATUS_ITEMS: [StatusItemSpec; 9] = [
         id: "grok",
         name: "Grok",
         icon: GROK_MARK,
+    },
+    StatusItemSpec {
+        id: "pi",
+        name: "Pi",
+        icon: PI_MARK,
+    },
+    StatusItemSpec {
+        id: "qwen",
+        name: "Qwen",
+        icon: QWEN_MARK,
     },
 ];
 

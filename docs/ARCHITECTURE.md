@@ -17,12 +17,15 @@ Claude JSONL ────┤
 ZCode SQLite ────┼─ adapter ─ normalized event ─ SQLite ledger ─ period query ─ UI
 OpenCode JSON ───┤
 Kimi wire.jsonl ─┤
-Grok updates ────┘
+Grok updates ────┤
+Pi JSONL ────────┘
 
 Codex app-server ─────────┐
 Claude statusLine hook ───┼─ official quota snapshot ──────────────┘
 Claude OAuth (opt-in) ────┤
-Grok CLI billing log ─────┘
+Grok CLI billing log ─────┤
+GLM/Kimi/Qoder/WorkBuddy ─┤
+Pi (GLM key from pi) ─────┘
 ```
 
 The UI invokes one asynchronous Tauri command, `usage_snapshot(period)`. Blocking discovery, parsing, SQLite work, and the local quota subprocess run inside `spawn_blocking`, guarded by a single scan lock. On each request the engine:
@@ -42,7 +45,8 @@ The user-reachable `rebuild_local_ledger(period)` command takes the same scan lo
 
 - Codex: session ID plus timestamp and cumulative-token fingerprint.
 - Claude Code: provider message ID only. Request ID and model are validation metadata; a conflict rejects that message and marks partial coverage without poisoning the rest of the source. Session ID remains metadata and does not prevent cross-session deduplication.
-- Kimi: new-format records use the session path plus timestamp and component fingerprint; legacy StatusUpdates use the provider `message_id`.
+- Kimi: new-format records use the session path plus timestamp and component fingerprint; legacy StatusUpdates use the provider `message_id`. Kimi Work (kimi-desktop) embeds the same kimi-code kernel and writes the same wire.jsonl under its daimon runtime home; its sessions reuse the CLI parser unchanged, with project attribution from `session_index.jsonl` (`sessionId` → `workDir`) instead of `workspaces.json`.
+- Pi: provider `responseId` only (unique across 849 local assistant rows; the one row without it is an aborted message that falls back to the entry ID). `/fork` and `/clone` copy entries verbatim into a new session file, so a copy observes the same event with a different session in its payload and merges component-wise like Claude. Compaction and branch-summary summary usage is counted as its own event; the directory name is a lossy encoding and project attribution comes only from the header `cwd`.
 - Source paths are observations, not event identity, so moving a session into an archive does not duplicate usage.
 
 ### Replayed history is not new usage
@@ -60,7 +64,7 @@ Two sources replay counters that are already ledgered elsewhere. Counting them i
 processed = input_uncached + cache_read + cache_write + output
 ```
 
-`reasoning_output` is stored as an output sub-detail and is not added again.
+`reasoning_output` is stored as an output sub-detail and is not added again. On Pi, `reasoning` is a subset of `output` in the format itself (verified on 833 local rows where `totalTokens == input + output + cacheRead + cacheWrite`); tokscale's Pi parser reaches the same conclusion.
 
 Codex exposes cumulative counters. The adapter records the first snapshot, then positive component deltas. An unchanged cumulative snapshot produces no event.
 
@@ -75,6 +79,8 @@ Quota rows are replaced wholesale, never merged, so a window a plan no longer ha
 - **Codex**: `primary` and `secondary` are slots, not window semantics — a plan may carry a weekly window in the `primary` slot and have no `secondary` at all. Windows are classified by `windowDurationMins` (≤ 1440 minutes is a session window, otherwise weekly); the slot name is only a fallback when the duration is absent. A successful `app-server` read replaces the whole Codex row set.
 - **Claude**: the statusLine hook file is the zero-credential source. Every platform handles the hook natively inside `metrik --statusline`, invoked directly by Claude Code before desktop initialization; there is no external interpreter dependency. The chained delegate and the absolute quota-file path live in `metrik-statusline.json` metadata; the delegate runs through the platform shell (`cmd.exe` on Windows, `/bin/sh` on Unix) and is force-terminated by process tree/group after a 10-second timeout. Legacy generated hook scripts (`.ps1` on Windows, `.py` on Unix) are migrated to the native entry on startup. The opt-in OAuth source (off by default) reads the token Claude Code already stores and queries the official usage endpoint; the token is never persisted, uploaded, or logged. A successful read from either source replaces the whole Claude row set; a failed OAuth read falls back to the hook file rather than to a guess. That token expires within hours and only Claude Code itself renews it — on a real Mac `claude auth status --json` exited 0 reporting a logged-in account while the keychain `expiresAt` stayed ten hours in the past, and `claude auth` exposes no refresh command. Metrik does not spend the stored refresh token, since rotation would invalidate the copy Claude Code holds and could log the user out of their own client; an expired token short-circuits to the hook instead of spending a request that would be rejected.
 - **Qoder**: Qoder, QoderWork, and Qoder CLI share one account-level Credits quota. The existing dashboard-cookie source reads that one quota only; it does not decrypt CLI credentials. Qoder CLI local telemetry with zero token counters is ignored rather than counted.
+- **Pi**: the quota reads the GLM Coding Plan through the API key pi itself stores in `~/.pi/agent/auth.json` (`zai-coding-cn` or `zai`), against the same already-verified z.ai/bigmodel response shape the GLM card uses. The key is used in memory for one request only. `qwen-token-plan*` keys in the same file belong to a different Bailian product and are not used by this source.
+- **Qwen**: the Bailian personal Token Plan is an account-level subscription consumed by any client holding its `sk-sp-` key, but its quota is only exposed through the Bailian console login. The cookie-based source (same storage rules as Qoder) calls the console gateway verified on a real account in 2026-08: `tool/user/info.json` yields a `secToken`, then a form-encoded `BroadScopeAspnGateway` call to `bailian-cs.console.aliyun.com` returns `per5Hour*`/`per1Week*` used **ratios (0..1, not percentage points)** and millisecond reset times; a request missing `sec_token`/`region` is bounced to an error page that looks like a WAF block. Absent windows are omitted, never fabricated.
 - A window whose reset time has passed without fresh data renders as `--`, not as its last known percentage.
 
 ## Storage

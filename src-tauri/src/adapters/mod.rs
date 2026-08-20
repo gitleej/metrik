@@ -4,6 +4,7 @@ mod codex;
 mod grok;
 mod kimi;
 mod opencode;
+mod pi;
 mod workbuddy;
 mod zcode;
 
@@ -13,6 +14,7 @@ pub use codex::CodexAdapter;
 pub use grok::GrokAdapter;
 pub use kimi::KimiAdapter;
 pub use opencode::OpencodeAdapter;
+pub use pi::PiAdapter;
 pub use workbuddy::WorkbuddyAdapter;
 pub use zcode::ZcodeAdapter;
 
