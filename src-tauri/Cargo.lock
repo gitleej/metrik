@@ -2194,7 +2194,7 @@ dependencies = [
 
 [[package]]
 name = "metrik"
-version = "0.17.3"
+version = "0.17.4"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2203,6 +2203,8 @@ dependencies = [
  "image",
  "libc",
  "objc",
+ "objc2",
+ "objc2-app-kit",
  "objc2-foundation",
  "rusqlite",
  "rustls",

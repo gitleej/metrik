@@ -179,16 +179,17 @@ change.
 - The menu bar uses Metrik's own minimal grammar: one monochrome provider icon
   plus official remaining percentage for every selected agent, `--` for
   unavailable data, and `~` for stale data.
-- Status items are fixed slots with stable AppKit autosave names, all created
-  once at app startup and never removed or re-created within a session.
-  Every native item remains visible to ControlCenter; deselecting an agent
-  clears the slot and collapses its `NSStatusItem.length` to zero, while
-  selecting it restores variable length. Toggling `NSStatusItem.isVisible`
-  retains the object but Tahoe reinserts it at a new menu-bar position, so it
-  cannot preserve the user's order. Removing/recreating items can additionally
-  be silently rejected or misassociated. Empty titles must be written as an
-  empty string because the current tray dependency treats a `None` title as
-  “leave unchanged”.
+- The menu bar owns exactly one native `NSStatusItem` with one stable AppKit
+  autosave name for the whole session. Every selected Agent is rendered, in
+  user order, as an icon-and-percentage segment inside that item's button;
+  deselected Agents have no native item and therefore no hidden menu-bar slot.
+  Do not model Agents as separate zero-length status items: on macOS 26,
+  ControlCenter can retain spacing for every hosted item even when AppKit
+  reports `NSStatusItem.length == 0`. Toggling `NSStatusItem.isVisible` can
+  reinsert an item at a different position, while removing and re-creating
+  items can be silently rejected or misassociated. The single item is never
+  removed or re-created during a session; only its internal attributed content
+  changes.
 - Clicking any status item opens the anchored compact panel. Agent selection
   updates immediately across the separate settings window, compact panel,
   WidgetKit snapshot, and menu-bar status items, and always keeps at least one
