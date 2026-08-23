@@ -10,10 +10,19 @@
 #![allow(deprecated)]
 #![allow(unexpected_cfgs)]
 
+use std::io::Cursor;
 use std::sync::Mutex;
 
 use image::imageops::FilterType;
-use objc2_foundation::NSString;
+use objc2::{msg_send, AnyThread, ClassType, MainThreadMarker};
+use objc2_app_kit::{
+    NSAttributedStringAttachmentConveniences, NSColor, NSFont, NSFontAttributeName,
+    NSForegroundColorAttributeName, NSImage, NSTextAttachment,
+};
+use objc2_foundation::{
+    NSAttributedString, NSData, NSMutableAttributedString, NSPoint, NSRange, NSRect, NSSize,
+    NSString,
+};
 use tauri::image::Image;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
@@ -36,10 +45,13 @@ const SCREEN_MARGIN: f64 = 8.0;
 const PANEL_LABEL: &str = "main";
 const DESKTOP_WIDGET_LABEL: &str = "desktop-widget";
 const EXPANDED_LABEL: &str = "expanded";
+const STATUS_ITEM_ID: &str = "metrik-status";
+const STATUS_ITEM_AUTOSAVE_NAME: &str = "app.metrik.desktop.status";
 const DESKTOP_WIDGET_WIDTH: f64 = 320.0;
 const DESKTOP_WIDGET_HEIGHT: f64 = 312.0;
 const STATUS_ICON_SIZE: u32 = 44;
 const PROVIDER_MARK_SIZE: u32 = 32;
+const MENU_BAR_ICON_SIZE: f64 = 16.0;
 
 /// 本地视觉验收开关。只在 debug 构建生效，避免为了看桌面层级去改用户持久设置；
 /// release 构建仍严格遵守“默认关闭”。
@@ -136,51 +148,20 @@ const STATUS_ITEMS: [StatusItemSpec; 11] = [
 /// 用它把面板对齐到图标下方；托盘的任何一次事件（点击/移入/移动）都会刷新。
 static TRAY_RECT: Mutex<Option<(f64, f64, f64, f64)>> = Mutex::new(None);
 
-/// 菜单栏状态槽：一个槽位持有一个长期存活的 NSStatusItem，内容可换、永不删除
-/// （删除后的重建会被 macOS 26 的 ControlCenter 编号机制拒收，见 update_status_items）。
-struct StatusSlot {
-    tray_id: String,
-    agent: Option<String>,
-}
-
-static STATUS_SLOTS: std::sync::LazyLock<Mutex<Vec<StatusSlot>>> =
-    std::sync::LazyLock::new(|| Mutex::new(Vec::new()));
-
-fn status_slot_autosave_name(index: usize) -> String {
-    format!("app.metrik.desktop.status-slot-{index}")
-}
-
-/// tray-icon 0.24.1 的 set_visible(false) 会从 NSStatusBar 删除 NSStatusItem；
-/// 原生 isVisible 虽保留对象，但 Tahoe 会把重新显示的项插到新位置。保持所有项
-/// 始终 visible，仅用 length=0 折叠空槽，既不留 18px 空位，也不改变槽位顺序。
-fn set_native_status_slot_collapsed<R: Runtime>(
+/// macOS 26 由 ControlCenter 托管每个 NSStatusItem 的外层槽。即使 AppKit 侧把
+/// length 设为 0，多个空 item 仍会在系统菜单栏留下间距。因此 Metrik 整个会话
+/// 只持有这一个原生 item；Agent 只是它内部 attributedTitle 的内容片段。
+fn initialize_native_status_item<R: Runtime>(
     tray: &tauri::tray::TrayIcon<R>,
-    collapsed: bool,
 ) -> Result<(), String> {
     tray.with_inner_tray_icon(move |inner| {
         let status_item = inner
             .ns_status_item()
             .ok_or_else(|| "macOS NSStatusItem 不可用".to_owned())?;
-        status_item.setLength(if collapsed { 0.0 } else { -1.0 });
-        Ok::<(), String>(())
-    })
-    .map_err(|error| error.to_string())?
-}
-
-/// 多状态项应用应给每个长期槽设置稳定 autosaveName。设置后立即用原生
-/// length=0 折叠初始空槽，避免八个 18px 空白按钮闪现在菜单栏。
-fn initialize_native_status_slot<R: Runtime>(
-    tray: &tauri::tray::TrayIcon<R>,
-    autosave_name: String,
-) -> Result<(), String> {
-    tray.with_inner_tray_icon(move |inner| {
-        let status_item = inner
-            .ns_status_item()
-            .ok_or_else(|| "macOS NSStatusItem 不可用".to_owned())?;
-        let autosave_name = NSString::from_str(&autosave_name);
+        let autosave_name = NSString::from_str(STATUS_ITEM_AUTOSAVE_NAME);
         status_item.setAutosaveName(Some(&autosave_name));
-        // autosaveName 会恢复上次持久化的可见性；旧测试版可能把它存成 false。
-        // 固定槽必须始终留在 ControlCenter 集合中，隐藏只由零长度承担。
+        // autosaveName 会恢复上次持久化的可见性；Metrik 至少保留一个 Agent，
+        // 这个唯一状态项应始终存在且可见。首轮额度到达前暂时折叠内容。
         status_item.setVisible(true);
         status_item.setLength(0.0);
         Ok::<(), String>(())
@@ -250,6 +231,142 @@ fn status_item_title(remaining: Option<f64>, stale: bool) -> String {
     }
 }
 
+struct StatusItemSegment {
+    icon: &'static [u8],
+    title: String,
+    accessibility_label: String,
+}
+
+fn status_item_segments(
+    agents: &[String],
+    remaining: &[Option<f64>],
+    stale: &[bool],
+) -> Result<Vec<StatusItemSegment>, String> {
+    agents
+        .iter()
+        .enumerate()
+        .map(|(index, agent)| {
+            let spec = STATUS_ITEMS
+                .iter()
+                .find(|spec| spec.id == agent)
+                .ok_or_else(|| format!("Metrik 未知 Agent {agent}"))?;
+            let title = status_item_title(remaining[index], stale[index]);
+            let availability = match normalized_percent(remaining[index]) {
+                Some(percent) => format!("{percent}% 剩余"),
+                None => "配额不可用".to_owned(),
+            };
+            let freshness = if stale[index] {
+                "，数据可能已过期"
+            } else {
+                ""
+            };
+            Ok(StatusItemSegment {
+                icon: spec.icon,
+                title,
+                accessibility_label: format!("{} {availability}{freshness}", spec.name),
+            })
+        })
+        .collect()
+}
+
+fn status_item_accessibility_label(segments: &[StatusItemSegment]) -> String {
+    format!(
+        "Metrik：{}",
+        segments
+            .iter()
+            .map(|segment| segment.accessibility_label.as_str())
+            .collect::<Vec<_>>()
+            .join("；")
+    )
+}
+
+fn provider_status_ns_image(source: &[u8]) -> Result<objc2::rc::Retained<NSImage>, String> {
+    let icon = provider_status_icon(source)?;
+    let rgba = image::RgbaImage::from_raw(icon.width(), icon.height(), icon.rgba().to_vec())
+        .ok_or_else(|| "菜单栏品牌图标像素尺寸不一致".to_owned())?;
+    let mut encoded = Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgba8(rgba)
+        .write_to(&mut encoded, image::ImageFormat::Png)
+        .map_err(|error| format!("菜单栏品牌图标无法编码：{error}"))?;
+    let encoded = encoded.into_inner();
+    // dataWithBytes 会立即复制像素，返回后 Vec 可以安全释放。
+    let data = unsafe { NSData::dataWithBytes_length(encoded.as_ptr().cast(), encoded.len()) };
+    let image = NSImage::initWithData(NSImage::alloc(), &data)
+        .ok_or_else(|| "菜单栏品牌图标无法创建 NSImage".to_owned())?;
+    image.setSize(NSSize::new(MENU_BAR_ICON_SIZE, MENU_BAR_ICON_SIZE));
+    image.setTemplate(true);
+    Ok(image)
+}
+
+fn append_status_text(
+    output: &NSMutableAttributedString,
+    text: &str,
+    font: &NSFont,
+    color: &NSColor,
+) {
+    let piece = NSMutableAttributedString::from_nsstring(&NSString::from_str(text));
+    let range = NSRange::new(0, piece.length());
+    // NSFont / NSColor 都是合法的 Objective-C attribute value；两个对象在调用
+    // 期间存活，并会由 attributed string retain。
+    unsafe {
+        piece.addAttribute_value_range(NSFontAttributeName, font.as_super(), range);
+        piece.addAttribute_value_range(NSForegroundColorAttributeName, color.as_super(), range);
+    }
+    output.appendAttributedString(&piece);
+}
+
+fn set_native_status_item_content<R: Runtime>(
+    tray: &tauri::tray::TrayIcon<R>,
+    segments: Vec<StatusItemSegment>,
+) -> Result<(), String> {
+    let accessibility_label = status_item_accessibility_label(&segments);
+    tray.with_inner_tray_icon(move |inner| {
+        let status_item = inner
+            .ns_status_item()
+            .ok_or_else(|| "macOS NSStatusItem 不可用".to_owned())?;
+        let mtm = MainThreadMarker::new()
+            .ok_or_else(|| "macOS 菜单栏内容更新未运行在主线程".to_owned())?;
+        let button = status_item
+            .button(mtm)
+            .ok_or_else(|| "macOS NSStatusBarButton 不可用".to_owned())?;
+        let attributed = NSMutableAttributedString::new();
+        let font = NSFont::menuBarFontOfSize(0.0);
+        let color = NSColor::labelColor();
+
+        for (index, segment) in segments.iter().enumerate() {
+            if index > 0 {
+                append_status_text(&attributed, "   ", &font, &color);
+            }
+            let attachment = NSTextAttachment::new();
+            let image = provider_status_ns_image(segment.icon)?;
+            attachment.setImage(Some(&image));
+            // AppKit 的文字基线比 16pt 图标底部高约 2pt；负偏移让图标与数字居中。
+            attachment.setBounds(NSRect::new(
+                NSPoint::new(0.0, -2.0),
+                NSSize::new(MENU_BAR_ICON_SIZE, MENU_BAR_ICON_SIZE),
+            ));
+            let icon = NSAttributedString::attributedStringWithAttachment(&attachment);
+            attributed.appendAttributedString(&icon);
+            append_status_text(&attributed, &format!(" {}", segment.title), &font, &color);
+        }
+
+        // 先清掉 tray-icon 可能留下的普通 image/title，再一次性写入完整富文本。
+        // attributedTitle 让 ControlCenter 只托管一个 item，同时保留每个 Agent 的
+        // 品牌图标和额度，不需要隐藏原生占位槽。
+        button.setImage(None);
+        button.setTitle(&NSString::from_str(""));
+        button.setAttributedTitle(&attributed);
+        let accessibility_label = NSString::from_str(&accessibility_label);
+        unsafe {
+            let _: () = msg_send![&*button, setAccessibilityLabel: Some(&*accessibility_label)];
+        }
+        status_item.setLength(-1.0);
+        status_item.setVisible(true);
+        Ok::<(), String>(())
+    })
+    .map_err(|error| error.to_string())?
+}
+
 pub fn update_status_items(
     app: &AppHandle,
     agents: &[String],
@@ -260,67 +377,16 @@ pub fn update_status_items(
         return Err("macOS 菜单栏状态项参数长度不一致".into());
     }
 
-    eprintln!("Metrik status items requested: {}", agents.join(","));
-    let mut slots = STATUS_SLOTS.lock().unwrap();
-    // 8 个状态槽在启动时一次性建齐（见 setup_tray），会话内只更新内容并通过
-    // NSStatusItem.length 在 0 / variable 之间折叠和展开：
-    // macOS 26 的 ControlCenter 给状态项密集编号并异步托管，会话中途新建或
-    // 删除重建都可能被静默拒托管或显示错位，isVisible 重新显示还会改变顺序。
-    // 取消勾选会折叠并清空槽位，但底层 NSStatusItem 始终可见、存活且不离队。
-    for index in 0..slots.len() {
-        let Some(tray) = app.tray_by_id(&slots[index].tray_id) else {
-            eprintln!("Metrik 菜单栏状态槽 {} 不存在，跳过", slots[index].tray_id);
-            continue;
-        };
-        if index < agents.len() {
-            // 槽位 0 最先创建、位置最靠右；把选择列表末尾的 Agent 放槽 0，
-            // 菜单栏从左到右就与选择列表的顺序一致。
-            let position = agents.len() - 1 - index;
-            let agent = &agents[position];
-            let Some(spec) = STATUS_ITEMS.iter().find(|spec| spec.id == agent) else {
-                eprintln!("Metrik 未知 Agent {agent}，跳过菜单栏状态项");
-                continue;
-            };
-            let agent_changed = slots[index].agent.as_deref() != Some(agent.as_str());
-            if agent_changed {
-                // 换 Agent 时先折叠，避免 icon/title 分步更新期间短暂组合出旧标题
-                // + 新图标；状态项仍在托管集合中，物理顺序不变。
-                set_native_status_slot_collapsed(&tray, true)?;
-                let icon = provider_status_icon(spec.icon)?;
-                tray.set_icon_with_as_template(Some(icon), true)
-                    .map_err(|error| error.to_string())?;
-            }
-            let item_remaining = remaining[position];
-            let item_stale = stale[position];
-            tray.set_title(Some(status_item_title(item_remaining, item_stale)))
-                .map_err(|error| error.to_string())?;
-            let label = match normalized_percent(item_remaining) {
-                Some(percent) => format!("{} {percent}% 剩余", spec.name),
-                None => format!("{} 配额不可用", spec.name),
-            };
-            let suffix = if item_stale {
-                " · 数据可能已过期"
-            } else {
-                ""
-            };
-            tray.set_tooltip(Some(format!("Metrik · {label}{suffix}")))
-                .map_err(|error| error.to_string())?;
-            slots[index].agent = Some(agent.clone());
-            set_native_status_slot_collapsed(&tray, false)?;
-            eprintln!("Metrik status slot {} = {}", slots[index].tray_id, agent);
-        } else if slots[index].agent.take().is_some() {
-            // tray-icon 0.24.1 在 macOS 上把 set_title(None) 实现为 no-op，必须传
-            // 空字符串才能真正覆盖旧百分比；否则就会留下无图标的 “97%” 幻影。
-            set_native_status_slot_collapsed(&tray, true)?;
-            tray.set_title(Some(""))
-                .map_err(|error| error.to_string())?;
-            tray.set_icon_with_as_template(None, true)
-                .map_err(|error| error.to_string())?;
-            tray.set_tooltip(Some("Metrik"))
-                .map_err(|error| error.to_string())?;
-            eprintln!("Metrik status slot {} cleared", slots[index].tray_id);
-        }
-    }
+    eprintln!("Metrik status item requested: {}", agents.join(","));
+    let segments = status_item_segments(agents, remaining, stale)?;
+    let tooltip = status_item_accessibility_label(&segments);
+    let tray = app
+        .tray_by_id(STATUS_ITEM_ID)
+        .ok_or_else(|| "Metrik 菜单栏状态项不存在".to_owned())?;
+    tray.set_tooltip(Some(tooltip))
+        .map_err(|error| error.to_string())?;
+    set_native_status_item_content(&tray, segments)?;
+    eprintln!("Metrik status item updated");
 
     Ok(())
 }
@@ -600,15 +666,15 @@ fn remember_tray_rect(window_scale: f64, rect: Rect) {
     *TRAY_RECT.lock().unwrap() = Some((position.x, position.y, size.width, size.height));
 }
 
-fn build_status_slot(app: &AppHandle, tray_id: &str, slot_index: usize) -> tauri::Result<()> {
-    // 每个状态槽都能独立打开同一个面板，右键菜单也保持一致。
+fn build_status_item(app: &AppHandle) -> tauri::Result<()> {
+    // 一个原生状态项承载全部 Agent；内部片段变化不会让 ControlCenter 增删宿主。
     let toggle = MenuItem::with_id(app, "toggle", "显示 / 隐藏", true, None::<&str>)?;
     let expanded = MenuItem::with_id(app, "expanded", "完整视图", true, None::<&str>)?;
     let settings = MenuItem::with_id(app, "settings", "设置", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "退出 Metrik", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&toggle, &expanded, &settings, &quit])?;
 
-    let tray = TrayIconBuilder::with_id(tray_id)
+    let tray = TrayIconBuilder::with_id(STATUS_ITEM_ID)
         .tooltip("Metrik")
         .icon_as_template(true)
         .menu(&menu)
@@ -650,29 +716,15 @@ fn build_status_slot(app: &AppHandle, tray_id: &str, slot_index: usize) -> tauri
             }
         })
         .build(app)?;
-    initialize_native_status_slot(&tray, status_slot_autosave_name(slot_index))
+    initialize_native_status_item(&tray)
         .map_err(|error| tauri::Error::Anyhow(anyhow::Error::msg(error)))?;
     Ok(())
 }
 
 fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
-    // Metrik 自己的状态栏语法：每个已选 Agent 一个品牌状态项，只带额度数字。
-    // 不复制第三方工具的多账户、重置倒计时或菜单布局。
-    // 全部槽位在启动时一次建齐并设稳定 autosaveName，之后整个会话只做内容更新
-    // 和原生 length 折叠/展开：
-    // macOS 26 的 ControlCenter 对会话中途新建/删除的状态项会静默拒托管或错位，
-    // 底层 NSStatusItem 绝不删除或重建。
-    let handle = app.app_handle();
-    let mut slots = STATUS_SLOTS.lock().unwrap();
-    for index in 0..STATUS_ITEMS.len() {
-        let tray_id = format!("metrik-status-{index}");
-        build_status_slot(handle, &tray_id, index)?;
-        slots.push(StatusSlot {
-            tray_id,
-            agent: None,
-        });
-    }
-    Ok(())
+    // Metrik 自己的状态栏语法仍是每个 Agent 一个品牌图标 + 额度数字，但它们
+    // 组合在同一个长期存活的 NSStatusItem 内。未选 Agent 没有任何原生占位对象。
+    build_status_item(app.app_handle())
 }
 
 #[cfg(test)]
@@ -707,12 +759,30 @@ mod tests {
     }
 
     #[test]
-    fn status_slots_have_stable_unique_autosave_names() {
-        let names: Vec<_> = (0..STATUS_ITEMS.len())
-            .map(status_slot_autosave_name)
-            .collect();
-        let unique: std::collections::HashSet<_> = names.iter().collect();
-        assert_eq!(unique.len(), STATUS_ITEMS.len());
-        assert_eq!(names[0], "app.metrik.desktop.status-slot-0");
+    fn menu_bar_uses_one_stable_native_status_item() {
+        assert_eq!(STATUS_ITEM_ID, "metrik-status");
+        assert_eq!(STATUS_ITEM_AUTOSAVE_NAME, "app.metrik.desktop.status");
+    }
+
+    #[test]
+    fn status_segments_preserve_selection_order_and_accessibility_state() {
+        let agents = vec!["kimi".to_owned(), "codex".to_owned(), "zcode".to_owned()];
+        let segments = status_item_segments(
+            &agents,
+            &[Some(80.0), Some(77.0), Some(98.0)],
+            &[true, false, false],
+        )
+        .unwrap();
+        assert_eq!(
+            segments
+                .iter()
+                .map(|segment| segment.title.as_str())
+                .collect::<Vec<_>>(),
+            vec!["~80%", "77%", "98%"]
+        );
+        assert_eq!(
+            status_item_accessibility_label(&segments),
+            "Metrik：Kimi 80% 剩余，数据可能已过期；ChatGPT 77% 剩余；GLM 98% 剩余"
+        );
     }
 }

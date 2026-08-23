@@ -46,9 +46,32 @@ libc = "0.2"
 # 菜单栏面板：把 main 窗口换成不抢焦点的 NSPanel。crates.io 上没有 Tauri 2 版本，
 # 只能走 git 分支；上游停更时需要自行维护。
 tauri-nspanel = { git = "https://github.com/ahkohd/tauri-nspanel", branch = "v2" }
-# Tauri 暴露底层 NSStatusItem，但稳定槽位需要直接设置 autosaveName 与 length：
-# tray-icon 的 set_visible(false) 会删除对象，set_title(None) 则不会清空旧标题。
-objc2-foundation = { version = "0.3", default-features = false, features = ["NSString"] }
+# Tauri 暴露底层 NSStatusItem。macOS 26 会为每个 status item 保留一个由
+# ControlCenter 托管的外层槽，即使 length=0 也仍留下间距；因此菜单栏只创建一个
+# 原生 item，并在它的 button.attributedTitle 中组合所有 Agent 图标和额度。
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+  "NSAttributedString",
+  "NSButton",
+  "NSCell",
+  "NSColor",
+  "NSFont",
+  "NSImage",
+  "NSResponder",
+  "NSStatusBarButton",
+  "NSStatusItem",
+  "NSTextAttachment",
+  "NSView",
+] }
+objc2-foundation = { version = "0.3", default-features = false, features = [
+  "NSAttributedString",
+  "NSData",
+  "NSDictionary",
+  "NSGeometry",
+  "NSObject",
+  "NSRange",
+  "NSString",
+] }
 # 直接设置窗口级 NSAppearance（tao 的 set_theme 只动全应用外观，macOS 26 的
 # 标题栏不跟随它）。cocoa/objc 随 tauri-nspanel 已在依赖树中。
 objc = "0.2"
