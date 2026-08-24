@@ -1,12 +1,17 @@
 name: Release
 
-# 推送 v* 标签时构建安装包并发布草稿 Release，由维护者确认后发布。
+# 推送 v* 标签时，三平台并行构建并上传 workflow artifacts；全部构建成功后，
+# 由唯一的 release job 使用 fork 的 RELEASE_TOKEN 创建 Release 并统一上传。
 on:
   push:
     tags: ["v*"]
 
 permissions:
   contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   build:
@@ -18,12 +23,19 @@ jobs:
             args: ""
             rust-targets: ""
             widget-archs: ""
+            artifact-name: windows-x86_64
           # Intel + Apple Silicon 通用包。macOS 尚未实机验收，Release 说明里
           # 必须标明这一点。
           - platform: macos-latest
             args: "--target universal-apple-darwin"
             rust-targets: "aarch64-apple-darwin,x86_64-apple-darwin"
             widget-archs: "arm64 x86_64"
+            artifact-name: macos-universal
+          - platform: ubuntu-24.04
+            args: "--target x86_64-unknown-linux-gnu --bundles deb,appimage"
+            rust-targets: "x86_64-unknown-linux-gnu"
+            widget-archs: ""
+            artifact-name: linux-x86_64
 
     runs-on: ${{ matrix.platform }}
     steps:
@@ -41,29 +53,34 @@ jobs:
         with:
           targets: ${{ matrix.rust-targets }}
 
+      - name: Install Linux desktop dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libxdo-dev \
+            libssl-dev \
+            patchelf
+
       # 发布不频繁，且通用构建的 target 布局会让缓存的路径校验在 post 步骤
       # 报错、把已成功的构建标红。发布流程不缓存，换取稳定的绿。
 
       - name: Install frontend dependencies
         run: npm ci
 
-      # 安装包没有代码签名证书（Windows 会提示"未知发布者"，macOS 会提示
-      # 无法验证开发者），这是已知且在 README 声明的边界。下面这对密钥是
-      # Tauri 更新器自己的 minisign 签名，只保证更新包在分发链路上没被掉包。
-      # 同时会生成 latest.json（更新器的检查端点）并一并上传到 Release。
+      # 此 fork 发布可直接安装的桌面包。更新器的 minisign 私钥不应存放在
+      # fork 的 Actions secrets 中，因此显式关闭 updater artifact。
       - uses: tauri-apps/tauri-action@v0
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           METRIK_WIDGET_ARCHS: ${{ matrix.widget-archs }}
+          APPIMAGE_EXTRACT_AND_RUN: ${{ runner.os == 'Linux' && '1' || '' }}
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: Metrik ${{ github.ref_name }}
-          releaseDraft: true
-          prerelease: false
-          includeUpdaterJson: true
-          args: ${{ matrix.args }}
+          args: >-
+            ${{ matrix.args }}
+            --config '{"bundle":{"createUpdaterArtifacts":false}}'
 
       - name: Verify WidgetKit extension is embedded
         if: runner.os == 'macOS'
@@ -85,3 +102,95 @@ jobs:
           test "$widget_build" = "$host_build"
           test "$widget_release" = "$host_release"
           codesign --verify --deep --strict --verbose=2 "$app_path"
+
+      - name: Upload release packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: Metrik-${{ matrix.artifact-name }}-${{ github.ref_name }}
+          path: |
+            src-tauri/target/**/release/bundle/**/*.deb
+            src-tauri/target/**/release/bundle/**/*.AppImage
+            src-tauri/target/**/release/bundle/**/*.dmg
+            src-tauri/target/**/release/bundle/**/*.msi
+            src-tauri/target/**/release/bundle/**/*-setup.exe
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download release packages
+        uses: actions/download-artifact@v4
+        with:
+          pattern: Metrik-*-${{ github.ref_name }}
+          path: release-assets
+          merge-multiple: true
+
+      - name: Verify token and release packages
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+        run: |
+          test -n "$GH_TOKEN" || {
+            echo '::error::Repository secret RELEASE_TOKEN is not configured.'
+            exit 1
+          }
+          gh api "repos/$GITHUB_REPOSITORY" --jq '.full_name'
+          test -n "$(find release-assets -type f -name '*.deb' -print -quit)"
+          test -n "$(find release-assets -type f -name '*.AppImage' -print -quit)"
+          test -n "$(find release-assets -type f -name '*.dmg' -print -quit)"
+          test -n "$(find release-assets -type f -name '*.msi' -print -quit)"
+          test -n "$(find release-assets -type f -name '*-setup.exe' -print -quit)"
+          find release-assets -type f -print
+
+      - name: Publish Release
+        uses: softprops/action-gh-release@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Metrik ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+          fail_on_unmatched_files: true
+          body: |
+            # Metrik v0.17.5
+
+            > 更完整的数据源支持，更成熟的 Ubuntu 桌面体验。
+
+            ## ✨ 本次亮点
+
+            - **Ubuntu 24.04 x86_64 正式支持**：同时提供 `.deb` 与 `.AppImage` 安装包。
+            - **置顶悬停不再挡住操作**：Linux 小窗在淡出或完全隐藏时会立即退出鼠标命中，桌面及下层应用可正常点击；指针离开后立即恢复。
+            - **Linux 小窗体验完善**：支持位置恢复、托盘置顶/取消置顶、胶囊模式与可配置的悬停淡出/隐藏。
+            - **新增 Agent 数据能力**：同步上游 v0.17.4，加入 Grok、Pi、Qwen 与 Kimi Work 支持，并补充更多模型定价。
+            - **平台体验更新**：包含 Windows 托盘余量徽标与 macOS 菜单栏间距修复等上游改进。
+
+            ## 📦 下载指南
+
+            | 平台 | 推荐产物 | 说明 |
+            | --- | --- | --- |
+            | Ubuntu 24.04 x86_64 | `.deb` | 推荐桌面安装，可集成应用菜单与托盘 |
+            | Linux x86_64 | `.AppImage` | 免安装便携运行 |
+            | Windows x86_64 | `-setup.exe` / `.msi` | 安装程序 |
+            | macOS Intel + Apple Silicon | `.dmg` | 通用架构安装包 |
+
+            Ubuntu 安装示例：
+
+            ```bash
+            sudo apt install ./Metrik_*_amd64.deb
+            ```
+
+            ## 🛡️ 兼容性说明
+
+            Linux 专属窗口与悬停逻辑均由平台条件隔离，不会改变 Windows/macOS 对应实现。本版本的 Windows 与 macOS 变化来自同步的上游 v0.17.4。
+
+            > 安装包尚未进行平台代码签名。Windows/macOS 首次运行时可能需要手动通过系统安全提示；macOS 通用包由 CI 完成结构与签名一致性校验，但尚未进行实体设备验收。
+          files: |
+            release-assets/**/*.deb
+            release-assets/**/*.AppImage
+            release-assets/**/*.dmg
+            release-assets/**/*.msi
+            release-assets/**/*-setup.exe
