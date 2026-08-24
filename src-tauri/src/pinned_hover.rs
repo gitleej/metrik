@@ -160,11 +160,11 @@ fn hover_state(inside: bool, target_opacity: f64) -> (f64, bool) {
     } else {
         1.0
     };
-    // Opacity alone only changes painting: an invisible X11 window still owns
-    // its input region and swallows clicks. Complete-hide mode must therefore
-    // disable native cursor hit-testing until the global pointer leaves the
-    // unchanged window bounds. Fade mode deliberately keeps normal hit-testing.
-    (opacity, inside && opacity == 0.0)
+    // Opacity only controls painting: both fade and complete-hide are passive
+    // presentation modes and must let clicks reach the desktop underneath.
+    // The independent XQueryPointer worker still knows when the global pointer
+    // leaves the unchanged bounds and restores normal hit-testing immediately.
+    (opacity, inside)
 }
 
 #[cfg(target_os = "linux")]
@@ -349,8 +349,8 @@ mod tests {
     }
 
     #[test]
-    fn fade_keeps_native_cursor_hit_testing() {
-        assert_eq!(hover_state(true, 0.35), (0.35, false));
+    fn fade_disables_native_cursor_hit_testing() {
+        assert_eq!(hover_state(true, 0.35), (0.35, true));
     }
 
     #[test]
