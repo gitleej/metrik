@@ -216,12 +216,14 @@ change.
 - A pinned compact or strip surface responds immediately to pointer hover. The
   user can choose either a configurable opacity or complete visual hiding; it
   restores immediately on pointer exit so an always-on-top monitor does not
-  visually obscure the desktop beneath it. On X11, hover appearance is driven
-  by a dedicated native `XQueryPointer` connection and physical window bounds,
-  independent of WebKit's input delivery after the surface becomes transparent.
-  Wayland deliberately withholds global pointer coordinates, so it uses local
-  window-boundary events and retains a visually imperceptible input surface for
-  complete hiding.
+  visually obscure the desktop beneath it. On X11, complete hiding also removes
+  the native window from cursor hit-testing so the invisible surface never
+  blocks clicks intended for the desktop or another application. Hover
+  appearance and restoration are driven by a dedicated native `XQueryPointer`
+  connection and physical window bounds, independent of WebKit input delivery
+  after the surface becomes transparent and click-through. Wayland deliberately
+  withholds global pointer coordinates, so it uses local window-boundary events
+  and retains a visually imperceptible input surface for complete hiding.
 - Linux pinning is a read-only presentation surface: its controls and drag
   regions are inactive, and only Linux Settings or the Linux tray menu can
   cancel pinning. The native window retains pointer input solely to drive

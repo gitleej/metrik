@@ -4,6 +4,8 @@ use tauri::WebviewWindow;
 
 #[cfg(target_os = "linux")]
 const HOVER_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(8);
+#[cfg(target_os = "linux")]
+const IDLE_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
 
 /// One long-lived hover worker per application process. Reconfiguring pinning
 /// only changes atomics; it never creates competing X11 clients or lets a stale
@@ -27,12 +29,12 @@ pub fn configure(
     {
         if !super::linux_supports_global_window_coordinates() {
             monitor.enabled.store(false, Ordering::Release);
-            set_native_opacity(&window, 1.0);
+            apply_native_hover_state(&window, false, 1.0);
             return false;
         }
         let Some(window_id) = x11_window_id(&window) else {
             monitor.enabled.store(false, Ordering::Release);
-            set_native_opacity(&window, 1.0);
+            apply_native_hover_state(&window, false, 1.0);
             return false;
         };
         monitor.window_id.store(window_id, Ordering::Release);
@@ -42,12 +44,12 @@ pub fn configure(
 
         if !enabled {
             monitor.enabled.store(false, Ordering::Release);
-            set_native_opacity(&window, 1.0);
+            apply_native_hover_state(&window, false, 1.0);
             return false;
         }
         if !ensure_worker(window.clone(), Arc::clone(&monitor)) {
             monitor.enabled.store(false, Ordering::Release);
-            set_native_opacity(&window, 1.0);
+            apply_native_hover_state(&window, false, 1.0);
             return false;
         }
         // Repeated startup assertions are intentionally idempotent: do not
@@ -107,40 +109,77 @@ fn watch_x11_pointer(window: WebviewWindow, monitor: Arc<Monitor>, pointer: X11P
     let mut last_window_id = 0;
     let mut last_target_bits = 1.0_f64.to_bits();
     loop {
+        if !monitor.enabled.load(Ordering::Acquire) {
+            if last_inside {
+                apply_native_hover_state(&window, false, 1.0);
+                last_inside = false;
+            }
+            std::thread::sleep(IDLE_POLL_INTERVAL);
+            continue;
+        }
+
         let visible = match window.is_visible() {
             Ok(visible) => visible,
             Err(_) => break,
         };
-        let enabled = monitor.enabled.load(Ordering::Acquire) && visible;
+        if !visible {
+            if last_inside {
+                apply_native_hover_state(&window, false, 1.0);
+                last_inside = false;
+            }
+            std::thread::sleep(IDLE_POLL_INTERVAL);
+            continue;
+        }
+
         let window_id = monitor.window_id.load(Ordering::Acquire);
         let target_bits = monitor.target_opacity_bits.load(Ordering::Acquire);
-        let inside = if enabled {
-            pointer
-                .inside_window(window_id)
-                // A transient X11 query failure keeps the previous state so
-                // the widget never flashes back to full opacity for one poll.
-                .unwrap_or(last_inside)
-        } else {
-            false
-        };
+        let inside = pointer
+            .inside_window(window_id)
+            // A transient X11 query failure keeps the previous state so the
+            // widget never flashes back to full opacity for one poll.
+            .unwrap_or(last_inside);
 
         if inside != last_inside
             || window_id != last_window_id
             || (inside && target_bits != last_target_bits)
         {
-            let opacity = if inside {
-                f64::from_bits(target_bits).clamp(0.0, 1.0)
-            } else {
-                1.0
-            };
-            set_native_opacity(&window, opacity);
+            apply_native_hover_state(&window, inside, f64::from_bits(target_bits));
             last_inside = inside;
             last_window_id = window_id;
             last_target_bits = target_bits;
         }
         std::thread::sleep(HOVER_POLL_INTERVAL);
     }
-    set_native_opacity(&window, 1.0);
+    apply_native_hover_state(&window, false, 1.0);
+}
+
+#[cfg(target_os = "linux")]
+fn hover_state(inside: bool, target_opacity: f64) -> (f64, bool) {
+    let opacity = if inside {
+        target_opacity.clamp(0.0, 1.0)
+    } else {
+        1.0
+    };
+    // Opacity alone only changes painting: an invisible X11 window still owns
+    // its input region and swallows clicks. Complete-hide mode must therefore
+    // disable native cursor hit-testing until the global pointer leaves the
+    // unchanged window bounds. Fade mode deliberately keeps normal hit-testing.
+    (opacity, inside && opacity == 0.0)
+}
+
+#[cfg(target_os = "linux")]
+fn apply_native_hover_state(window: &WebviewWindow, inside: bool, target_opacity: f64) {
+    let (opacity, ignore_cursor_events) = hover_state(inside, target_opacity);
+
+    if ignore_cursor_events {
+        // Hide first, then expose the desktop underneath to input. On restore,
+        // reverse the order so a visible widget never remains click-through.
+        set_native_opacity(window, opacity);
+        let _ = window.set_ignore_cursor_events(true);
+    } else {
+        let _ = window.set_ignore_cursor_events(false);
+        set_native_opacity(window, opacity);
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -288,7 +327,7 @@ impl Drop for X11Pointer {
 
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
-    use super::point_inside_window;
+    use super::{hover_state, point_inside_window};
 
     #[test]
     fn window_hit_test_uses_half_open_relative_bounds() {
@@ -302,5 +341,20 @@ mod tests {
     fn negative_relative_coordinates_are_outside() {
         assert!(!point_inside_window(-1, 0, 320, 320));
         assert!(!point_inside_window(0, -1, 320, 320));
+    }
+
+    #[test]
+    fn complete_hide_disables_native_cursor_hit_testing() {
+        assert_eq!(hover_state(true, 0.0), (0.0, true));
+    }
+
+    #[test]
+    fn fade_keeps_native_cursor_hit_testing() {
+        assert_eq!(hover_state(true, 0.35), (0.35, false));
+    }
+
+    #[test]
+    fn pointer_exit_restores_visibility_and_hit_testing() {
+        assert_eq!(hover_state(false, 0.0), (1.0, false));
     }
 }

@@ -52,4 +52,4 @@ This is a small binary and low idle CPU result, but it is not a native-toolkit m
 ## Acceptance boundary
 
 - Verified: Windows 10/11 x64 release executable and both installer formats.
-- Not yet delivered: Windows ARM64, cross-device sync, code signing, and a formal provider-mark permission review before mass commercial distribution.
+- Not yet delivered: Linux release-page artifacts, Windows ARM64, cross-device sync, code signing, and a formal provider-mark permission review before mass commercial distribution. Ubuntu 24.04 x86_64 `.deb` and `.AppImage` generation is CI-validated but is not an upstream release.

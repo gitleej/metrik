@@ -81,51 +81,12 @@ fn read_linux_startup_position(app: &tauri::AppHandle) -> Option<LinuxStartupPos
     serde_json::from_slice(&contents).ok()
 }
 
-/// One-time compatibility import for positions saved by older Linux builds in
-/// WebKit localStorage. Its UTF-16 value is safe, app-owned coordinate data;
-/// no arbitrary WebView data is read or copied.
-#[cfg(target_os = "linux")]
-fn read_legacy_linux_startup_position(app: &tauri::AppHandle) -> Option<LinuxStartupPosition> {
-    let path = app
-        .path()
-        .app_local_data_dir()
-        .ok()?
-        .join("localstorage/tauri_localhost_0.localstorage");
-    let connection =
-        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .ok()?;
-    let bytes: Vec<u8> = connection
-        .query_row(
-            "SELECT value FROM ItemTable WHERE key = 'metrik:widgetPosition'",
-            [],
-            |row| row.get(0),
-        )
-        .ok()?;
-    let words: Vec<u16> = bytes
-        .chunks_exact(2)
-        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
-        .collect();
-    let value = String::from_utf16(&words).ok()?;
-    let position: serde_json::Value = serde_json::from_str(&value).ok()?;
-    Some(LinuxStartupPosition {
-        x: position.get("x")?.as_i64()?.try_into().ok()?,
-        y: position.get("y")?.as_i64()?.try_into().ok()?,
-        // Older Linux versions saved the GTK outer origin but set_position
-        // expects the content origin. Mutter's normal frame offset is learned
-        // and persisted precisely after the first move in the new format.
-        offset_x: 0,
-        offset_y: 37,
-    })
-}
-
 #[cfg(target_os = "linux")]
 fn restore_linux_startup_position(app: &tauri::AppHandle) {
     let Some(window) = app.get_webview_window("main") else {
         return;
     };
-    if let Some(position) =
-        read_linux_startup_position(app).or_else(|| read_legacy_linux_startup_position(app))
-    {
+    if let Some(position) = read_linux_startup_position(app) {
         let _ = window.set_position(tauri::PhysicalPosition::new(
             position.x.saturating_add(position.offset_x),
             position.y.saturating_add(position.offset_y),

@@ -299,9 +299,9 @@ async function ensurePositionAfterShow(api, appWindow, target) {
 /// 显示器的 scaleFactor 算物理尺寸；不能先按当前屏幕算完再搬过去。
 /// 记忆坐标来自 outerPosition()，但 Linux/GTK（GNOME X11 实测）下 setPosition
 /// 把目标解释成内容区（inner）原点：直接回填 outer 坐标会让窗口再上移一截
-/// （本机 _NET_FRAME_EXTENTS 顶部恒为 37px），每次重启累计一次。恢复时把
-/// inner−outer 偏移补回目标，让内容区落在用户上次摆放的位置。Windows 无边框
-/// 窗口内外坐标一致，Wayland 不走这条路径，偏移自然为 0。
+/// 并在每次重启累计窗口管理器的装饰偏移。恢复时动态测量 inner−outer 偏移并
+/// 补回目标，让内容区落在用户上次摆放的位置；不假设特定窗口管理器或固定像素。
+/// Windows 无边框窗口内外坐标一致，Wayland 不走这条路径，偏移自然为 0。
 async function positionRestoreOffset(api, appWindow) {
   if (!isLinuxPlatform() || !(await supportsGlobalWindowCoordinates())) {
     return { x: 0, y: 0 };
@@ -320,12 +320,12 @@ async function positionRestoreOffset(api, appWindow) {
   };
   const first = await read();
   if (first && (first.x !== 0 || first.y !== 0)) return first;
-  for (let i = 0; i < 10; i += 1) {
-    await new Promise((resolve) => window.setTimeout(resolve, 150));
-    const offset = await read();
-    if (offset && (offset.x !== 0 || offset.y !== 0)) return offset;
-  }
-  return first || { x: 0, y: 0 };
+
+  // GTK may report a temporary zero before the first map settles. One mapped
+  // sample is enough: zero is also a legitimate decoration offset and must not
+  // stall every frameless-window restore for another 1.5 seconds.
+  await new Promise((resolve) => window.setTimeout(resolve, 150));
+  return (await read()) || first || { x: 0, y: 0 };
 }
 
 async function floatingPlacement(api, mode, logicalSize, contentScale) {

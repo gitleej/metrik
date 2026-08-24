@@ -5,9 +5,9 @@ Metrik 是一款桌面常驻工具，统一查看本机各个 AI 编程 Agent �
 [![Download](https://img.shields.io/github/v/release/keros68/metrik?label=下载&color=success)](https://github.com/keros68/metrik/releases/latest)
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](LICENSE)
 [![Tauri](https://img.shields.io/badge/Tauri-2-24C8DB.svg)](https://tauri.app/)
-[![Platform](https://img.shields.io/badge/Windows%20%7C%20macOS%20%7C%20Ubuntu-0078D6.svg)](#平台支持)
+[![Platform](https://img.shields.io/badge/Windows%20%7C%20macOS%20%7C%20Ubuntu%20CI-0078D6.svg)](#平台支持)
 
-[下载最新版](https://github.com/keros68/metrik/releases/latest)：Windows `.exe`、macOS 通用 `.dmg`、Ubuntu 24.04 x86_64 `.deb` / `.AppImage`。安装包未签名，首次运行需手动放行系统安全校验；Release 页附 SHA256 校验值。
+[下载最新版](https://github.com/keros68/metrik/releases/latest)：Windows `.exe`、macOS 通用 `.dmg`。Ubuntu 24.04 x86_64 的 `.deb` / `.AppImage` 已由 PR CI 构建验证，但在上游 Release 工作流加入 Linux 发布任务前不会出现在 Release 页。安装包未签名，首次运行需手动放行系统安全校验；Release 页附 SHA256 校验值。
 
 <p align="center">
   <img src="design/shot-glass.jpg" alt="Metrik 桌面小组件与配额胶囊条 · 透明档">
@@ -106,7 +106,7 @@ cargo test live_snapshot_smoke_test -- --ignored --nocapture  # 读本机真实�
 ## 已知限制
 
 1. 安装包未做数字签名，首次运行需手动放行；Windows 未预装 WebView2 时安装程序需联网获取运行时。
-2. Linux 预编译包当前仅支持 Ubuntu 24.04 x86_64；其它发行版与架构需自行构建。AppImage 若无法显示托盘，请确认桌面环境已启用 StatusNotifier/AppIndicator 支持。
+2. 上游 Release 当前仅发布 Windows 与 macOS 安装包；Ubuntu 24.04 x86_64 的 `.deb` / `.AppImage` 生成流程已通过 CI 构建与冒烟测试，但目前仍需自行构建。其它发行版与架构尚未验证。AppImage 若无法显示托盘，请确认桌面环境已启用 StatusNotifier/AppIndicator 支持。
 3. Antigravity 需对应 IDE 处于运行状态才有数据。
 4. 首次索引大体量日志会占用一段 CPU 与磁盘，界面可正常操作，未覆盖完整历史的数值会标注说明。
 
