@@ -21,6 +21,10 @@ Thumbs.db
 .playwright-cli/
 output/
 
+# 本项目持久化的本机构建环境与安装产物；避免使用会在重启后清理的 /tmp。
+.local-env/
+.local-artifacts/
+
 # 本机配置与凭据
 .env
 .env.*
