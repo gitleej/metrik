@@ -39,6 +39,9 @@ import claudeAppIcon from "./assets/claude-app-icon.jpg";
 import kimiAppIcon from "./assets/kimi-app-icon.png";
 import opencodeAppIcon from "./assets/opencode-app-icon.png";
 import qoderAppIcon from "./assets/qoder-app-icon.png";
+import grokAppIcon from "./assets/grok-app-icon.png";
+import piAppIcon from "./assets/pi-app-icon.png";
+import qwenAppIcon from "./assets/qwen-app-icon.png";
 import workbuddyAppIcon from "./assets/workbuddy-app-icon.png";
 import zcodeAppIcon from "./assets/zcode-app-icon.png";
 import { glassShellAppearance, nextGlassTint, resolveGlassMode } from "./glassAppearance.js";
@@ -57,6 +60,8 @@ import {
   getUsageSessions,
   getUsageProjects,
   getProjectRules,
+  getQwenCookieStatus,
+  configureQwenCookie,
   setProjectRules,
   getUsageSnapshot,
   rebuildLocalLedger,
@@ -97,6 +102,7 @@ import {
   setNativeTheme,
   setStripScale,
   updateMacStatusItems,
+  updateTrayQuotaBadge,
   setWindowGlass,
   setPinnedHoverTargetOpacity,
   setWindowPinned,
@@ -107,11 +113,18 @@ import {
   stripContentSize,
   toggleMaximizeWindow,
 } from "./windowClient";
+import {
+  TRAY_BADGE_HIDDEN_REFRESH_MS,
+  trayBadgeSpec,
+  trayBadgeTooltip,
+} from "./trayBadge.js";
 
 // macOS 是菜单栏应用：小插件是贴着菜单栏图标的面板（没有窗口按钮、不可拖动、
 // 材质由系统 vibrancy 承担），完整视图是独立的标准窗口（原生红绿灯）。
 // Windows 仍是"单窗口变形 + 自绘按钮"，两条路径不互相影响。
 const IS_MAC = isMacPlatform();
+// Windows 任务栏托盘可换成余量数字徽标；其它平台没有这条路径。
+const IS_WINDOWS = isWindowsPlatform();
 const IS_LINUX = isLinuxPlatform();
 
 const UsagePlot = lazy(() =>
@@ -186,6 +199,33 @@ const AGENT_META = {
     accent: "#3a7ca5",
     iconSrc: qoderAppIcon,
     iconClass: "agent-icon--qoder",
+  },
+  grok: {
+    // xAI Grok Build：本地单轮 usage + CLI 日志里的周 Credits 快照。
+    label: "Grok",
+    // 中性灰蓝：xAI 品牌本身是黑白，中性色既贴合品牌又与八家彩色拉开。
+    accent: "#6e7681",
+    iconSrc: grokAppIcon,
+    iconClass: "agent-icon--grok",
+  },
+  pi: {
+    // pi（badlogic/pi-mono）是 harness：本地会话用量按 provider 归属到
+    // 对应计量卡片（GLM / Qwen / 其余留 Pi）；pi 自身没有独立套餐，不显示配额。
+    label: "Pi",
+    // 官方 logo 是黑白单色几何 π（pi.dev/logo-auto.svg），非红色；
+    // 强调色取中性银灰，暗/亮主题都可见。
+    accent: "#9aa0a6",
+    iconSrc: piAppIcon,
+    iconClass: "agent-icon--pi",
+  },
+  qwen: {
+    // 配额-only：百炼个人 Token Plan 是账户级套餐，由 pi 等客户端的
+    // qwen-token-plan key 消耗；额度只能在百炼控制台查。
+    label: "Qwen",
+    // 千问 App 官方图标；紫与 GLM 的 #6a5ae0 同系不同值，亮度更高。
+    accent: "#7b5cd6",
+    iconSrc: qwenAppIcon,
+    iconClass: "agent-icon--qwen",
   },
 };
 
@@ -2647,7 +2687,7 @@ function AgentListColumn({ title, hint, agents, detected, onToggle, onMove }) {
   );
 }
 
-function AgentsDisplayCard({ widgetAgents, onToggleWidgetAgent, onMoveWidgetAgent, stripAgents, onToggleStripAgent, onMoveStripAgent, detectedAgents }) {
+function AgentsDisplayCard({ widgetAgents, onToggleWidgetAgent, onMoveWidgetAgent, stripAgents, onToggleStripAgent, onMoveStripAgent, detectedAgents, trayBadgeEnabled, onToggleTrayBadge }) {
   return (
     <div className="settings-card">
       <h2>显示的 Agent</h2>
@@ -2674,6 +2714,25 @@ function AgentsDisplayCard({ widgetAgents, onToggleWidgetAgent, onMoveWidgetAgen
           />
         )}
       </div>
+      {/* Windows 专属：托盘图标换成数字。取的正是上面列表最上方的 Agent，
+          与菜单栏状态项同一套数据，只是托盘只放得下一个数字。 */}
+      {IS_WINDOWS && (
+        <div className="settings-subsection">
+          <h3>任务栏图标</h3>
+          <p className="settings-muted">
+            开启后，任务栏右下角的 Metrik 图标改为显示列表最上方 Agent 的剩余百分比；
+            无可靠额度时显示 --，窗口隐藏后数字仍每 5 分钟更新一次。
+          </p>
+          <label className="settings-check">
+            <input
+              type="checkbox"
+              checked={trayBadgeEnabled}
+              onChange={(event) => onToggleTrayBadge(event.target.checked)}
+            />
+            <span>图标改为显示余量数字</span>
+          </label>
+        </div>
+      )}
     </div>
   );
 }
@@ -2822,7 +2881,107 @@ const SETTINGS_TABS = [
   },
 ];
 
-function SettingsSection({ onSnapshotRefresh, widgetAgents, onToggleWidgetAgent, onMoveWidgetAgent, stripAgents, onToggleStripAgent, onMoveStripAgent, detectedAgents, glassAlpha, onGlassAlpha, glassTint, onGlassTint, glassInk, onGlassInk, uiScale, onUiScale, stripScale, onStripScale, pinned, onPinnedChange, pinnedHoverMode, onPinnedHoverMode, pinnedHoverOpacity, onPinnedHoverOpacity, theme, onThemeChange, autoUpdateCheck, onAutoUpdateCheck, availableUpdate }) {
+function QwenQuotaCard({ onSnapshotRefresh }) {
+  const [status, setStatus] = useState(null);
+  const [cookieInput, setCookieInput] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [feedback, setFeedback] = useState(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    getQwenCookieStatus()
+      .then((value) => {
+        if (!cancelled) setStatus(value);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const apply = async (cookie) => {
+    setBusy(true);
+    setFeedback(null);
+    try {
+      const next = await configureQwenCookie(cookie);
+      setStatus(next);
+      setCookieInput("");
+      // 验证失败也已保存：如实转述后端的结果，不粉饰。
+      setFeedback({
+        tone: next.message?.includes("失败") ? "error" : "success",
+        message: next.message || "已更新。",
+      });
+      if (cookie && !next.message?.includes("失败")) onSnapshotRefresh();
+    } catch (error) {
+      setFeedback({ tone: "error", message: `操作失败：${error}` });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="settings-card">
+      <h2>Qwen Token Plan 官方额度</h2>
+      <p className="settings-muted">
+        阿里百炼个人 Token Plan 是账户级套餐，pi 等客户端用它的订阅 key 消耗额度；额度只能在百炼控制台查询，需要你提供一次
+        登录 cookie。cookie 仅明文保存在本机（不入账本、不进同步导出），可随时清除。
+      </p>
+      <details className="settings-guide">
+        <summary>如何获取 cookie</summary>
+        <ol>
+          <li>浏览器登录 bailian.console.aliyun.com，打开「资源食用 → Token 管理」下的 Token Plan 页；</li>
+          <li>按 F12 打开开发者工具 → 网络（Network）标签，点过滤器里的 Fetch/XHR；</li>
+          <li>刷新页面，右键任意 aliyun.com 域名的请求 → 复制 →「以 cURL 格式复制」，把整段粘贴到下面——会自动提取其中的 Cookie。</li>
+        </ol>
+      </details>
+      {status?.demo ? (
+        <p className="settings-muted">浏览器演示模式：仅桌面应用可配置。</p>
+      ) : (
+        <>
+          <div className="settings-directory-row">
+            <input
+              type="password"
+              value={cookieInput}
+              placeholder="粘贴 Cookie 值 / 整段请求标头 / cURL 命令"
+              spellCheck={false}
+              disabled={busy}
+              aria-label="Qwen cookie"
+              onChange={(event) => setCookieInput(event.target.value)}
+            />
+            <button
+              type="button"
+              className="ledger-button ledger-button--primary"
+              disabled={busy || !cookieInput.trim()}
+              onClick={() => apply(cookieInput.trim())}
+            >
+              保存并验证
+            </button>
+          </div>
+          {status?.source === "file" && (
+            <button
+              type="button"
+              className="ledger-button ledger-button--secondary"
+              disabled={busy}
+              onClick={() => apply(null)}
+            >
+              清除已保存的 cookie
+            </button>
+          )}
+          {feedback && (
+            <p
+              className={`settings-feedback settings-feedback--${feedback.tone}`}
+              role={feedback.tone === "error" ? "alert" : "status"}
+            >
+              {feedback.message}
+            </p>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+function SettingsSection({ onSnapshotRefresh, widgetAgents, onToggleWidgetAgent, onMoveWidgetAgent, stripAgents, onToggleStripAgent, onMoveStripAgent, detectedAgents, trayBadgeEnabled, onToggleTrayBadge, glassAlpha, onGlassAlpha, glassTint, onGlassTint, glassInk, onGlassInk, uiScale, onUiScale, stripScale, onStripScale, pinned, onPinnedChange, pinnedHoverMode, onPinnedHoverMode, pinnedHoverOpacity, onPinnedHoverOpacity, theme, onThemeChange, autoUpdateCheck, onAutoUpdateCheck, availableUpdate }) {
   const [settings, setSettings] = useState(null);
   const [directoryInput, setDirectoryInput] = useState("");
   const [busy, setBusy] = useState(false);
@@ -2945,12 +3104,15 @@ function SettingsSection({ onSnapshotRefresh, widgetAgents, onToggleWidgetAgent,
             onToggleStripAgent={onToggleStripAgent}
             onMoveStripAgent={onMoveStripAgent}
             detectedAgents={detectedAgents}
+            trayBadgeEnabled={trayBadgeEnabled}
+            onToggleTrayBadge={onToggleTrayBadge}
           />
         )}
         {activeTab.id === "sources" && (
           <>
             <ClaudeHookCard onSnapshotRefresh={onSnapshotRefresh} />
             <QoderQuotaCard onSnapshotRefresh={onSnapshotRefresh} />
+            <QwenQuotaCard onSnapshotRefresh={onSnapshotRefresh} />
           </>
         )}
 
@@ -4503,6 +4665,15 @@ export function App() {
     setAutoUpdateCheck(next);
     localStorage.setItem("metrik:autoUpdateCheck", String(next));
   }, []);
+  // Windows 专属：任务栏托盘图标改为显示 Agent 列表最上方的余量数字。默认关，
+  // 关着的人看到的一直是应用图标。
+  const [trayBadgeEnabled, setTrayBadgeEnabled] = useState(
+    () => localStorage.getItem("metrik:trayQuotaBadge") === "true",
+  );
+  const handleToggleTrayBadge = useCallback((next) => {
+    setTrayBadgeEnabled(next);
+    localStorage.setItem("metrik:trayQuotaBadge", String(next));
+  }, []);
   const [availableUpdate, setAvailableUpdate] = useState(null);
   useEffect(() => {
     if (!isDesktop() || !autoUpdateCheck) return undefined;
@@ -4623,6 +4794,12 @@ export function App() {
       timer = undefined;
       if (document.visibilityState === "visible") {
         timer = window.setInterval(() => loadSnapshot(period), refreshEvery);
+      } else if (trayBadgeEnabled) {
+        // 托盘数字还亮在任务栏上：窗口隐藏时保留慢速刷新，数字不会冻在旧值。
+        timer = window.setInterval(
+          () => loadSnapshot(period),
+          TRAY_BADGE_HIDDEN_REFRESH_MS,
+        );
       }
     };
 
@@ -4639,7 +4816,7 @@ export function App() {
       document.removeEventListener("visibilitychange", refreshWhenVisible);
       window.removeEventListener("focus", refreshWhenVisible);
     };
-  }, [loadSnapshot, period, viewMode, indexing]);
+  }, [loadSnapshot, period, viewMode, indexing, trayBadgeEnabled]);
 
   useEffect(() => {
     // macOS 面板由系统管层级和位置：不置顶、不恢复坐标。
@@ -4973,6 +5150,27 @@ export function App() {
     if (!IS_MAC) return;
     runWindowAction(() => updateMacStatusItems(macStatusItems));
   }, [macStatusItems]);
+
+  // Windows 托盘徽标与 macOS 菜单栏同源：都从 widgetAgents 的状态列表取数，
+  // 只是托盘只放得下一个数字，取列表最上方（排序最高）的那个 Agent。
+  const trayBadge = useMemo(
+    () => trayBadgeSpec(macStatusItems),
+    [macStatusItems],
+  );
+  useEffect(() => {
+    if (!IS_WINDOWS) return;
+    const spec = trayBadgeEnabled
+      ? trayBadge && {
+          ...trayBadge,
+          tooltip: trayBadgeTooltip(
+            AGENT_META[trayBadge.agent]?.label || trayBadge.agent,
+            trayBadge.percent,
+            trayBadge.stale,
+          ),
+        }
+      : null;
+    runWindowAction(() => updateTrayQuotaBadge(spec));
+  }, [trayBadge, trayBadgeEnabled]);
 
   // 勾选即追加到末尾（勾选顺序 = 显示顺序）；首次改动时以当前自动列表为基准。
   const handleToggleStripAgent = useCallback((agentId) => {
@@ -5381,6 +5579,8 @@ export function App() {
             onToggleStripAgent={handleToggleStripAgent}
             onMoveStripAgent={handleMoveStripAgent}
             detectedAgents={detectedAgents}
+            trayBadgeEnabled={trayBadgeEnabled}
+            onToggleTrayBadge={handleToggleTrayBadge}
             glassAlpha={glassAlpha}
             onGlassAlpha={handleGlassAlpha}
             glassTint={glassTint}

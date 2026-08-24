@@ -40,12 +40,26 @@ change.
 - Gemini CLI is explicitly outside the supported scope.
 - Kimi Code and Kimi Work are one visible agent and one quota identity: show
   only `Kimi`. Their credential sources stay separate internally, while
-  duplicate official windows keep the fresher reliable sample. The monthly OMNI
+  duplicate official windows keep the fresher reliable sample. Usage from both
+  is collected under the same `Kimi` counter: Kimi Work embeds the same
+  kimi-code kernel and writes the same wire.jsonl under its daimon runtime
+  home, with project attribution from its session index. The monthly OMNI
   cycle remains visible; gift and booster balances remain hidden.
 - Qoder, QoderWork, and Qoder CLI are one visible `Qoder` quota identity.
   Their account-level Credits are shared, so they must never create separate
   agent counters or be summed. Qoder CLI's local telemetry is not a token
   source when it reports zero counters.
+- Qoder Credits and the Bailian personal Token Plan (shown as `Qwen`) are
+  separate account-level quotas from the same vendor group: different plans,
+  accounts, and quota hosts. Never merge, sum, or cross-fill their windows or
+  cookies.
+- Pi is a harness, not a quota identity: it has no coding plan of its own.
+  Its session usage is attributed by provider — GLM Coding Plan providers to
+  the GLM card, Qwen Token Plan providers to the Qwen card, direct providers
+  (Anthropic, OpenAI, …) to the Pi card. The Pi card therefore carries local
+  usage only and never a quota; the GLM quota source additionally accepts the
+  key pi stores so a pi-only install still shows the GLM quota on the GLM
+  card.
 - Do not expose credentials or raw provider responses through UI, logs, storage,
   sync, fixtures, or diagnostics.
 
@@ -95,6 +109,13 @@ change.
   drift and verify the full design viewport rather than trusting HWND size alone.
 - Strip window size is measured from rendered content. Constants may seed the
   first frame but are not the source of truth.
+- The notification-area icon can become a quota badge: while the setting is on,
+  the tray icon shows the remaining percentage of the first agent in the widget
+  list instead of the app mark. The number follows the compact-row rule
+  (tightest window), shows `--` when no reliable quota exists, colors stale
+  readings, and the tooltip names the agent and exact value. A hidden window
+  keeps refreshing at the compact cadence so the badge never freezes; turning
+  the setting off restores the default app icon.
 - Compact and strip have independent continuous UI scales in the range
   0.75–2.0, applied on the next entry into that form. Expanded mode is freely
   resizable and keeps webview zoom at 1.
@@ -158,16 +179,17 @@ change.
 - The menu bar uses Metrik's own minimal grammar: one monochrome provider icon
   plus official remaining percentage for every selected agent, `--` for
   unavailable data, and `~` for stale data.
-- Status items are fixed slots with stable AppKit autosave names, all created
-  once at app startup and never removed or re-created within a session.
-  Every native item remains visible to ControlCenter; deselecting an agent
-  clears the slot and collapses its `NSStatusItem.length` to zero, while
-  selecting it restores variable length. Toggling `NSStatusItem.isVisible`
-  retains the object but Tahoe reinserts it at a new menu-bar position, so it
-  cannot preserve the user's order. Removing/recreating items can additionally
-  be silently rejected or misassociated. Empty titles must be written as an
-  empty string because the current tray dependency treats a `None` title as
-  “leave unchanged”.
+- The menu bar owns exactly one native `NSStatusItem` with one stable AppKit
+  autosave name for the whole session. Every selected Agent is rendered, in
+  user order, as an icon-and-percentage segment inside that item's button;
+  deselected Agents have no native item and therefore no hidden menu-bar slot.
+  Do not model Agents as separate zero-length status items: on macOS 26,
+  ControlCenter can retain spacing for every hosted item even when AppKit
+  reports `NSStatusItem.length == 0`. Toggling `NSStatusItem.isVisible` can
+  reinsert an item at a different position, while removing and re-creating
+  items can be silently rejected or misassociated. The single item is never
+  removed or re-created during a session; only its internal attributed content
+  changes.
 - Clicking any status item opens the anchored compact panel. Agent selection
   updates immediately across the separate settings window, compact panel,
   WidgetKit snapshot, and menu-bar status items, and always keeps at least one
@@ -194,12 +216,15 @@ change.
 - A pinned compact or strip surface responds immediately to pointer hover. The
   user can choose either a configurable opacity or complete visual hiding; it
   restores immediately on pointer exit so an always-on-top monitor does not
-  visually obscure the desktop beneath it. On X11, hover appearance is driven
-  by a dedicated native `XQueryPointer` connection and physical window bounds,
-  independent of WebKit's input delivery after the surface becomes transparent.
-  Wayland deliberately withholds global pointer coordinates, so it uses local
-  window-boundary events and retains a visually imperceptible input surface for
-  complete hiding.
+  visually obscure the desktop beneath it. On X11, both fade and complete-hide
+  remove the native window from cursor hit-testing while hovered, so the passive
+  pinned surface never blocks clicks intended for the desktop or another
+  application. Hover appearance and restoration are driven by a dedicated
+  native `XQueryPointer` connection and physical window bounds, independent of
+  WebKit input delivery after the surface becomes transparent and click-through.
+  Wayland deliberately
+  withholds global pointer coordinates, so it uses local window-boundary events
+  and retains a visually imperceptible input surface for complete hiding.
 - Linux pinning is a read-only presentation surface: its controls and drag
   regions are inactive, and only Linux Settings or the Linux tray menu can
   cancel pinning. The native window retains pointer input solely to drive

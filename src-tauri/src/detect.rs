@@ -51,6 +51,14 @@ fn kimi_code_dir() -> PathBuf {
         .unwrap_or_else(|| home().join(".kimi-code"))
 }
 
+/// Grok Build 的数据根：与 `GrokAdapter::detected()` / `grok_home()` 同源。
+fn grok_home_dir() -> PathBuf {
+    std::env::var_os("GROK_HOME")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .unwrap_or_else(|| home().join(".grok"))
+}
+
 pub fn table() -> Vec<AgentProbe> {
     let home = home();
     vec![
@@ -72,7 +80,14 @@ pub fn table() -> Vec<AgentProbe> {
         },
         AgentProbe {
             id: "kimi",
-            probe: Probe::Paths(vec![kimi_code_dir(), home.join(".kimi")]),
+            probe: Probe::Paths(vec![
+                kimi_code_dir(),
+                home.join(".kimi"),
+                // 桌面版没装 CLI 时也能被探到（安装痕迹 = kimi-desktop 数据目录）。
+                dirs::config_dir()
+                    .map(|config| config.join("kimi-desktop"))
+                    .unwrap_or_else(|| home.join(".kimi-desktop-absent")),
+            ]),
         },
         AgentProbe {
             // Antigravity 只在 IDE 运行时才有 language server 端点，扫进程与
@@ -87,6 +102,24 @@ pub fn table() -> Vec<AgentProbe> {
         AgentProbe {
             id: "qoder",
             probe: Probe::Credential(|| coding_quota::qoder_cookie_source().is_some()),
+        },
+        AgentProbe {
+            id: "grok",
+            probe: Probe::Paths(vec![grok_home_dir()]),
+        },
+        AgentProbe {
+            // pi 与其同格式分支 Oh My Pi 各有一个数据根；与 PiAdapter::detected()
+            // 的扫描根同源（取其父目录）。
+            id: "pi",
+            probe: Probe::Paths(vec![
+                home.join(".pi").join("agent"),
+                home.join(".omp").join("agent"),
+            ]),
+        },
+        AgentProbe {
+            // 配额-only：百炼 Token Plan 只有控制台 cookie 能查（同 Qoder 模式）。
+            id: "qwen",
+            probe: Probe::Credential(|| coding_quota::qwen_cookie_source().is_some()),
         },
     ]
 }
@@ -154,7 +187,23 @@ mod tests {
         assert_eq!(paths(by_id("opencode")), vec![opencode_data_dir()]);
         assert_eq!(
             paths(by_id("kimi")),
-            vec![kimi_code_dir(), home.join(".kimi")]
+            vec![
+                kimi_code_dir(),
+                home.join(".kimi"),
+                dirs::config_dir()
+                    .map(|config| config.join("kimi-desktop"))
+                    .unwrap_or_else(|| home.join(".kimi-desktop-absent")),
+            ]
+        );
+        // grok 同样受 GROK_HOME 覆盖。
+        assert_eq!(paths(by_id("grok")), vec![grok_home_dir()]);
+        // pi 与 OMP 的数据根与 PiAdapter::detected() 同源。
+        assert_eq!(
+            paths(by_id("pi")),
+            vec![
+                home.join(".pi").join("agent"),
+                home.join(".omp").join("agent")
+            ]
         );
     }
 

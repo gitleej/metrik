@@ -1,6 +1,6 @@
 use crate::adapters::{
-    AgentAdapter, AntigravityAdapter, ClaudeAdapter, CodexAdapter, KimiAdapter, OpencodeAdapter,
-    ScanDiagnostics, SourceCandidate, WorkbuddyAdapter, ZcodeAdapter,
+    AgentAdapter, AntigravityAdapter, ClaudeAdapter, CodexAdapter, GrokAdapter, KimiAdapter,
+    OpencodeAdapter, PiAdapter, ScanDiagnostics, SourceCandidate, WorkbuddyAdapter, ZcodeAdapter,
 };
 use crate::claude_oauth;
 use crate::detect;
@@ -115,6 +115,7 @@ struct SessionAgg {
     event_count: i64,
     model_components: HashMap<String, TokenComponents>,
     project_tokens: HashMap<String, i64>,
+    cost: CostAccrual,
 }
 
 #[derive(Default)]
@@ -126,6 +127,7 @@ struct ProjectAgg {
     agent_tokens: HashMap<String, i64>,
     sessions: HashSet<(String, String)>,
     pinned: bool,
+    cost: CostAccrual,
 }
 
 /// 项目根路径的展示名：最后一段目录名。
@@ -143,20 +145,33 @@ fn ranked_keys(totals: &HashMap<String, i64>) -> Vec<String> {
     ranked.into_iter().map(|(name, _)| name.clone()).collect()
 }
 
-/// 按模型分量求可计价成本；全部模型都没有定价时返回 None。
-fn estimate_usd(model_components: &HashMap<String, TokenComponents>) -> Option<f64> {
-    let mut total = 0.0_f64;
-    let mut priced_any = false;
-    for (model, comps) in model_components {
-        if let Some(price) = pricing::price_for(model) {
-            priced_any = true;
-            total += comps.input_uncached as f64 * price.input / 1_000_000.0
-                + comps.cache_read as f64 * price.cache_read / 1_000_000.0
-                + comps.cache_write as f64 * price.cache_write / 1_000_000.0
-                + comps.output as f64 * price.output / 1_000_000.0;
+/// 逐事件累计的成本。DeepSeek 按 UTC 时段分峰谷，先按模型汇总再乘单价会把
+/// 时段抹掉，所以计价放在事件粒度上做，汇总的只是算好的金额。
+#[derive(Default)]
+struct CostAccrual {
+    usd: f64,
+    priced_any: bool,
+    unpriced_tokens: i64,
+}
+
+impl CostAccrual {
+    fn add(&mut self, model: Option<&str>, occurred_at_ms: i64, comps: &TokenComponents) {
+        match model.and_then(|model| pricing::price_for(model, occurred_at_ms)) {
+            Some(price) => {
+                self.priced_any = true;
+                self.usd += comps.input_uncached as f64 * price.input / 1_000_000.0
+                    + comps.cache_read as f64 * price.cache_read / 1_000_000.0
+                    + comps.cache_write as f64 * price.cache_write / 1_000_000.0
+                    + comps.output as f64 * price.output / 1_000_000.0;
+            }
+            // 一个模型都没定价时对外仍报"无法估算"，不报 $0。
+            None => self.unpriced_tokens += comps.processed(),
         }
     }
-    priced_any.then_some(total)
+
+    fn usd(&self) -> Option<f64> {
+        self.priced_any.then_some(self.usd)
+    }
 }
 
 pub fn build_snapshot(
@@ -454,12 +469,13 @@ fn sessions_at(
             output: event.output,
         };
         agg.totals.add(&comps);
-        if let Some(model) = event
+        let model = event
             .model
             .as_deref()
             .map(str::trim)
-            .filter(|value| !value.is_empty())
-        {
+            .filter(|value| !value.is_empty());
+        agg.cost.add(model, event.timestamp, &comps);
+        if let Some(model) = model {
             agg.model_components
                 .entry(model.to_owned())
                 .or_default()
@@ -490,7 +506,7 @@ fn sessions_at(
             let model = model_totals.first().map(|(model, _)| model.clone());
             let models = model_totals.into_iter().map(|(model, _)| model).collect();
 
-            let usd = estimate_usd(&agg.model_components);
+            let usd = agg.cost.usd();
             let project = ranked_keys(&agg.project_tokens).into_iter().next();
             let project_label = project.as_deref().map(project_label);
 
@@ -627,12 +643,13 @@ fn projects_at(
         *agg.agent_tokens.entry((*agent).to_owned()).or_default() += comps.processed();
         agg.sessions
             .insert(((*agent).to_owned(), event.session_id.clone()));
-        if let Some(model) = event
+        let model = event
             .model
             .as_deref()
             .map(str::trim)
-            .filter(|value| !value.is_empty())
-        {
+            .filter(|value| !value.is_empty());
+        agg.cost.add(model, event.timestamp, &comps);
+        if let Some(model) = model {
             agg.model_components
                 .entry(model.to_owned())
                 .or_default()
@@ -649,7 +666,7 @@ fn projects_at(
             cache_read: agg.totals.cache_read,
             cache_write: agg.totals.cache_write,
             output: agg.totals.output,
-            usd: estimate_usd(&agg.model_components),
+            usd: agg.cost.usd(),
             session_count: agg.sessions.len() as i64,
             event_count: agg.event_count,
             last_ms: agg.last_ms,
@@ -732,6 +749,8 @@ fn ingest_sources(connection: &mut Connection, horizon_ms: i64) -> Result<ScanRe
         Box::new(KimiAdapter::detected()),
         Box::new(AntigravityAdapter::detected()),
         Box::new(WorkbuddyAdapter::detected()),
+        Box::new(GrokAdapter::detected()),
+        Box::new(PiAdapter::detected()),
     ];
     let mut report = ScanReport::default();
     let mut queue: Vec<(usize, SourceCandidate)> = Vec::new();
@@ -892,7 +911,10 @@ fn query_snapshot_at(
         .map(|agent| (*agent, TokenComponents::default()))
         .collect();
     let mut model_totals: HashMap<(String, String), i64> = HashMap::new();
-    let mut model_components: HashMap<(String, String), TokenComponents> = HashMap::new();
+    let mut agent_cost: HashMap<&str, CostAccrual> = AGENT_IDS
+        .iter()
+        .map(|agent| (*agent, CostAccrual::default()))
+        .collect();
 
     for event in events {
         let Some(agent) = AGENT_IDS.iter().find(|agent| **agent == event.adapter) else {
@@ -912,25 +934,29 @@ fn query_snapshot_at(
         }
         buckets.get_mut(agent).expect("registered agent")[index] += event.tokens;
         *totals.entry(agent).or_default() += event.tokens;
-        let comps = components.get_mut(agent).expect("registered agent");
-        comps.input_uncached += event.input_uncached;
-        comps.cache_read += event.cache_read;
-        comps.cache_write += event.cache_write;
-        comps.output += event.output;
-        let model_key = event
+        let event_comps = TokenComponents {
+            input_uncached: event.input_uncached,
+            cache_read: event.cache_read,
+            cache_write: event.cache_write,
+            output: event.output,
+        };
+        components
+            .get_mut(agent)
+            .expect("registered agent")
+            .add(&event_comps);
+        let model = event
             .model
             .as_deref()
             .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .unwrap_or("unknown")
-            .to_owned();
-        let model_map_key = ((*agent).to_owned(), model_key);
-        *model_totals.entry(model_map_key.clone()).or_insert(0) += event.tokens;
-        let model_comp = model_components.entry(model_map_key).or_default();
-        model_comp.input_uncached += event.input_uncached;
-        model_comp.cache_read += event.cache_read;
-        model_comp.cache_write += event.cache_write;
-        model_comp.output += event.output;
+            .filter(|value| !value.is_empty());
+        // 模型分布里认不出名字的记成 "unknown"，计价一侧同样归入 unpriced。
+        let model_map_key = ((*agent).to_owned(), model.unwrap_or("unknown").to_owned());
+        *model_totals.entry(model_map_key).or_insert(0) += event.tokens;
+        agent_cost.get_mut(agent).expect("registered agent").add(
+            model,
+            event.timestamp,
+            &event_comps,
+        );
     }
 
     if period == "today" {
@@ -986,44 +1012,20 @@ fn query_snapshot_at(
         }
     };
 
-    let mut agent_cost_usd: HashMap<&str, f64> =
-        AGENT_IDS.iter().map(|agent| (*agent, 0.0)).collect();
-    let mut agent_unpriced_tokens: HashMap<&str, i64> =
-        AGENT_IDS.iter().map(|agent| (*agent, 0)).collect();
-    let mut total_usd = 0.0_f64;
-    let mut unpriced_tokens = 0_i64;
-    for ((agent, model), comp) in &model_components {
-        let processed = comp.input_uncached + comp.cache_read + comp.cache_write + comp.output;
-        match pricing::price_for(model) {
-            Some(price) => {
-                let usd = comp.input_uncached as f64 * price.input / 1_000_000.0
-                    + comp.cache_read as f64 * price.cache_read / 1_000_000.0
-                    + comp.cache_write as f64 * price.cache_write / 1_000_000.0
-                    + comp.output as f64 * price.output / 1_000_000.0;
-                total_usd += usd;
-                if let Some(entry) = agent_cost_usd.get_mut(agent.as_str()) {
-                    *entry += usd;
-                }
-            }
-            None => {
-                unpriced_tokens += processed;
-                if let Some(entry) = agent_unpriced_tokens.get_mut(agent.as_str()) {
-                    *entry += processed;
-                }
-            }
-        }
-    }
     let cost = CostSummary {
         available: true,
-        total_usd,
-        unpriced_tokens,
+        total_usd: agent_cost.values().map(|accrual| accrual.usd).sum(),
+        unpriced_tokens: agent_cost
+            .values()
+            .map(|accrual| accrual.unpriced_tokens)
+            .sum(),
         pricing_as_of: pricing::PRICING_AS_OF.to_owned(),
         by_agent: AGENT_IDS
             .iter()
             .map(|agent| AgentCost {
                 agent: (*agent).to_owned(),
-                usd: agent_cost_usd[agent],
-                unpriced_tokens: agent_unpriced_tokens[agent],
+                usd: agent_cost[agent].usd,
+                unpriced_tokens: agent_cost[agent].unpriced_tokens,
             })
             .collect(),
     };
@@ -1464,7 +1466,7 @@ fn source_views(report: ScanReport, sync_status: Option<SyncView>) -> Vec<Source
             kind: "local".into(),
             label: "Kimi 本地 Token".into(),
             detail: format!(
-                "发现 {} 个 wire.jsonl，本次更新 {} 个。{}只计单轮增量（usageScope=turn）与旧版 StatusUpdate（按 message_id 取分量最大值）；未安装 Kimi 时保持为 0，不做推算。尚未在装有 Kimi 的机器上实机验收。",
+                "发现 {} 个 wire.jsonl，本次更新 {} 个。{}只计单轮增量（usageScope=turn）与旧版 StatusUpdate（按 message_id 取分量最大值）；Kimi Work 桌面版内嵌同源内核，其会话目录一并扫描，项目归属取自各自的会话索引；未安装时保持为 0，不做推算。",
                 discovered("kimi"),
                 refreshed("kimi"),
                 coverage_detail(&kimi_diagnostics, errors("kimi"))
@@ -1490,6 +1492,68 @@ fn source_views(report: ScanReport, sync_status: Option<SyncView>) -> Vec<Source
             kind: "official".into(),
             label: "Qoder 官方 Credits".into(),
             detail: "账户级 Credits 覆盖 Qoder、QoderWork 与 Qoder CLI；通过用户提供的官网 Cookie 读取，不读取或解密客户端登录凭据，也不把本地遥测的零 token 当作用量。".into(),
+            quality: "official".into(),
+            quality_label: "官方".into(),
+        },
+        SourceView {
+            id: "grok-local".into(),
+            kind: "local".into(),
+            label: "Grok Build 本地 Token".into(),
+            detail: format!(
+                "发现 {} 个 updates.jsonl，本次更新 {} 个。{}只计 `_x.ai/session/update` 中带 usage 的单轮记录（按 prompt_id 去重取最后一次）；未安装 Grok Build 时保持为 0，不做推算。",
+                discovered("grok"),
+                refreshed("grok"),
+                coverage_detail(&diagnostics("grok"), errors("grok"))
+            ),
+            quality: if diagnostics("grok").partial_sources > 0 || errors("grok") > 0 {
+                "partial"
+            } else {
+                "exact"
+            }
+            .into(),
+            quality_label: if diagnostics("grok").partial_sources > 0 || errors("grok") > 0 {
+                "数据不完整"
+            } else {
+                "精确解析"
+            }
+            .into(),
+        },
+        SourceView {
+            id: "grok-quota".into(),
+            kind: "official".into(),
+            label: "Grok Build 官方配额".into(),
+            detail: "读取 Grok CLI 统一日志中的 billing credits 快照（creditUsagePercent + 周期结束时间）；质量为官方快照，非实时 HTTP 拉取。未运行过 grok 或日志无账单记录时显示不可用。".into(),
+            quality: "official".into(),
+            quality_label: "官方".into(),
+        },
+        SourceView {
+            id: "pi-local".into(),
+            kind: "local".into(),
+            label: "Pi 本地 Token".into(),
+            detail: format!(
+                "发现 {} 个会话文件，本次更新 {} 个。{}pi 是 harness，自身没有 coding plan：逐请求计数按 provider 响应标识去重，并按 provider 归属到对应计量卡片（GLM Coding Plan 记入 GLM、Qwen Token Plan 记入 Qwen、其余留在 Pi）；fork/clone 复制不重复入账，摘要生成与工具内嵌调用的用量一并计入，项目归属只取会话头里的工作目录。",
+                discovered("pi"),
+                refreshed("pi"),
+                coverage_detail(&diagnostics("pi"), errors("pi"))
+            ),
+            quality: if diagnostics("pi").partial_sources > 0 || errors("pi") > 0 {
+                "partial"
+            } else {
+                "exact"
+            }
+            .into(),
+            quality_label: if diagnostics("pi").partial_sources > 0 || errors("pi") > 0 {
+                "数据不完整"
+            } else {
+                "精确解析"
+            }
+            .into(),
+        },
+        SourceView {
+            id: "qwen-quota".into(),
+            kind: "official".into(),
+            label: "Qwen Token Plan 官方配额".into(),
+            detail: "阿里百炼个人 Token Plan 是账户级套餐（pi 等客户端用它的 sk-sp- key 消耗），额度只能从百炼控制台读取：用你提供的登录 cookie 查询 5 小时与每周滚动窗，cookie 仅明文保存在本机、不入账本不同步，可随时清除。".into(),
             quality: "official".into(),
             quality_label: "官方".into(),
         },
@@ -2066,6 +2130,71 @@ mod tests {
         assert_eq!(session.model, None);
         assert!(session.models.is_empty());
         assert_eq!(session.usd, None);
+    }
+
+    #[test]
+    fn deepseek_cost_follows_the_utc_peak_and_off_peak_windows() {
+        // DeepSeek 按 UTC 时段分峰谷。计价必须拿事件自己的时间戳去查价：
+        // 先按模型汇总再乘单价，两个时段的用量会被抹成一个价。
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(include_str!("../migrations/001_init.sql"))
+            .unwrap();
+        let today = Local::now().date_naive();
+        let local_now = test_local_time(today, 23);
+
+        // 本地一天覆盖 24 个 UTC 小时，峰段最长的空档也只有 15 小时，
+        // 所以 0–22 点里一定各能找到一个峰段和一个谷段时刻（与时区无关）。
+        let hour_ms = |hour: u32| -> Option<i64> {
+            Local
+                .from_local_datetime(&today.and_hms_opt(hour, 0, 0).unwrap())
+                .single()
+                .map(|time| time.timestamp_millis())
+        };
+        // 时间戳 0 是 UTC 00:00，落在谷段；谷段价是峰段的一半，比它贵就是峰段。
+        let off_peak_input = pricing::price_for("deepseek-v4-pro", 0).unwrap().input;
+        let is_peak =
+            |ms: i64| pricing::price_for("deepseek-v4-pro", ms).unwrap().input > off_peak_input;
+        let peak_ms = (0..23)
+            .filter_map(hour_ms)
+            .find(|ms| is_peak(*ms))
+            .expect("本地日里必有峰段时刻");
+        let off_peak_ms = (0..23)
+            .filter_map(hour_ms)
+            .find(|ms| !is_peak(*ms))
+            .expect("本地日里必有谷段时刻");
+
+        for (event_id, session_id, occurred_at_ms) in [
+            ("ds-peak", "sess-peak", peak_ms),
+            ("ds-off-peak", "sess-off-peak", off_peak_ms),
+        ] {
+            insert_test_session_event(
+                &connection,
+                event_id,
+                "claude",
+                session_id,
+                occurred_at_ms,
+                Some("deepseek-v4-pro"),
+                1_000_000,
+                0,
+                0,
+                1_000_000,
+            );
+        }
+
+        let result = sessions_at(&connection, "today", local_now).unwrap();
+        let usd_of = |session_id: &str| {
+            result
+                .sessions
+                .iter()
+                .find(|session| session.session_id == session_id)
+                .unwrap()
+                .usd
+                .unwrap()
+        };
+        // 官方谷段价正是峰段的一半，用量完全相同，成本就该差一倍。
+        assert!((usd_of("sess-peak") - (1.32 + 3.96)).abs() < 1e-9);
+        assert!((usd_of("sess-off-peak") - (0.66 + 1.98)).abs() < 1e-9);
     }
 
     #[test]
@@ -3020,6 +3149,7 @@ mod tests {
             Box::new(OpencodeAdapter::detected()),
             Box::new(KimiAdapter::detected()),
             Box::new(WorkbuddyAdapter::detected()),
+            Box::new(PiAdapter::detected()),
         ];
 
         for adapter in adapters {

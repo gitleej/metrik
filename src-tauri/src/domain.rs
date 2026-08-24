@@ -7,7 +7,9 @@ use std::path::PathBuf;
 /// qoder 是配额-only：Qoder、QoderWork 与 Qoder CLI 共用同一账户级 Credits
 /// 配额来源。Qoder CLI 的本地遥测 token 字段实测为 0，不能作为用量账本来源。
 /// kimiwork 只保留为内部配额来源，窗口合并到 kimi，不作为独立可见 Agent。
-pub const AGENT_IDS: [&str; 8] = [
+/// qwen 同为配额-only：百炼个人 Token Plan 是账户级套餐，被 pi 等客户端的
+/// qwen-token-plan key 消费，但额度只能在百炼控制台查。
+pub const AGENT_IDS: [&str; 11] = [
     "codex",
     "claude",
     "zcode",
@@ -16,6 +18,9 @@ pub const AGENT_IDS: [&str; 8] = [
     "antigravity",
     "workbuddy",
     "qoder",
+    "grok",
+    "pi",
+    "qwen",
 ];
 
 #[derive(Clone, Debug, Default, PartialEq)]

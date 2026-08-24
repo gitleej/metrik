@@ -1,18 +1,25 @@
 mod antigravity;
 mod claude;
 mod codex;
+mod grok;
 mod kimi;
 mod opencode;
+mod pi;
 mod workbuddy;
 mod zcode;
 
 pub use antigravity::AntigravityAdapter;
 pub use claude::ClaudeAdapter;
 pub use codex::CodexAdapter;
+pub use grok::GrokAdapter;
 pub use kimi::KimiAdapter;
 pub use opencode::OpencodeAdapter;
+pub use pi::PiAdapter;
 pub use workbuddy::WorkbuddyAdapter;
 pub use zcode::ZcodeAdapter;
+
+// 配额快照从日志读取，供 quota 注册表调用；根目录由调用点解析（测试可注入）。
+pub use grok::{fetch_grok_quota_snapshot, grok_home, grok_home_exists};
 
 use crate::domain::{stable_hash, ParsedSource};
 use anyhow::Result;
@@ -107,6 +114,17 @@ pub trait AgentAdapter: Send + Sync {
 }
 
 pub fn discover_jsonl(roots: &[PathBuf], adapter_id: &str, cutoff_ms: i64) -> Vec<SourceCandidate> {
+    discover_files(roots, adapter_id, cutoff_ms, None)
+}
+
+/// 与 `discover_jsonl` 相同，但可限定固定文件名：Grok 的 updates.jsonl 与
+/// 同目录的 chat_history / events 共享 .jsonl 扩展名，全收会拖慢扫描队列。
+fn discover_files(
+    roots: &[PathBuf],
+    adapter_id: &str,
+    cutoff_ms: i64,
+    filename: Option<&str>,
+) -> Vec<SourceCandidate> {
     let mut found = Vec::new();
     for root in roots.iter().filter(|root| root.exists()) {
         for entry in WalkDir::new(root)
@@ -116,7 +134,11 @@ pub fn discover_jsonl(roots: &[PathBuf], adapter_id: &str, cutoff_ms: i64) -> Ve
             .filter(|entry| entry.file_type().is_file())
         {
             let path = entry.into_path();
-            if path.extension().and_then(|value| value.to_str()) != Some("jsonl") {
+            let name_matches = match filename {
+                Some(wanted) => path.file_name().and_then(|value| value.to_str()) == Some(wanted),
+                None => path.extension().and_then(|value| value.to_str()) == Some("jsonl"),
+            };
+            if !name_matches {
                 continue;
             }
             let Ok(metadata) = path.metadata() else {

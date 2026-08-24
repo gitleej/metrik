@@ -8,6 +8,7 @@ mod domain;
 mod engine;
 #[cfg(target_os = "macos")]
 mod macos;
+mod pi_providers;
 #[cfg(target_os = "linux")]
 mod pinned_hover;
 mod pricing;
@@ -80,51 +81,12 @@ fn read_linux_startup_position(app: &tauri::AppHandle) -> Option<LinuxStartupPos
     serde_json::from_slice(&contents).ok()
 }
 
-/// One-time compatibility import for positions saved by older Linux builds in
-/// WebKit localStorage. Its UTF-16 value is safe, app-owned coordinate data;
-/// no arbitrary WebView data is read or copied.
-#[cfg(target_os = "linux")]
-fn read_legacy_linux_startup_position(app: &tauri::AppHandle) -> Option<LinuxStartupPosition> {
-    let path = app
-        .path()
-        .app_local_data_dir()
-        .ok()?
-        .join("localstorage/tauri_localhost_0.localstorage");
-    let connection =
-        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .ok()?;
-    let bytes: Vec<u8> = connection
-        .query_row(
-            "SELECT value FROM ItemTable WHERE key = 'metrik:widgetPosition'",
-            [],
-            |row| row.get(0),
-        )
-        .ok()?;
-    let words: Vec<u16> = bytes
-        .chunks_exact(2)
-        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
-        .collect();
-    let value = String::from_utf16(&words).ok()?;
-    let position: serde_json::Value = serde_json::from_str(&value).ok()?;
-    Some(LinuxStartupPosition {
-        x: position.get("x")?.as_i64()?.try_into().ok()?,
-        y: position.get("y")?.as_i64()?.try_into().ok()?,
-        // Older Linux versions saved the GTK outer origin but set_position
-        // expects the content origin. Mutter's normal frame offset is learned
-        // and persisted precisely after the first move in the new format.
-        offset_x: 0,
-        offset_y: 37,
-    })
-}
-
 #[cfg(target_os = "linux")]
 fn restore_linux_startup_position(app: &tauri::AppHandle) {
     let Some(window) = app.get_webview_window("main") else {
         return;
     };
-    if let Some(position) =
-        read_linux_startup_position(app).or_else(|| read_legacy_linux_startup_position(app))
-    {
+    if let Some(position) = read_linux_startup_position(app) {
         let _ = window.set_position(tauri::PhysicalPosition::new(
             position.x.saturating_add(position.offset_x),
             position.y.saturating_add(position.offset_y),
@@ -860,6 +822,71 @@ async fn configure_qoder_cookie(cookie: Option<String>) -> Result<QoderCookieVie
     .map_err(|error| format!("qoder cookie task failed: {error}"))?
 }
 
+/// Qwen cookie 状态/配置视图与 Qoder 同构，设置页共用样式。
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct QwenCookieView {
+    configured: bool,
+    source: Option<&'static str>,
+    message: Option<String>,
+}
+
+#[tauri::command]
+async fn qwen_cookie_status() -> Result<QwenCookieView, String> {
+    let source = coding_quota::qwen_cookie_source();
+    Ok(QwenCookieView {
+        configured: source.is_some(),
+        source,
+        message: None,
+    })
+}
+
+/// 保存/清除 Qwen（百炼）控制台 cookie，保存后立即拉一次官方额度验证。
+#[tauri::command]
+async fn configure_qwen_cookie(cookie: Option<String>) -> Result<QwenCookieView, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let normalized = match cookie.as_deref() {
+            Some(raw) => Some(
+                coding_quota::normalize_qoder_cookie_input(raw)
+                    .ok_or_else(|| "粘贴内容里没有找到 Cookie 行".to_owned())?,
+            ),
+            None => None,
+        };
+        let saved = coding_quota::write_qwen_cookie_file(normalized.as_deref())
+            .map_err(|error| error.to_string())?;
+        let source = coding_quota::qwen_cookie_source();
+        if !saved {
+            return Ok(QwenCookieView {
+                configured: source.is_some(),
+                source,
+                message: Some("已清除本地保存的 cookie。".to_owned()),
+            });
+        }
+        let message = match coding_quota::fetch_qwen_quota(std::time::Duration::from_secs(10)) {
+            Ok(samples) => {
+                let mut parts = Vec::new();
+                for sample in &samples {
+                    let label = if sample.window_key == "five_hour" {
+                        "5 小时"
+                    } else {
+                        "每周"
+                    };
+                    parts.push(format!("{label}剩余 {:.0}%", sample.remaining_percent));
+                }
+                format!("已保存并验证成功：{}。", parts.join("，"))
+            }
+            Err(error) => format!("已保存，但验证失败：{error}"),
+        };
+        Ok(QwenCookieView {
+            configured: true,
+            source,
+            message: Some(message),
+        })
+    })
+    .await
+    .map_err(|error| format!("qwen cookie task failed: {error}"))?
+}
+
 #[tauri::command]
 async fn sync_settings(state: State<'_, AppState>) -> Result<domain::SyncView, String> {
     let database_path = state.database_path.clone();
@@ -1018,6 +1045,89 @@ async fn set_taskbar_button(window: tauri::WebviewWindow, visible: bool) -> Resu
         let _ = (&window, visible);
     }
     Ok(())
+}
+
+/// Windows 托盘余量徽标：把前端渲染好的 RGBA 位图换成任务栏托盘图标。
+/// 隐藏窗口后任务栏按钮本身就没了，能常驻显示数字的只有通知区域的托盘图标；
+/// 位图由 webview 里的 canvas 画出（渲染权威在前端，与悬浮窗尺寸同一套哲学），
+/// 后端只做校验和登记。icon 为 None 时恢复应用默认图标。
+#[derive(Debug, serde::Deserialize)]
+struct TrayQuotaIcon {
+    rgba: Vec<u8>,
+    width: u32,
+    height: u32,
+}
+
+/// 托盘图标尺寸上限：徽标实际是 32×32，这里只拦离谱的输入，不当作配置项。
+const TRAY_ICON_MAX_EDGE: u32 = 256;
+
+/// 负载校验：尺寸有界且 RGBA 长度与宽高一致。独立成函数供单测，不依赖平台。
+fn validate_tray_quota_icon(icon: &TrayQuotaIcon) -> Result<(), String> {
+    if icon.width == 0
+        || icon.height == 0
+        || icon.width > TRAY_ICON_MAX_EDGE
+        || icon.height > TRAY_ICON_MAX_EDGE
+    {
+        return Err(format!(
+            "托盘图标尺寸超出范围：{}×{}",
+            icon.width, icon.height
+        ));
+    }
+    let expected = icon.width as usize * icon.height as usize * 4;
+    if icon.rgba.len() != expected {
+        return Err(format!(
+            "托盘图标像素数据长度不匹配：{} ≠ {expected}",
+            icon.rgba.len()
+        ));
+    }
+    Ok(())
+}
+
+/// 设置 Windows 托盘图标为余量徽标；icon 为 None 时恢复默认图标与默认提示。
+/// 其它平台没有这条路径（前端只在 Windows 调用），这里是 no-op。
+#[tauri::command]
+fn set_tray_quota_icon(
+    app: tauri::AppHandle,
+    icon: Option<TrayQuotaIcon>,
+    tooltip: Option<String>,
+) -> Result<(), String> {
+    // 校验放在平台分支之前：非 Windows 构建里也读字段、走同一契约，
+    // 否则 dead_code 会把 TrayQuotaIcon、校验函数和上限常量判成死代码。
+    if let Some(payload) = icon.as_ref() {
+        validate_tray_quota_icon(payload)?;
+    }
+    #[cfg(windows)]
+    {
+        let Some(tray) = app.tray_by_id("main") else {
+            return Err("任务栏托盘图标不存在".into());
+        };
+        match icon {
+            Some(payload) => {
+                let image =
+                    tauri::image::Image::new_owned(payload.rgba, payload.width, payload.height);
+                tray.set_icon(Some(image))
+                    .map_err(|error| error.to_string())?;
+            }
+            None => {
+                let fallback = app
+                    .default_window_icon()
+                    .cloned()
+                    .ok_or_else(|| "默认应用图标不可用".to_string())?;
+                tray.set_icon(Some(fallback))
+                    .map_err(|error| error.to_string())?;
+            }
+        }
+        // 提示文本跟着数字走（如 "Metrik · Claude 剩余 87%"）；恢复时回到默认。
+        let tooltip = tooltip.filter(|text| !text.trim().is_empty());
+        tray.set_tooltip(tooltip.as_deref().or(Some("Metrik")))
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (app, icon, tooltip);
+        Ok(())
+    }
 }
 
 /// X11 允许客户端读取和恢复全局窗口坐标；Wayland 刻意不暴露这套能力。
@@ -1551,7 +1661,10 @@ pub fn run() {
             set_claude_oauth,
             qoder_cookie_status,
             configure_qoder_cookie,
+            qwen_cookie_status,
+            configure_qwen_cookie,
             set_taskbar_button,
+            set_tray_quota_icon,
             #[cfg(target_os = "linux")]
             linux_supports_global_window_coordinates,
             #[cfg(target_os = "linux")]
@@ -1845,6 +1958,41 @@ mod tests {
         migrate_legacy_database(&legacy, &local).unwrap();
 
         assert!(!local.exists());
+    }
+
+    #[test]
+    fn tray_quota_icon_payloads_are_validated_before_use() {
+        let badge = TrayQuotaIcon {
+            rgba: vec![10; 32 * 32 * 4],
+            width: 32,
+            height: 32,
+        };
+        assert_eq!(validate_tray_quota_icon(&badge), Ok(()));
+
+        let truncated = TrayQuotaIcon {
+            rgba: vec![10; 100],
+            width: 32,
+            height: 32,
+        };
+        assert!(validate_tray_quota_icon(&truncated)
+            .unwrap_err()
+            .contains("长度不匹配"));
+
+        let oversize = TrayQuotaIcon {
+            rgba: vec![0; (TRAY_ICON_MAX_EDGE as usize + 1) * 4],
+            width: TRAY_ICON_MAX_EDGE + 1,
+            height: 1,
+        };
+        assert!(validate_tray_quota_icon(&oversize)
+            .unwrap_err()
+            .contains("尺寸超出范围"));
+
+        let empty = TrayQuotaIcon {
+            rgba: Vec::new(),
+            width: 0,
+            height: 0,
+        };
+        assert!(validate_tray_quota_icon(&empty).is_err());
     }
 }
 #[test]

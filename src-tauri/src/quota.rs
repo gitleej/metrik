@@ -13,6 +13,7 @@
 //! ——来源里消失的窗口（如套餐变更后没有 5 小时窗）不得滞留冒充当前额度；
 //! 拿不到就保留旧行（会随时效在展示层变陈旧），绝不写零值或估算。
 
+use crate::adapters;
 use crate::app_server;
 use crate::claude_hook::ClaudeHook;
 use crate::claude_oauth::{self, ClaudeOauth};
@@ -117,8 +118,11 @@ pub trait QuotaProvider: Send + Sync {
 pub type QuotaCache = Mutex<HashMap<&'static str, (Instant, Vec<QuotaSample>)>>;
 
 pub fn registry() -> Vec<Box<dyn QuotaProvider>> {
-    let mut providers: Vec<Box<dyn QuotaProvider>> =
-        vec![Box::new(CodexQuota), Box::new(ClaudeQuota)];
+    let mut providers: Vec<Box<dyn QuotaProvider>> = vec![
+        Box::new(CodexQuota),
+        Box::new(ClaudeQuota),
+        Box::new(GrokQuota),
+    ];
     for (adapter_id, fetch) in [
         (
             "zcode",
@@ -128,10 +132,35 @@ pub fn registry() -> Vec<Box<dyn QuotaProvider>> {
         ("kimiwork", coding_quota::fetch_kimiwork_quota),
         ("qoder", coding_quota::fetch_qoder_quota),
         ("workbuddy", coding_quota::fetch_workbuddy_quota),
+        ("qwen", coding_quota::fetch_qwen_quota),
     ] {
         providers.push(Box::new(HttpQuota { adapter_id, fetch }));
     }
     providers
+}
+
+/// Grok Build：本地统一日志里的 credits 快照（非网络 live）。
+/// 日志由 Grok CLI 在会话中自行写入；Metrik 只读尾部，不碰 OAuth。
+struct GrokQuota;
+
+impl QuotaProvider for GrokQuota {
+    fn adapter_id(&self) -> &'static str {
+        "grok"
+    }
+
+    fn policy(&self) -> QuotaPolicy {
+        // 本地文件读取便宜；日志可能数分钟才刷新一次，fresh 不必太短。
+        QuotaPolicy::new(120, 300, 2)
+    }
+
+    fn is_available(&self, _env: &ProviderEnv) -> bool {
+        adapters::grok_home_exists()
+    }
+
+    fn fetch(&self, timeout: Duration) -> Result<Vec<QuotaSample>> {
+        // 环境变量在这里解析一次；适配器本体接根目录参数，测试不碰全局状态。
+        adapters::fetch_grok_quota_snapshot(&adapters::grok_home(), timeout)
+    }
 }
 
 /// 取数并落库。engine 只调这一个。
@@ -167,6 +196,20 @@ pub fn refresh_all(connection: &Connection, cache: &QuotaCache, force: bool) -> 
             storage::upsert_quota(connection, sample)?;
         }
     }
+    prune_unmanaged_quota_rows(connection)?;
+    Ok(())
+}
+
+/// 清除注册表已不存在的 adapter 的残留配额行。0.17.2 把 pi 配额源移除后，
+/// 0.17.1 写入的 pi 行若不清理，卡片/胶囊会继续显示一个不再有来源的配额。
+/// 只删“不再有 provider”的 adapter；仍在注册表里的（含 kimiwork 这类内部源）
+/// 即使本轮拉空也保留旧行（陈旧展示由展示层负责）。
+pub fn prune_unmanaged_quota_rows(connection: &Connection) -> Result<()> {
+    let managed: Vec<&str> = registry().iter().map(|p| p.adapter_id()).collect();
+    let placeholders = vec!["?"; managed.len()].join(",");
+    let sql = format!("DELETE FROM quota_snapshot WHERE adapter_id NOT IN ({placeholders})");
+    let mut statement = connection.prepare(&sql)?;
+    statement.execute(rusqlite::params_from_iter(managed))?;
     Ok(())
 }
 
@@ -302,6 +345,43 @@ mod tests {
     }
 
     #[test]
+    fn prune_removes_rows_of_removed_quota_sources_only() {
+        use crate::domain::QuotaSample;
+        let connection = memory_ledger();
+        // pi 曾是配额源（0.17.1），0.17.2 移除；kimiwork 仍在注册表。
+        for adapter in ["pi", "kimiwork"] {
+            storage::upsert_quota(
+                &connection,
+                &QuotaSample {
+                    adapter_id: adapter,
+                    window_key: "five_hour".into(),
+                    remaining_percent: 99.0,
+                    resets_at_ms: None,
+                    collected_at_ms: 0,
+                    source_label: "x".into(),
+                    quality: "official_live",
+                },
+            )
+            .unwrap();
+        }
+        prune_unmanaged_quota_rows(&connection).unwrap();
+        let left: Vec<String> = {
+            let mut s = connection
+                .prepare("SELECT adapter_id FROM quota_snapshot ORDER BY adapter_id")
+                .unwrap();
+            s.query_map([], |row| row.get(0))
+                .unwrap()
+                .map(|r| r.unwrap())
+                .collect()
+        };
+        assert_eq!(
+            left,
+            vec!["kimiwork".to_string()],
+            "pi 残留应被清除、kimiwork 保留"
+        );
+    }
+
+    #[test]
     fn registry_covers_every_quota_adapter_exactly_once() {
         let mut ids: Vec<&str> = registry()
             .iter()
@@ -316,9 +396,11 @@ mod tests {
             vec![
                 "claude",
                 "codex",
+                "grok",
                 "kimi",
                 "kimiwork",
                 "qoder",
+                "qwen",
                 "workbuddy",
                 "zcode"
             ]
