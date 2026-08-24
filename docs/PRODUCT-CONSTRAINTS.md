@@ -222,9 +222,9 @@ change.
   application. Hover appearance and restoration are driven by a dedicated
   native `XQueryPointer` connection and physical window bounds, independent of
   WebKit input delivery after the surface becomes transparent and click-through.
-  Wayland deliberately
-  withholds global pointer coordinates, so it uses local window-boundary events
-  and retains a visually imperceptible input surface for complete hiding.
+  Wayland deliberately withholds global pointer coordinates, so it uses local
+  window-boundary events and retains a visually imperceptible input surface for
+  complete hiding.
 - Linux pinning is a read-only presentation surface: its controls and drag
   regions are inactive, and only Linux Settings or the Linux tray menu can
   cancel pinning. The native window retains pointer input solely to drive

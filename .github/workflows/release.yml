@@ -18,12 +18,24 @@ jobs:
             args: ""
             rust-targets: ""
             widget-archs: ""
+            updater-json: "true"
           # Intel + Apple Silicon 通用包。macOS 尚未实机验收，Release 说明里
           # 必须标明这一点。
           - platform: macos-latest
             args: "--target universal-apple-darwin"
             rust-targets: "aarch64-apple-darwin,x86_64-apple-darwin"
             widget-archs: "arm64 x86_64"
+            updater-json: "true"
+          # Linux 发布基线与 CI 一致：Ubuntu 24.04 x86_64，只发 deb 与 AppImage。
+          # Linux 安装包暂不走应用内更新（deb 由包管理器接管，AppImage 更新
+          # 未验收），不产出更新器工件，也不参与 latest.json。
+          - platform: ubuntu-24.04
+            args: >-
+              --bundles deb,appimage
+              --config '{"bundle":{"createUpdaterArtifacts":false}}'
+            rust-targets: ""
+            widget-archs: ""
+            updater-json: "false"
 
     runs-on: ${{ matrix.platform }}
     steps:
@@ -44,6 +56,19 @@ jobs:
       # 发布不频繁，且通用构建的 target 布局会让缓存的路径校验在 post 步骤
       # 报错、把已成功的构建标红。发布流程不缓存，换取稳定的绿。
 
+      # 与 ci.yml 的 Linux job 保持同一份依赖清单；改动时两边一起改。
+      - name: Install Linux desktop dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libxdo-dev \
+            libssl-dev \
+            patchelf
+
       - name: Install frontend dependencies
         run: npm ci
 
@@ -57,12 +82,14 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           METRIK_WIDGET_ARCHS: ${{ matrix.widget-archs }}
+          # Ubuntu 24.04 镜像没有 FUSE，linuxdeploy 需解包运行（同 ci.yml）。
+          APPIMAGE_EXTRACT_AND_RUN: "1"
         with:
           tagName: ${{ github.ref_name }}
           releaseName: Metrik ${{ github.ref_name }}
           releaseDraft: true
           prerelease: false
-          includeUpdaterJson: true
+          includeUpdaterJson: ${{ matrix.updater-json }}
           args: ${{ matrix.args }}
 
       - name: Verify WidgetKit extension is embedded
@@ -85,3 +112,12 @@ jobs:
           test "$widget_build" = "$host_build"
           test "$widget_release" = "$host_release"
           codesign --verify --deep --strict --verbose=2 "$app_path"
+
+      # 打包步骤成功不代表两个分发格式都产出了；缺失时直接判红，避免
+      # Release 页只有其中一种包。
+      - name: Verify Linux packages were built
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          find src-tauri/target -path '*/release/bundle/deb/*.deb' | grep -q .
+          find src-tauri/target -path '*/release/bundle/appimage/*.AppImage' | grep -q .
