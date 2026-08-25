@@ -27,9 +27,14 @@
 //!
 //! ## 分时定价
 //!
-//! DeepSeek 按 UTC 时段分峰谷，谷段是峰段的 5 折。所以 `price_for` 收事件
+//! DeepSeek 按时段分峰谷，谷段是峰段的 5 折。所以 `price_for` 收事件
 //! 时间戳：成本必须逐事件计价，先按模型汇总再乘单价会把时段信息抹掉。
 //! 表里存峰段（标准）价，谷段在查表时打折，见 OFF_PEAK_HALF_PRICE。
+//!
+//! 峰段除了钟点还有一根**星期**轴：官方两个窗口只在周一至周五生效，周六周日
+//! 全天谷段（2026-08-23 北京时间起）。而周几要按**北京时间**数，不是 UTC ——
+//! 北京早 8 小时，UTC 周五 16:00 起北京已是周六。只看钟点的话，周末落在窗口
+//! 里的用量会按峰段价估算，正好高一倍，而所有断言照样绿。
 //!
 //! 订阅制 coding plan 的专属模型 ID 一律 unpriced：Kimi Code 的 kimi-for-coding 等。
 //! 订阅额度按周期重置、不按 token 卖；
@@ -158,10 +163,16 @@ const MANUAL_PRICING: &[(&str, Pricing)] = &[
     ),
 ];
 
-/// 官方按 UTC 时段分价的模型：谷段单价 = 表内标准价 × 0.5。
-/// DeepSeek 定价页（2026-08-20 核对）：峰段 01:00–04:00 与 06:00–10:00 UTC，
-/// 其余时段为谷段、5 折。表内存峰段标准价，与其他模型「存官方标价」一致。
+/// 官方按时段分价的模型：谷段单价 = 表内标准价 × 0.5。
+/// DeepSeek 定价页（2026-08-23 核对）：峰段 01:00–04:00 与 06:00–10:00 UTC、
+/// **且只在周一至周五**，其余时段为谷段、5 折。表内存峰段标准价，与其他模型
+/// 「存官方标价」一致。
 const OFF_PEAK_HALF_PRICE: &[&str] = &["deepseek-v4-flash", "deepseek-v4-pro"];
+
+/// 「周末全天谷段」这条规则生效的时刻：北京时间 2026-08-23 00:00，
+/// 即 2026-08-22 16:00 UTC。**此前的事件不按这条规则重算** —— 否则一次升级
+/// 会把用户看过的历史成本悄悄改成另一个数。
+const WEEKEND_OFF_PEAK_FROM_MS: i64 = 1_787_414_400_000;
 
 /// 订阅制 coding plan 的模型 ID → 同一模型的官方第一方 API 价（估算口径）。
 /// 仅限"同一模型"，且要有官方佐证，不是看名字像就归一：
@@ -213,14 +224,33 @@ fn resolve(model: &str) -> Option<(&str, Pricing)> {
     exact(target).map(|pricing| (target, pricing))
 }
 
-/// DeepSeek 峰段是 01:00–04:00 与 06:00–10:00 UTC（左闭右开），其余为谷段。
+/// DeepSeek 峰段是 01:00–04:00 与 06:00–10:00 UTC（左闭右开）、且只在周一至
+/// 周五；北京时间的周六周日全天谷段。其余时段为谷段。
 fn in_off_peak(canonical: &str, occurred_at_ms: i64) -> bool {
     if !OFF_PEAK_HALF_PRICE.contains(&canonical) {
         return false;
     }
+    if occurred_at_ms >= WEEKEND_OFF_PEAK_FROM_MS && in_beijing_weekend(occurred_at_ms) {
+        return true;
+    }
     // Unix 纪元起点就是 UTC 00:00，UTC 又没有夏令时，整除即可，不必引 chrono。
     let hour = occurred_at_ms.div_euclid(3_600_000).rem_euclid(24);
     !((1..4).contains(&hour) || (6..10).contains(&hour))
+}
+
+/// 这一刻在**北京时间**里是不是周六或周日。
+///
+/// 周几必须按北京时间数：官方那句规则整句写在北京时区里，而北京早 8 小时——
+/// UTC 周五 16:00 起那边已是周六，UTC 周日 16:00 起那边已是周一。按 UTC 数的
+/// 话，每周有 16 小时判反。（现行两个窗口都够不着这 16 小时，所以今天两种
+/// 读法算出来的价一模一样；哪天窗口往后挪一点，按 UTC 数的那份就开始错钱，
+/// 而对着已公布窗口写的断言一条都不会红。）
+///
+/// UTC+8 是固定偏移、无夏令时，加 8 小时再整除即可，同样不必引 chrono。
+fn in_beijing_weekend(occurred_at_ms: i64) -> bool {
+    let day = (occurred_at_ms + 8 * 3_600_000).div_euclid(86_400_000);
+    // 1970-01-01 是星期四，所以 +4 之后 0 = 周日、6 = 周六。
+    matches!((day + 4).rem_euclid(7), 0 | 6)
 }
 
 fn exact(model: &str) -> Option<Pricing> {
@@ -418,6 +448,47 @@ mod tests {
         let glm_peak = price_for("glm-5.3", 1_787_193_000_000).expect("priced");
         let glm_off = price_for("glm-5.3", 1_787_229_000_000).expect("priced");
         assert_eq!(glm_peak.input, glm_off.input);
+    }
+
+    #[test]
+    fn deepseek_weekend_is_off_peak_on_the_beijing_calendar() {
+        // 2026-08-23 07:00 UTC = 北京周日 15:00：钟点落在 06:00–10:00 UTC 这个
+        // 峰段窗口里，但周末全天谷段，所以要出 5 折价。只看钟点的实现在这里
+        // 会给出 1.32，正好高一倍。
+        let sunday = price_for("deepseek-v4-pro", 1_787_468_400_000).expect("priced");
+        assert_eq!(sunday.input, 0.66);
+        assert_eq!(sunday.output, 1.98);
+
+        // 2026-08-24 02:00 UTC = 北京周一 10:00：周末规则不能漏到周一头上，
+        // 这一刻在 01:00–04:00 窗口里，仍是峰段价。
+        assert_eq!(
+            price_for("deepseek-v4-pro", 1_787_536_800_000)
+                .unwrap()
+                .input,
+            1.32,
+        );
+
+        // 生效时刻之前不改写历史：2026-08-22 01:30 UTC = 北京周六 09:30，
+        // 也在窗口里，但那时这条规则还没生效，按当时的口径仍是峰段价。
+        assert_eq!(
+            price_for("deepseek-v4-pro", 1_787_362_200_000)
+                .unwrap()
+                .input,
+            1.32,
+        );
+    }
+
+    #[test]
+    fn beijing_weekend_boundaries_are_counted_on_the_shifted_clock() {
+        // 两种读法唯一分歧的那 16 小时，一头一个：
+        // 2026-08-28 16:00 UTC 是 UTC 的周五，北京已是周六 00:00 → 周末。
+        assert!(in_beijing_weekend(1_787_932_800_000));
+        // 早一分钟还是北京的周五。
+        assert!(!in_beijing_weekend(1_787_932_740_000));
+        // 2026-08-30 16:00 UTC 是 UTC 的周日，北京已是周一 00:00 → 不是周末。
+        assert!(!in_beijing_weekend(1_788_105_600_000));
+        // 早一分钟还是北京的周日。
+        assert!(in_beijing_weekend(1_788_105_540_000));
     }
 
     #[test]
