@@ -43,11 +43,9 @@ tauri-plugin-single-instance = "2"
 libc = "0.2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
-# 置顶悬停监视、透明度和输入穿透都在 GTK 主上下文执行，避免
-# 跨线程同时调用 GDK/X11 导致本地堆损坏。XQueryPointer 使用独立
-# display 连接，避免破坏 GDK 的 error-trap 序列，并保留 HiDPI/多显示器物理坐标精度。
-gtk = "0.18"
-gdkx11 = "0.18"
+# 置顶悬停监视从 Tauri 原始窗口句柄取得 XID，然后只在自有 X11
+# display 连接上轮询指针、设置透明度和输入形状，不跨线程调用 GTK/GDK。
+raw-window-handle = "0.6"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # 菜单栏面板：把 main 窗口换成不抢焦点的 NSPanel。crates.io 上没有 Tauri 2 版本，

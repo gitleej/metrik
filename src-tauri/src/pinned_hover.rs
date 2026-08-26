@@ -5,9 +5,12 @@ use tauri::WebviewWindow;
 #[cfg(target_os = "linux")]
 const HOVER_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(8);
 
-/// One long-lived GTK-main-context hover timer per application process.
-/// Reconfiguring pinning only changes atomics, so every GDK operation remains
-/// serialized on GTK's owning thread.
+/// One long-lived X11 hover monitor per application process.
+///
+/// The worker owns a private X connection and performs every pointer, opacity,
+/// and input-shape operation on that connection. It must not call GTK/GDK:
+/// Tauri's Linux dispatcher can execute callbacks on different Rust workers,
+/// while GDK's X11 error-trap stack is thread-affine.
 #[derive(Default)]
 pub struct Monitor {
     enabled: AtomicBool,
@@ -26,7 +29,6 @@ pub fn configure(
     {
         if !super::linux_supports_global_window_coordinates() {
             monitor.enabled.store(false, Ordering::Release);
-            schedule_native_hover_state(&window, false, 1.0);
             return false;
         }
         monitor
@@ -34,17 +36,15 @@ pub fn configure(
             .store(target_opacity.clamp(0.0, 1.0).to_bits(), Ordering::Release);
 
         if !enabled {
+            // The monitor observes this within one polling interval and restores
+            // both opacity and the default input shape on its own X connection.
             monitor.enabled.store(false, Ordering::Release);
-            schedule_native_hover_state(&window, false, 1.0);
             return false;
         }
-        if !ensure_monitor(window.clone(), Arc::clone(&monitor)) {
+        if !ensure_monitor(&window, Arc::clone(&monitor)) {
             monitor.enabled.store(false, Ordering::Release);
-            schedule_native_hover_state(&window, false, 1.0);
             return false;
         }
-        // Repeated startup assertions are intentionally idempotent: do not
-        // force opacity back to 1 between two identical pinned=true calls.
         monitor.enabled.store(true, Ordering::Release);
         monitor.available.load(Ordering::Acquire)
     }
@@ -57,7 +57,9 @@ pub fn configure(
 }
 
 #[cfg(target_os = "linux")]
-fn ensure_monitor(window: WebviewWindow, monitor: Arc<Monitor>) -> bool {
+fn ensure_monitor(window: &WebviewWindow, monitor: Arc<Monitor>) -> bool {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
     if monitor.available.load(Ordering::Acquire) {
         return true;
     }
@@ -69,64 +71,52 @@ fn ensure_monitor(window: WebviewWindow, monitor: Arc<Monitor>) -> bool {
         return monitor.available.load(Ordering::Acquire);
     }
 
-    let dispatcher = window.clone();
-    let target = window.clone();
-    let timer_monitor = Arc::clone(&monitor);
-    if dispatcher
-        .run_on_main_thread(move || install_hover_timer(target, timer_monitor))
-        .is_err()
-    {
+    let xid = match window.window_handle().map(|handle| handle.as_raw()) {
+        Ok(RawWindowHandle::Xlib(handle)) if handle.window != 0 => handle.window,
+        _ => {
+            monitor.started.store(false, Ordering::Release);
+            return false;
+        }
+    };
+    let Some(native) = X11Window::connect(xid) else {
         monitor.started.store(false, Ordering::Release);
         return false;
+    };
+
+    let thread_monitor = Arc::clone(&monitor);
+    let spawned = std::thread::Builder::new()
+        .name("metrik-pinned-hover".into())
+        .spawn(move || run_hover_monitor(native, thread_monitor))
+        .is_ok();
+    if spawned {
+        monitor.available.store(true, Ordering::Release);
+    } else {
+        monitor.started.store(false, Ordering::Release);
     }
-    monitor.available.store(true, Ordering::Release);
-    true
+    spawned
 }
 
 #[cfg(target_os = "linux")]
-fn install_hover_timer(window: WebviewWindow, monitor: Arc<Monitor>) {
-    use gtk::prelude::*;
-
-    let Ok(gtk_window) = window.gtk_window() else {
-        monitor.available.store(false, Ordering::Release);
-        monitor.started.store(false, Ordering::Release);
-        return;
-    };
-    let Some(pointer) = X11Pointer::connect() else {
-        monitor.available.store(false, Ordering::Release);
-        monitor.started.store(false, Ordering::Release);
-        return;
-    };
-
+fn run_hover_monitor(mut native: X11Window, monitor: Arc<Monitor>) {
     let mut last_inside = false;
     let mut last_target_bits = 1.0_f64.to_bits();
-    gtk::glib::timeout_add_local(HOVER_POLL_INTERVAL, move || {
-        if !monitor.enabled.load(Ordering::Acquire) {
-            if last_inside {
-                apply_gtk_hover_state(&gtk_window, false, 1.0);
-                last_inside = false;
+
+    loop {
+        if monitor.enabled.load(Ordering::Acquire) {
+            let target_bits = monitor.target_opacity_bits.load(Ordering::Acquire);
+            let inside = native.pointer_inside().unwrap_or(last_inside);
+            if inside != last_inside || (inside && target_bits != last_target_bits) {
+                native.apply_hover_state(inside, f64::from_bits(target_bits));
+                last_inside = inside;
+                last_target_bits = target_bits;
             }
-            return gtk::glib::ControlFlow::Continue;
+        } else if last_inside {
+            native.apply_hover_state(false, 1.0);
+            last_inside = false;
+            last_target_bits = 1.0_f64.to_bits();
         }
-
-        if !gtk_window.is_visible() {
-            if last_inside {
-                apply_gtk_hover_state(&gtk_window, false, 1.0);
-                last_inside = false;
-            }
-            return gtk::glib::ControlFlow::Continue;
-        }
-
-        let target_bits = monitor.target_opacity_bits.load(Ordering::Acquire);
-        let inside = gtk_pointer_inside_window(&gtk_window, &pointer).unwrap_or(last_inside);
-
-        if inside != last_inside || (inside && target_bits != last_target_bits) {
-            apply_gtk_hover_state(&gtk_window, inside, f64::from_bits(target_bits));
-            last_inside = inside;
-            last_target_bits = target_bits;
-        }
-        gtk::glib::ControlFlow::Continue
-    });
+        std::thread::sleep(HOVER_POLL_INTERVAL);
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -136,32 +126,9 @@ fn hover_state(inside: bool, target_opacity: f64) -> (f64, bool) {
     } else {
         1.0
     };
-    // Opacity only controls painting: both fade and complete-hide are passive
-    // presentation modes and must let clicks reach the desktop underneath.
-    // The independent XQueryPointer connection still knows when the global
-    // pointer leaves the unchanged bounds and restores hit-testing immediately.
+    // Fade and complete-hide are passive presentation modes. In either case,
+    // clicks must reach the desktop underneath while the pointer is inside.
     (opacity, inside)
-}
-
-#[cfg(target_os = "linux")]
-fn apply_gtk_hover_state(gtk_window: &gtk::ApplicationWindow, inside: bool, target_opacity: f64) {
-    use gtk::prelude::*;
-
-    let (opacity, ignore_cursor_events) = hover_state(inside, target_opacity);
-    let Some(gdk_window) = gtk_window.window() else {
-        return;
-    };
-
-    if ignore_cursor_events {
-        // Hide first, then expose the desktop underneath to input. On restore,
-        // reverse the order so a visible widget never remains click-through.
-        gtk_window.set_opacity(opacity);
-        let empty_region = gtk::cairo::Region::create();
-        gdk_window.input_shape_combine_region(&empty_region, 0, 0);
-    } else {
-        gtk_window.input_shape_combine_region(None);
-        gtk_window.set_opacity(opacity);
-    }
 }
 
 #[cfg(target_os = "linux")]
@@ -173,30 +140,44 @@ fn point_inside_window(pointer_x: i32, pointer_y: i32, width: u32, height: u32) 
 }
 
 #[cfg(target_os = "linux")]
-fn gtk_pointer_inside_window(
-    window: &gtk::ApplicationWindow,
-    pointer: &X11Pointer,
-) -> Option<bool> {
-    use gtk::prelude::*;
-
-    let gdk_window = window.window()?;
-    let x11_window = gdk_window.downcast::<gdkx11::X11Window>().ok()?;
-    pointer.inside_window(x11_window.xid())
-}
-
-#[cfg(target_os = "linux")]
-struct X11Pointer {
+struct X11Window {
     display: *mut xlib::Display,
+    window: xlib::Window,
+    opacity_atom: xlib::Atom,
 }
 
+// The connection is moved once into the monitor and then exclusively used and
+// closed by that thread. No Xlib object from GTK/GDK is shared with it.
 #[cfg(target_os = "linux")]
-impl X11Pointer {
-    fn connect() -> Option<Self> {
+unsafe impl Send for X11Window {}
+
+#[cfg(target_os = "linux")]
+impl X11Window {
+    fn connect(window: xlib::Window) -> Option<Self> {
         let display = unsafe { xlib::XOpenDisplay(std::ptr::null()) };
-        (!display.is_null()).then_some(Self { display })
+        if display.is_null() {
+            return None;
+        }
+
+        let mut event_base = 0;
+        let mut error_base = 0;
+        let shape_available =
+            unsafe { xlib::XShapeQueryExtension(display, &mut event_base, &mut error_base) != 0 };
+        if !shape_available {
+            unsafe { xlib::XCloseDisplay(display) };
+            return None;
+        }
+
+        let opacity_atom =
+            unsafe { xlib::XInternAtom(display, c"_NET_WM_WINDOW_OPACITY".as_ptr(), xlib::FALSE) };
+        Some(Self {
+            display,
+            window,
+            opacity_atom,
+        })
     }
 
-    fn inside_window(&self, window: xlib::Window) -> Option<bool> {
+    fn pointer_inside(&self) -> Option<bool> {
         let mut root_return = 0;
         let mut child_return = 0;
         let mut root_x = 0;
@@ -207,7 +188,7 @@ impl X11Pointer {
         let success = unsafe {
             xlib::XQueryPointer(
                 self.display,
-                window,
+                self.window,
                 &mut root_return,
                 &mut child_return,
                 &mut root_x,
@@ -231,7 +212,7 @@ impl X11Pointer {
         let geometry_success = unsafe {
             xlib::XGetGeometry(
                 self.display,
-                window,
+                self.window,
                 &mut geometry_root,
                 &mut x,
                 &mut y,
@@ -243,11 +224,58 @@ impl X11Pointer {
         };
         (geometry_success != 0).then_some(point_inside_window(window_x, window_y, width, height))
     }
+
+    fn apply_hover_state(&mut self, inside: bool, target_opacity: f64) {
+        let (opacity, ignore_cursor_events) = hover_state(inside, target_opacity);
+        unsafe {
+            if opacity >= 1.0 {
+                xlib::XDeleteProperty(self.display, self.window, self.opacity_atom);
+            } else {
+                let opacity_value = (opacity * f64::from(u32::MAX)).round() as u64;
+                xlib::XChangeProperty(
+                    self.display,
+                    self.window,
+                    self.opacity_atom,
+                    xlib::XA_CARDINAL,
+                    32,
+                    xlib::PROP_MODE_REPLACE,
+                    (&opacity_value as *const u64).cast(),
+                    1,
+                );
+            }
+
+            if ignore_cursor_events {
+                xlib::XShapeCombineRectangles(
+                    self.display,
+                    self.window,
+                    xlib::SHAPE_INPUT,
+                    0,
+                    0,
+                    std::ptr::null_mut(),
+                    0,
+                    xlib::SHAPE_SET,
+                    xlib::UNSORTED,
+                );
+            } else {
+                xlib::XShapeCombineMask(
+                    self.display,
+                    self.window,
+                    xlib::SHAPE_INPUT,
+                    0,
+                    0,
+                    xlib::NONE,
+                    xlib::SHAPE_SET,
+                );
+            }
+            xlib::XFlush(self.display);
+        }
+    }
 }
 
 #[cfg(target_os = "linux")]
-impl Drop for X11Pointer {
+impl Drop for X11Window {
     fn drop(&mut self) {
+        self.apply_hover_state(false, 1.0);
         unsafe {
             xlib::XCloseDisplay(self.display);
         }
@@ -256,7 +284,7 @@ impl Drop for X11Pointer {
 
 #[cfg(target_os = "linux")]
 mod xlib {
-    use std::ffi::{c_char, c_int, c_uint, c_ulong};
+    use std::ffi::{c_char, c_int, c_uchar, c_uint, c_ulong};
 
     #[repr(C)]
     pub struct Display {
@@ -264,10 +292,33 @@ mod xlib {
     }
 
     pub type Window = c_ulong;
+    pub type Atom = c_ulong;
+    pub type Pixmap = c_ulong;
+
+    pub const FALSE: c_int = 0;
+    pub const NONE: Pixmap = 0;
+    pub const XA_CARDINAL: Atom = 6;
+    pub const PROP_MODE_REPLACE: c_int = 0;
+    pub const SHAPE_INPUT: c_int = 2;
+    pub const SHAPE_SET: c_int = 0;
+    pub const UNSORTED: c_int = 0;
+
+    #[repr(C)]
+    pub struct XRectangle {
+        pub x: i16,
+        pub y: i16,
+        pub width: u16,
+        pub height: u16,
+    }
 
     #[link(name = "X11")]
     extern "C" {
         pub fn XOpenDisplay(display_name: *const c_char) -> *mut Display;
+        pub fn XInternAtom(
+            display: *mut Display,
+            name: *const c_char,
+            only_if_exists: c_int,
+        ) -> Atom;
         pub fn XQueryPointer(
             display: *mut Display,
             window: Window,
@@ -290,19 +341,49 @@ mod xlib {
             border_width_return: *mut c_uint,
             depth_return: *mut c_uint,
         ) -> c_int;
+        pub fn XChangeProperty(
+            display: *mut Display,
+            window: Window,
+            property: Atom,
+            property_type: Atom,
+            format: c_int,
+            mode: c_int,
+            data: *const c_uchar,
+            element_count: c_int,
+        ) -> c_int;
+        pub fn XDeleteProperty(display: *mut Display, window: Window, property: Atom) -> c_int;
+        pub fn XFlush(display: *mut Display) -> c_int;
         pub fn XCloseDisplay(display: *mut Display) -> c_int;
     }
-}
 
-#[cfg(target_os = "linux")]
-fn schedule_native_hover_state(window: &WebviewWindow, inside: bool, opacity: f64) {
-    let dispatcher = window.clone();
-    let target = window.clone();
-    let _ = dispatcher.run_on_main_thread(move || {
-        if let Ok(gtk_window) = target.gtk_window() {
-            apply_gtk_hover_state(&gtk_window, inside, opacity);
-        }
-    });
+    #[link(name = "Xext")]
+    extern "C" {
+        pub fn XShapeQueryExtension(
+            display: *mut Display,
+            event_base_return: *mut c_int,
+            error_base_return: *mut c_int,
+        ) -> c_int;
+        pub fn XShapeCombineRectangles(
+            display: *mut Display,
+            window: Window,
+            dest_kind: c_int,
+            x_offset: c_int,
+            y_offset: c_int,
+            rectangles: *mut XRectangle,
+            rectangle_count: c_int,
+            operation: c_int,
+            ordering: c_int,
+        );
+        pub fn XShapeCombineMask(
+            display: *mut Display,
+            window: Window,
+            dest_kind: c_int,
+            x_offset: c_int,
+            y_offset: c_int,
+            source: Pixmap,
+            operation: c_int,
+        );
+    }
 }
 
 #[cfg(all(test, target_os = "linux"))]
