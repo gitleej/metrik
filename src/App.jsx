@@ -1221,6 +1221,7 @@ function StripBar({
   // 透明档的真实桌面背景变化很大，控制图标加粗以稳定识别。
   const buttonWeight = transparent && glassTint === "clear" ? "bold" : "regular";
   const shellRef = useRef(null);
+  const lastLinuxStripStructureRef = useRef(null);
   const OrientationIcon = vertical ? ArrowsLeftRight : ArrowsDownUp;
   // 控制按钮不再常驻：四个 26px 的槽在竖条上要吃掉 130px，比三个格子还高。
   // 改成按需就地展开——点状态灯位上浮出的 … 把它们放出来，条身随之变长，
@@ -1245,6 +1246,15 @@ function StripBar({
   // 乘缩放系数与 DPI。任何字体/DPI/缩放/更新点组合都收敛，不再裁按钮。
   useLayoutEffect(() => {
     if (IS_MAC || !isDesktop()) return undefined;
+    // Linux 的 quota 文本更新（尤其重置时 0% -> 100%）不能驱动原生窗口
+    // 几何变化。Tauri/GTK 的窗口操作可能与 X11 悬停线程并发，反复从
+    // ResizeObserver 调用会破坏 GDK 的线程局部 error-trap。胶囊尺寸只取决于
+    // 格数、方向和控制区是否展开，因此 Linux 仅在这些结构变化时测量一次。
+    const linuxStructure = `${orientation}:${cells.length}:${controlsOpen ? 1 : 0}`;
+    if (IS_LINUX) {
+      if (lastLinuxStripStructureRef.current === linuxStructure) return undefined;
+      lastLinuxStripStructureRef.current = linuxStructure;
+    }
     const shell = shellRef.current;
     if (!shell) return undefined;
     let timer = null;
@@ -1290,6 +1300,11 @@ function StripBar({
       timer = window.setTimeout(fit, 60);
     };
     schedule();
+    if (IS_LINUX) {
+      return () => {
+        window.clearTimeout(timer);
+      };
+    }
     // webfont 换字可能发生在 60ms 首次 fit 之后（没有触发器补测就会留下
     // 测量空窗，竖条底部按钮被裁）：字体就绪补测一次，再兜底一个 450ms
     // 的二次测量。
@@ -1496,6 +1511,7 @@ function CompactWidget({
   const comparisonIsLower = snapshot.comparisonPercent < -0.5;
   const ComparisonArrow = comparisonIsLower ? ArrowDown : ArrowUp;
   const shellRef = useRef(null);
+  const lastLinuxCompactStructureRef = useRef(null);
   // 宽度失配自愈的节流时间戳：失配不消失时观察器会一直触发，没有节流会
   // 每 120ms 重断言一次尺寸；距上次不足 2s 不再重复自愈（失配消失即止），
   // 替代旧的 3 次终身上限——上限烧完后失配就永远留着了。跨屏/DPI 变化时
@@ -1522,6 +1538,13 @@ function CompactWidget({
   //    ResizeObserver 感知不到，所以每次渲染后再主动复核一次。
   useEffect(() => {
     if (!isDesktop()) return undefined;
+    // Linux 小窗的高度只随 Agent 行结构变化。额度重置只会改变行内文字，
+    // 不应重新进入 Tauri/GTK 的原生 resize 路径。
+    const linuxStructure = widgetAgents.join("\u0000");
+    if (IS_LINUX) {
+      if (lastLinuxCompactStructureRef.current === linuxStructure) return undefined;
+      lastLinuxCompactStructureRef.current = linuxStructure;
+    }
     const shell = shellRef.current;
     if (!shell || typeof ResizeObserver === "undefined") return undefined;
     let timer = null;
@@ -1532,7 +1555,7 @@ function CompactWidget({
       // 变形独有的问题；macOS 面板没有 zoom，不会失配。
       const widthDesynced =
         shell.scrollWidth > shell.clientWidth + 1 || rect.width > window.innerWidth + 1;
-      if (!IS_MAC && widthDesynced) {
+      if (IS_WINDOWS && widthDesynced) {
         const now = Date.now();
         if (now - lastDesyncHealRef.current < 2000) return;
         lastDesyncHealRef.current = now;
@@ -1579,8 +1602,13 @@ function CompactWidget({
       timer = window.setTimeout(check, 120);
     };
     const observer = new ResizeObserver(schedule);
-    observer.observe(shell);
     schedule();
+    if (IS_LINUX) {
+      return () => {
+        window.clearTimeout(timer);
+      };
+    }
+    observer.observe(shell);
     return () => {
       window.clearTimeout(timer);
       observer.disconnect();
